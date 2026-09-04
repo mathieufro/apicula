@@ -141,7 +141,7 @@ def select_shapes(ide_version: str) -> tuple[str, dict[str, int]]:
     version = _version_tuple(ide_version)[:3]
     if version >= (1, 9, 12):
         name = "v1_9_12plus"
-    elif ide_version and not ide_version.startswith("1.9.10."):
+    elif version >= (1, 9, 11):
         name = "v1_9_11plus"
     else:
         name = DEFAULT_SHAPE_SET

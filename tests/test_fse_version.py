@@ -177,3 +177,34 @@ def test_fse_version_first_desync_offset_passed(monkeypatch):
 
 
 TABLE_SHAPES_V1_9_10 = fse_parser.TABLE_SHAPES['v1_9_10']
+
+
+# --- P0.T13c: select_shapes must compare version tuples, not prefix-match ---
+
+@pytest.mark.parametrize('version,shape_set', [
+    ('1.8.06', 'v1_9_10'),
+    ('1.9.9', 'v1_9_10'),
+    ('1.9.10.03', 'v1_9_10'),
+    ('1.9.11.03', 'v1_9_11plus'),
+    ('1.9.12.03', 'v1_9_12plus'),
+    ('1.9.13', 'v1_9_12plus'),
+])
+def test_fse_version_select_shapes_ordering(version, shape_set):
+    """Pre-1.9.11 versions (e.g. 1.9.9, 1.8.06) must not fall through to
+    v1_9_11plus just because they don't literally start with "1.9.10.".
+    """
+    name, shapes = fse_parser.select_shapes(version)
+    assert name == shape_set
+    assert shapes is fse_parser.TABLE_SHAPES[shape_set]
+
+
+def test_fse_version_select_shapes_four_part_vs_three_part_threshold():
+    """A 4-part version compares correctly against the 3-part thresholds."""
+    # 1.9.11.03 has a non-empty 4th field but is still >= (1, 9, 11)
+    assert fse_parser._version_tuple('1.9.11.03') == (1, 9, 11, 3)
+    name, _shapes = fse_parser.select_shapes('1.9.11.03')
+    assert name == 'v1_9_11plus'
+    # a 4-part version just below the 1.9.11 threshold stays on the old set
+    assert fse_parser._version_tuple('1.9.10.99') == (1, 9, 10, 99)
+    name, _shapes = fse_parser.select_shapes('1.9.10.99')
+    assert name == 'v1_9_10'

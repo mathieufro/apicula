@@ -2233,8 +2233,8 @@ def fse_create_adc(dev, device, fse, dat):
         return
     if not _adc_description_present(dat):
         print(f"warning: {device}: the device data of {_gowin_install_label()} "
-              "carries no ADC description (Adc25kIns/Adc25kOuts are absent or "
-              "all -1); skipping ADC bel creation.", file=sys.stderr)
+              "carries no ADC description (Adc25kIns is absent or all -1); "
+              "skipping ADC bel creation.", file=sys.stderr)
         return
     row, col = 0, dev.cols - 1
     dev[row, col].bels['ADC'] = Bel()
