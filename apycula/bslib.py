@@ -89,11 +89,19 @@ def read_bitstream(fname):
                 if not preamble and ba[0] != 0xd2: # SPI address
                     #print("spi address", ba)
                     crcdat.extend(ba)
-                if not preamble and ba[0] == 0x3b: # frame count
+                # Header/footer command words are 8 bytes.  Without the
+                # length guard a *wide* data line whose first byte happens to
+                # be 0x3b (frame count) or 0x06 (device id) is read as a
+                # command: on a 5A bitstream carrying BSRAM initialisation
+                # slots that mis-set the frame count and pulled 507 slot lines
+                # into the fuse bitmap, or aborted the read with "Unsupported
+                # device" (measured on examples/gw5a uart-message-tangmega138k,
+                # 2026-09-04).
+                if not preamble and len(ba) == 4 and ba[0] == 0x3b: # frame count
                     frames = int.from_bytes(ba[2:], 'big')
                     #print(f"frames:{frames}");
                     is_hdr = False
-                if not preamble and ba[0] == 0x06: # device ID
+                if not preamble and len(ba) == 8 and ba[0] == 0x06: # device ID
                     if ba == b'\x06\x00\x00\x00\x11\x00\x58\x1b':     # GW1N-9
                         padding = 4
                         compress_padding = 44 # <-- when using compression, the width of one row in bits must be a multiple of 64
