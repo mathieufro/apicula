@@ -1,8 +1,9 @@
 """P0.T11 — version detection and the named `.fse` parser error.
 
-`pytest -k "fse_version"` must select exactly the two tests in this module, so no
+`pytest -k "fse_version"` must select exactly the tests in this module, so no
 other test may live here (the no-regression suite is
-`tests/test_fse_shapes_regression.py`).
+`tests/test_fse_shapes_regression.py`). P0.T12 added the two longfuse
+width tests below.
 """
 import io
 import os
@@ -45,19 +46,28 @@ def _mutated_longfuse_stream():
 # The pipeline records which of the two installed editions is the oracle of
 # record. `P0.T14`'s conftest will own this lookup; until it lands the test
 # resolves the install itself so `pytest -k fse_version` needs no environment.
-SELECTED = ('/Users/alex/fine-line/.atelier/pipelines/'
-            '2026-09-03-open-toolchain-gw5ast-7e84/evidence/_runs/gowinhome.selected')
+# P0.T12: the live pipeline tree is the umbrella *worktree* copy; the main
+# checkout carries only `impl/`. Both are tried, worktree first.
+SELECTED = (
+    '/Users/alex/fine-line/.atelier/worktrees/'
+    '2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/'
+    '2026-09-03-open-toolchain-gw5ast-7e84/evidence/_runs/gowinhome.selected',
+    '/Users/alex/fine-line/.atelier/pipelines/'
+    '2026-09-03-open-toolchain-gw5ast-7e84/evidence/_runs/gowinhome.selected',
+)
 
 
 def _selected_gowinhome():
     gowinhome = os.environ.get('GOWINHOME')
     if gowinhome:
         return gowinhome
-    try:
-        with open(SELECTED) as fh:
-            return fh.read().strip()
-    except OSError:
-        return ''
+    for path in SELECTED:
+        try:
+            with open(path) as fh:
+                return fh.read().strip()
+        except OSError:
+            continue
+    return ''
 
 
 def test_fse_version_detect_names_installed_ide():
@@ -83,3 +93,81 @@ def test_fse_version_mismatch_message():
     assert 'table=longfuse' in msg, msg
     assert 'expected_row_width=17' in msg, msg
     assert 'found_row_width=14' in msg, msg
+
+
+# --- P0.T12: the longfuse 17 -> 14 u16 desync -------------------------------
+
+FSE_REL = 'IDE/share/device/GW5AST-138C/GW5AST-138C.fse'
+# The two offsets the parser used to die at, Education and Standard (F13).
+FIRST_DESYNC_EDU = 0xe30db0
+FIRST_DESYNC_STD = 0xe30fc2
+# longfuse subtypes that are 14 u16 wide from IDE 1.9.11 on.
+NARROW_LONGFUSE = (0x35, 0x36)
+
+
+def _selected_fse():
+    gowinhome = _selected_gowinhome()
+    if not gowinhome:
+        return None
+    path = os.path.join(gowinhome, FSE_REL)
+    return path if os.path.isfile(path) else None
+
+
+def _parse_selected_fse(monkeypatch):
+    """Parse the installed `.fse`, recording every longfuse width decision.
+
+    Returns (tiles, end_offset, [(typ, data_start, rows, derived, used)]).
+    """
+    path = _selected_fse()
+    if path is None:
+        pytest.skip('no GW5AST-138C.fse in the selected Gowin install')
+    seen = []
+    real = fse_parser._confirm_row_width
+
+    def spy(f, rows, data_start, expected, table, ide_version, shape_set):
+        derived = fse_parser.derive_row_width(f, rows, data_start)
+        used = real(f, rows, data_start, expected, table,
+                    ide_version, shape_set)
+        seen.append((None, data_start, rows, derived, used))
+        return used
+
+    monkeypatch.setattr(fse_parser, '_confirm_row_width', spy)
+    with open(path, 'rb') as fh:
+        tiles = fse_parser.read_fse(fh, 'GW5AST-138C')
+        end = fh.tell()
+    return tiles, end, seen
+
+
+def test_fse_version_longfuse_width_is_derived(monkeypatch):
+    """The narrow longfuse width comes from the file, not from a constant."""
+    _ver, shape_set, shapes = fse_parser._active_shapes()
+    assert shape_set == 'v1_9_11plus', shape_set
+    # the flat descriptor is still the historical 17; 14 is a subtype override
+    assert shapes['longfuse'] == 17, shapes['longfuse']
+    for typ in NARROW_LONGFUSE:
+        assert fse_parser.row_width(shape_set, shapes, 'longfuse', typ) == 14
+        assert fse_parser.row_width('v1_9_10', TABLE_SHAPES_V1_9_10,
+                                    'longfuse', typ) == 17
+
+    _tiles, _end, seen = _parse_selected_fse(monkeypatch)
+    assert seen, 'no longfuse table was read at all'
+    narrow = [row for row in seen if row[4] == 14]
+    assert len(narrow) >= 1, [(hex(r[1]), r[3], r[4]) for r in seen]
+    # at least one 14-wide read is confirmed by the file's own layout (a table
+    # that is the last of its tile is followed by a tile type, not a table
+    # type, so its probe is legitimately inconclusive)
+    confirmed = [r for r in narrow if r[3] and r[3][0] == 14]
+    assert confirmed, [(hex(r[1]), r[3], r[4]) for r in narrow]
+    # and no read used a width the data positively contradicts
+    for _typ, data_start, _rows, derived, used in seen:
+        assert not derived or used in derived, (hex(data_start), derived, used)
+
+
+def test_fse_version_first_desync_offset_passed(monkeypatch):
+    """Parsing runs past the historical desync without an `FseShapeError`."""
+    tiles, end, _seen = _parse_selected_fse(monkeypatch)
+    assert tiles
+    assert end > FIRST_DESYNC_STD > FIRST_DESYNC_EDU, hex(end)
+
+
+TABLE_SHAPES_V1_9_10 = fse_parser.TABLE_SHAPES['v1_9_10']

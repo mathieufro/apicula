@@ -26,11 +26,9 @@ class FseShapeError(ValueError):
 # `v1_9_10` is the historical upstream set, transcribed verbatim from the
 # width literals that used to sit inline in the dispatch below.
 #
-# NOTE(P0.T12): `v1_9_11plus` is intentionally identical to `v1_9_10` for now.
-# The measured 1.9.11/1.9.12 longfuse desync is 17 -> 14 u16 per row, but that
-# width must be discriminated from the file's own data (P0.T12); hard-coding 14
-# here would silently change GW1N*/GW2A* parsing on a 1.9.11+ install, which
-# this task must not do. P0.T11 ships the structure and the diagnostic only.
+# `v1_9_11plus` keeps every flat width of `v1_9_10`; the 1.9.11+ difference is
+# not a flat width at all but a per-subtype one, recorded in
+# `TABLE_SUBTYPE_SHAPES` below (P0.T12).
 _SHAPES_V1_9_10 = {
     "fuse": 150,
     "fuse_5series": 512,
@@ -50,6 +48,19 @@ _SHAPES_V1_9_10 = {
 TABLE_SHAPES: dict[str, dict[str, int]] = {
     "v1_9_10": dict(_SHAPES_V1_9_10),
     "v1_9_11plus": dict(_SHAPES_V1_9_10),
+}
+
+# Per-shape-set, per-table-*subtype* row widths, consulted before the flat width
+# above (P0.T12). A `.fse` row width is not always a property of the table kind
+# alone: from Gowin IDE 1.9.11 the longfuse subtypes 0x35/0x36 carry 14 u16 per
+# row while every other longfuse subtype (0x12, 0x13, 0x3a) still carries 17.
+# Measured on `GW5AST-138C.fse` from both installed editions -- see
+# `$PIPE/evidence/_runs/fse-desync.md` for the per-table offsets and row counts.
+# A subtype absent here falls back to `TABLE_SHAPES[shape_set][table]`, so
+# `v1_9_10` (empty) parses exactly as it did before.
+TABLE_SUBTYPE_SHAPES: dict[str, dict[str, dict[int, int]]] = {
+    "v1_9_10": {},
+    "v1_9_11plus": {"longfuse": {0x35: 14, 0x36: 14}},
 }
 
 DEFAULT_SHAPE_SET = "v1_9_10"
@@ -194,6 +205,63 @@ def _diagnose_desync(f, prev):
     return width, found, typn
 
 
+def row_width(shape_set, shapes, table, typ=None):
+    """Row width for `table`, honouring a per-subtype override for `typ`."""
+    if typ is not None:
+        override = TABLE_SUBTYPE_SHAPES.get(shape_set, {}).get(table, {})
+        if typ in override:
+            return override[typ]
+    return shapes[table]
+
+
+def derive_row_width(f, rows, data_start, limit=4):
+    """Row widths the file's own layout admits for the table at `data_start`.
+
+    A table of `rows` rows read at width `w` leaves the reader on the next
+    table's 4-byte type tag, so the widths that land on a *known* tag are the
+    candidates the data itself supports. Narrow to wide; read-only, the file
+    position is always restored. An empty list means the probe is inconclusive
+    (the table is the last of its tile, so the following tag is a tile type),
+    never that the width is wrong.
+    """
+    if not rows or not f.seekable():
+        return []
+    here = f.tell()
+    found = []
+    try:
+        for cand in _PROBE_WIDTHS:
+            f.seek(data_start + rows * cand * 2)
+            probe = f.read(4)
+            if len(probe) < 4:
+                break
+            if int.from_bytes(probe, 'little', signed=True) in _KNOWN_TABLE_TYPES:
+                found.append(cand)
+                if len(found) >= limit:
+                    break
+    except (OSError, ValueError):
+        return []
+    finally:
+        f.seek(here)
+    return found
+
+
+def _confirm_row_width(f, rows, data_start, expected, table,
+                       ide_version, shape_set):
+    """`expected`, once the file's own layout has been asked to agree with it.
+
+    Raises `FseShapeError` naming both widths when the data positively
+    contradicts the shape descriptor, instead of letting the read run on and
+    desync at some unrelated offset several tables later.
+    """
+    found = derive_row_width(f, rows, data_start)
+    if not found or expected in found:
+        return expected
+    raise FseShapeError(
+        f"{table} row width mismatch at {hex(data_start)}: "
+        f"ide_version={ide_version} shape_set={shape_set} table={table} "
+        f"expected_row_width={expected} found_row_width={found[0]}")
+
+
 def read_one_file(f, tile_type, device, shape_ctx=None):
     if shape_ctx is None:
         shape_ctx = _active_shapes()
@@ -277,7 +345,9 @@ def read_one_file(f, tile_type, device, shape_ctx=None):
             t = read_table(f, size, width, 2)
         elif typ in {0x12, 0x13, 0x35, 0x36, 0x3a}:
             typn = "longfuse"
-            width = shapes["longfuse"]
+            width = row_width(shape_set, shapes, "longfuse", typ)
+            width = _confirm_row_width(f, size, data_start, width, typn,
+                                       ide_version, shape_set)
             t = read_table(f, size, width, 2)
         elif typ in {0x17, 0x18, 0x25, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f}:
             typn = "longval"
