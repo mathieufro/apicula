@@ -3,6 +3,118 @@ import os
 from pathlib import Path
 from dataclasses import dataclass
 
+from apycula.fse_parser import FseVersionError, detect_ide_version
+
+
+class DatLayoutError(ValueError):
+    """A `.dat` header did not match the selected layout descriptor.
+
+    Raised instead of letting a misread `partType` silently skip
+    `read_5Astuff()` (which surfaced far away as
+    ``AttributeError: 'Datfile' object has no attribute 'gw5aStuff'``), so the
+    message names the detected IDE version, the layout set in use, the offset
+    read and what was found there.
+    """
+
+
+# Every absolute offset below 0x7b4a4 is identical in every shipped `.dat`
+# (the asserts in read_primitives/read_portmap/read_io would fire otherwise).
+# 0x7b4a4 is where the per-IDE-version drift starts, so it is the one anchor.
+DAT_HEADER_ANCHOR = 0x07b4a4
+
+# Per-IDE-version `.dat` header descriptors (same discipline as
+# `fse_parser.TABLE_SHAPES`): keyed by a *layout-set name*, never by a version
+# string, so a release that keeps the layout reuses an existing set.
+#
+# `v1_9_11minus` is the historical upstream layout: the anchor holds
+#     [partType u16][pad u16][<5-series table block> ...]
+#
+# `v1_9_12plus` is Gowin IDE 1.9.12.03. The anchor gained a three-u16 field in
+# front of `partType` and lost the pad word behind it:
+#     [new u16 x3][partType u16][<5-series table block> ...]
+# so `partType` sits 6 bytes later while the table block starts only 4 bytes
+# later -- which is exactly the +4 total size delta measured on every `.dat`
+# shipped in both editions. Reading `partType` at the old anchor yields 0xffff
+# on GW5A* (no `gw5aStuff`) and, worse, a *plausible* wrong value on some
+# GW1N* parts, so the offset must be selected, not guessed.
+DAT_HEADER_SHAPES: dict[str, dict[str, int]] = {
+    "v1_9_11minus": {"pre_words": 0, "rs_table_delta": 4},
+    "v1_9_12plus": {"pre_words": 3, "rs_table_delta": 2},
+}
+
+DEFAULT_DAT_SHAPE_SET = "v1_9_11minus"
+
+# The `partType` values the parser dispatches on. A file whose selected offset
+# holds anything else is positively contradicting the layout.
+KNOWN_PART_TYPES = frozenset({0, 1, 2, 4, 10})
+
+# Offset of the TopHiq/TopViq/BotHiq/BotViq quad inside the 5-series table
+# block; used to confirm the block start against the grid the same file
+# already yielded.
+RS_TABLE_IQ_OFFSET = 0x24be0
+
+
+def _version_tuple(ide_version: str) -> tuple[int, ...]:
+    parts = []
+    for field in (ide_version or "").split("."):
+        if not field.isdigit():
+            break
+        parts.append(int(field))
+    return tuple(parts)
+
+
+def select_dat_header(ide_version: str) -> tuple[str, dict[str, int]]:
+    """Map a detected IDE version onto (layout set name, header descriptor)."""
+    if _version_tuple(ide_version)[:3] >= (1, 9, 12):
+        name = "v1_9_12plus"
+    else:
+        name = DEFAULT_DAT_SHAPE_SET
+    return name, DAT_HEADER_SHAPES[name]
+
+
+def _active_dat_header() -> tuple[str, str, dict[str, int]]:
+    """(ide_version, layout set name, descriptor) for the current environment.
+
+    Version detection is best-effort exactly as in `fse_parser._active_shapes`:
+    a missing or unreadable install degrades to the historical layout and
+    reports ``unknown`` in any diagnostic.
+    """
+    try:
+        ide_version = detect_ide_version(os.environ.get("GOWINHOME", ""))
+    except FseVersionError:
+        ide_version = "unknown"
+    name, shape = select_dat_header(ide_version)
+    return ide_version, name, shape
+
+
+def part_type_offset(shape: dict[str, int]) -> int:
+    return DAT_HEADER_ANCHOR + 2 * shape["pre_words"]
+
+
+def read_part_type_at(data: bytes, offset: int) -> int:
+    """`partType` as the historical code read it.
+
+    Short `.dat` files (the 505 000-byte GW1N/GW2A ones) stop well before the
+    anchor; `int.from_bytes(b"")` is 0, i.e. partType 0, and that is the
+    behaviour every pre-GW5 device has always relied on.
+    """
+    return int.from_bytes(data[offset:offset + 2], "little")
+
+
+# `partType` values the parser dispatches on. Only 2 and 10 select the
+# 5-series path, i.e. only they cost `gw5aStuff` if the offset is wrong.
+KNOWN_PART_TYPES = frozenset({0, 1, 2, 4, 10})
+FIVE_SERIES_PART_TYPES = frozenset({2, 10})
+
+
+def part_types_by_layout(data: bytes) -> dict[str, int]:
+    """The `partType` each known layout set would read out of this file."""
+    return {
+        name: read_part_type_at(data, part_type_offset(shape))
+        for name, shape in DAT_HEADER_SHAPES.items()
+    }
+
+
 @dataclass
 class Primitive:
     name: str
@@ -24,8 +136,16 @@ class Grid:
 class Datfile:
     def __init__(self, path: Path):
         self.data = path.read_bytes()
-        self._cur = 0x07b4a4
+
+        (self.ide_version, self.dat_shape_set,
+         self._dat_header) = _active_dat_header()
+        self._part_type_offset = part_type_offset(self._dat_header)
+        self._rs_table_offset = self._part_type_offset + self._dat_header["rs_table_delta"]
+        self._confirm_dat_header(path)
+
+        self._cur = self._part_type_offset
         partType = self.read_u16()
+        self.part_type = partType
 
         self.grid = self.read_grid()
         self.primitives = self.read_primitives()
@@ -43,6 +163,7 @@ class Datfile:
             # parse yet — base grid/IO/logic parse identically. See docs/02.
             self.compat_dict.update(self.read_something())
         elif partType == 2 or partType == 10:  # 5 Series
+            self._confirm_rs_table(path)
             self.gw5aStuff = self.read_5Astuff()
             self.compat_dict.update(self.read_something())
             self.compat_dict.update(self.read_something5A())
@@ -53,6 +174,69 @@ class Datfile:
         self.compat_dict.update(self.read_io())
         self.cmux_ins: dict[int, list[int]] = self.read_io()['CmuxIns']
 
+
+    def _confirm_dat_header(self, path):
+        """Fail loudly when the selected layout would silently drop 5A data.
+
+        The offset is chosen by IDE version, not guessed, so this is a
+        confirmation and not a search. It stays deliberately narrow: upstream
+        tolerated a `partType` it has no branch for (GW1NS-4C declares 0x20)
+        and that tolerance is preserved. What is *not* tolerated is the T13
+        failure -- the selected offset yielding a value the parser cannot
+        dispatch on while another known layout reads a 5-series type there,
+        because that silently skips `read_5Astuff()` and only surfaces much
+        later as ``AttributeError: ... has no attribute 'gw5aStuff'``.
+        """
+        by_layout = part_types_by_layout(self.data)
+        found = by_layout[self.dat_shape_set]
+        if found in KNOWN_PART_TYPES:
+            return
+        five_series = sorted(
+            name for name, pt in by_layout.items()
+            if name != self.dat_shape_set and pt in FIVE_SERIES_PART_TYPES)
+        if not five_series:
+            return
+        raise DatLayoutError(
+            f"{path}: .dat header layout drift. Detected Gowin IDE version "
+            f"{self.ide_version!r} selects layout set {self.dat_shape_set!r}, "
+            f"whose partType offset 0x{self._part_type_offset:x} holds "
+            f"0x{found:x}, which is not a known partType "
+            f"({sorted(KNOWN_PART_TYPES)}), while layout set(s) "
+            f"{five_series} read a 5-series partType there "
+            f"({ {n: by_layout[n] for n in five_series} }). Parsing on the "
+            f"selected layout would drop gw5aStuff. partType by layout: "
+            f"{by_layout}; file size 0x{len(self.data):x}.")
+
+    def _confirm_rs_table(self, path):
+        """Confirm the 5-series table block start against this file's grid.
+
+        The block opens (at +0x24be0) with the TopHiq/TopViq/BotHiq/BotViq
+        quad: a row index, a column index, a row index, a column index into
+        the grid `read_grid()` just produced from offsets *below* the drifting
+        anchor. A block start that is off by even one word puts unrelated
+        table data there, so a quad outside the grid is positive evidence
+        against the offset rather than a silent misparse 100 kB later.
+        """
+        base = self._rs_table_offset + RS_TABLE_IQ_OFFSET
+        if base + 8 > len(self.data):
+            raise DatLayoutError(
+                f"{path}: .dat 5-series table block would start at "
+                f"0x{self._rs_table_offset:x} (layout set "
+                f"{self.dat_shape_set!r}, IDE version {self.ide_version!r}) "
+                f"but the file ends at 0x{len(self.data):x}.")
+        quad = [int.from_bytes(self.data[base + 2 * i: base + 2 * i + 2],
+                               "little") for i in range(4)]
+        top_hiq, top_viq, bot_hiq, bot_viq = quad
+        rows, cols = self.grid.num_rows, self.grid.num_cols
+        if not (top_hiq < rows and bot_hiq < rows
+                and top_viq < cols and bot_viq < cols):
+            raise DatLayoutError(
+                f"{path}: .dat 5-series table block start 0x"
+                f"{self._rs_table_offset:x} is contradicted by the file's own "
+                f"grid. Layout set {self.dat_shape_set!r} (IDE version "
+                f"{self.ide_version!r}) puts TopHiq/TopViq/BotHiq/BotViq = "
+                f"{quad} at 0x{base:x}, but the grid is {rows} rows x {cols} "
+                f"cols, so hiq must be < {rows} and viq < {cols}.")
 
     def read_u8(self):
         v = self.data[self._cur]
@@ -272,7 +456,7 @@ class Datfile:
         return ret
 
     def read_5Astuff(self) -> dict:
-        RSTable5ATOffset = 0x7b4a8
+        RSTable5ATOffset = self._rs_table_offset
         ret = { }
 
         #These are set (not read from file), but can't find reference
@@ -598,7 +782,7 @@ class Datfile:
         return ret
 
     def read_something5A(self):
-        RSTable5ATOffset = 0x7b4a8
+        RSTable5ATOffset = self._rs_table_offset
         ret = {
             "Dqs": {},
             "Cfg5": {},
