@@ -36,22 +36,20 @@ DS_C1I0_OVER_C2I1 = 1.25
 # The measured scaling of chunk 2 relative to chunk 0.
 CHUNK2_OVER_CHUNK0 = 0.862
 
-_PIPE_CANDIDATES = (
-    '/Users/alex/fine-line/.atelier/worktrees/'
-    '2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/'
-    '2026-09-03-open-toolchain-gw5ast-7e84',
-    '/Users/alex/fine-line/.atelier/pipelines/'
-    '2026-09-03-open-toolchain-gw5ast-7e84',
-)
-_CHUNKS_MD = os.path.join('evidence', 'timing-l0-cfu', 'chunks.md')
+from fuzz.gw5ast138c.harness import evidence
+
+_CHUNKS_MD = os.path.join('timing-l0-cfu', 'chunks.md')
 
 
 def _chunks_md():
-    for pipe in _PIPE_CANDIDATES:
-        path = os.path.join(pipe, _CHUNKS_MD)
-        if os.path.isfile(path):
-            return path
-    pytest.skip(f'{_CHUNKS_MD} not found in any pipeline candidate')
+    try:
+        root = evidence.evidence_root()
+    except evidence.EvidenceSchemaError:
+        pytest.skip(f'no open-toolchain evidence tree found for {_CHUNKS_MD}')
+    path = os.path.join(root, _CHUNKS_MD)
+    if os.path.isfile(path):
+        return path
+    pytest.skip(f'{_CHUNKS_MD} not found under {root}')
 
 
 @pytest.fixture

@@ -9,7 +9,11 @@ include gate.env
 
 GATE_SCOPE ?= fast
 
-PIPE ?= /Users/alex/fine-line/.atelier/worktrees/2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/2026-09-03-open-toolchain-gw5ast-7e84
+# `open-toolchain` submodule (C10/D80): evidence, DEL-e tools and manifests
+# live here, checked out as a sibling of this apicula checkout.
+OTC ?= /Users/alex/fine-line/.atelier/worktrees/2026-09-03-open-toolchain-gw5ast-7e84/open-toolchain
+# Pipeline docs dir: documents only (spec-primitives.md), never code/evidence.
+PIPE_DOCS ?= /Users/alex/fine-line/.atelier/worktrees/2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/2026-09-03-open-toolchain-gw5ast-7e84
 PYTHON ?= /Users/alex/fine-line/vendor/venv/bin/python
 
 .PHONY: gate _gate-fast _gate-full _gate-all _gate-bogus
@@ -29,9 +33,9 @@ _gate-fast:
 	@echo "GATE fast: pytest -m 'not heavy and not gate_proof'"
 	@$(PYTHON) -m pytest tests -q -m "not heavy and not gate_proof" || { echo "GATE fast: pytest FAILED"; exit 1; }
 	@echo "GATE fast: check_evidence.py"
-	@$(PYTHON) $(PIPE)/tools/check_evidence.py $(PIPE)/spec-primitives.md $(PIPE)/evidence || { echo "GATE fast: check_evidence.py FAILED"; exit 1; }
+	@$(PYTHON) $(OTC)/tools/check_evidence.py $(PIPE_DOCS)/spec-primitives.md $(OTC)/evidence || { echo "GATE fast: check_evidence.py FAILED"; exit 1; }
 	@echo "GATE fast: check_criteria.py --phase 0"
-	@$(PYTHON) $(PIPE)/tools/check_criteria.py $(PIPE)/spec-primitives.md $(PIPE)/evidence --phase 0 || { echo "GATE fast: check_criteria.py FAILED"; exit 1; }
+	@$(PYTHON) $(OTC)/tools/check_criteria.py $(PIPE_DOCS)/spec-primitives.md $(OTC)/evidence --phase 0 || { echo "GATE fast: check_criteria.py FAILED"; exit 1; }
 	@echo "GATE fast: ok, 3 checks"
 
 # full: fast, plus the heavy tests (unpack + cell-presence, smoke self-tests,

@@ -13,11 +13,16 @@ import subprocess
 
 import pytest
 
-PIPE = ("/Users/alex/fine-line/.atelier/pipelines/"
-        "2026-09-03-open-toolchain-gw5ast-7e84")
-CALIB = os.path.join(PIPE, "evidence", "calibration")
-RUNS = os.path.join(CALIB, "runs.jsonl")
-STDOUT = os.path.join(CALIB, "calibration-stdout.txt")
+from fuzz.gw5ast138c.harness import evidence
+
+try:
+    _EVIDENCE_ROOT = evidence.evidence_root()
+except evidence.EvidenceSchemaError:
+    _EVIDENCE_ROOT = None
+CALIB = os.path.join(_EVIDENCE_ROOT, "calibration") if _EVIDENCE_ROOT else None
+RUNS = os.path.join(CALIB, "runs.jsonl") if CALIB else "/nonexistent/runs.jsonl"
+STDOUT = (os.path.join(CALIB, "calibration-stdout.txt") if CALIB
+          else "/nonexistent/calibration-stdout.txt")
 DESIGNS = ("big-shift", "attosoc", "uart-message")
 OK_LINE = re.compile(r"^CALIBRATION ok: \d+ diffs enumerated, 0 unexplained$")
 

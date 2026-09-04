@@ -13,7 +13,7 @@ Canonical spellings, binding on every later phase:
   ``equiv.py``),
 * the batch flag is ``--batch-id`` (never ``--batch``),
 * the stall watchdog ships at ``fuzz/gw5ast138c/harness/watchdog.sh`` (never
-  ``$PIPE/tools/watchdog.sh``, cross-phase `F30`).
+  ``$OTC/tools/watchdog.sh``, cross-phase `F30`).
 
 Module rooting is fixed: this module is always addressed as
 ``fuzz.gw5ast138c.harness`` and run from ``$FL/apicula``; it never depends on
@@ -23,7 +23,7 @@ Long-running discipline (`spec-harness.md` §8, inherited from the fine-line
 CLAUDE.md rule -- restated here as *what this code does*, never as an
 alternative to it):
 
-* the batch writes to ``$PIPE/evidence/_runs/<batch_id>.log``, a **FILE**, and
+* the batch writes to ``$OTC/evidence/_runs/<batch_id>.log``, a **FILE**, and
   never through a filter pipe (a dead filter deadlocks the producer's write),
 * an **out-of-process** watchdog (``watchdog.sh``) is armed *before* the batch
   starts and fires on stall, death **and** completion, judging liveness only
@@ -46,17 +46,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WATCHDOG = os.path.join(HERE, "watchdog.sh")
 
 #: Where the batch log, the watchdog log, the pidfile and the batch's evidence
-#: rows live (`D41`; this phase owns `$PIPE/evidence/_runs/**`).  The pipeline
-#: directory exists in two places during this epic -- the umbrella worktree
-#: (day-to-day code work) and the main checkout -- and the same resolution
-#: order `oracle.py` and `tests/conftest.py` use is repeated here.
-_PIPE_CANDIDATES = (
-    "/Users/alex/fine-line/.atelier/worktrees/"
-    "2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/"
-    "2026-09-03-open-toolchain-gw5ast-7e84",
-    "/Users/alex/fine-line/.atelier/pipelines/"
-    "2026-09-03-open-toolchain-gw5ast-7e84",
-)
+#: rows live (`D41`; this phase owns `$OTC/evidence/_runs/**`, `C10`/`D80`).
+#: Resolution goes through `evidence.evidence_root()`, the single place that
+#: knows about `$OTC_EVIDENCE` / `$OTC/evidence`.
 
 #: Test-only overrides.  They are environment variables rather than CLI flags
 #: precisely so the published seven-option surface stays exactly seven options.
@@ -83,22 +75,24 @@ class BatchError(Exception):
 # 1. Paths
 # --------------------------------------------------------------------------
 def runs_dir():
-    """`$PIPE/evidence/_runs`, created on demand."""
+    """`$OTC/evidence/_runs`, created on demand."""
     override = os.environ.get(RUNS_DIR_ENV)
     if override:
         os.makedirs(override, exist_ok=True)
         return override
-    for pipe in _PIPE_CANDIDATES:
-        if os.path.isdir(os.path.join(pipe, "evidence")):
-            path = os.path.join(pipe, "evidence", "_runs")
-            os.makedirs(path, exist_ok=True)
-            return path
-    raise BatchError("no pipeline evidence directory found; set "
-                     f"{RUNS_DIR_ENV} to name one")
+    from . import evidence
+    try:
+        root = evidence.evidence_root()
+    except evidence.EvidenceSchemaError as exc:
+        raise BatchError(f"no open-toolchain evidence directory found; set "
+                         f"{RUNS_DIR_ENV} to name one ({exc})")
+    path = os.path.join(root, "_runs")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def batch_paths(batch_id, base=None):
-    """Every file one batch owns, all under `$PIPE/evidence/_runs/`."""
+    """Every file one batch owns, all under `$OTC/evidence/_runs/`."""
     base = base or runs_dir()
     return {
         "log": os.path.join(base, f"{batch_id}.log"),
@@ -128,24 +122,27 @@ def measured_per_run_total(stream=None):
     """Per-run cost in seconds: `P0.T34`'s measurement, or the ASSUMED value.
 
     Returns `(seconds, source)`.  When `P0.T34`'s
-    `$PIPE/evidence/calibration/measured-budget.md` does not exist yet, the
+    `$OTC/evidence/calibration/measured-budget.md` does not exist yet, the
     ASSUMED number is used and a warning is **printed**, never swallowed.
     """
-    for pipe in _PIPE_CANDIDATES:
-        path = os.path.join(pipe, "evidence", "calibration",
-                            "measured-budget.md")
-        if not os.path.isfile(path):
-            continue
-        with open(path) as fh:
-            text = fh.read()
-        match = re.search(
-            r"measured_per_run_total\D{0,40}?([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds|min|minutes)",
-            text, re.I)
-        if match:
-            value = float(match.group(1))
-            if match.group(2).lower().startswith("min"):
-                value *= 60
-            return int(value), path
+    from . import evidence
+    try:
+        root = evidence.evidence_root()
+    except evidence.EvidenceSchemaError:
+        root = None
+    if root:
+        path = os.path.join(root, "calibration", "measured-budget.md")
+        if os.path.isfile(path):
+            with open(path) as fh:
+                text = fh.read()
+            match = re.search(
+                r"measured_per_run_total\D{0,40}?([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds|min|minutes)",
+                text, re.I)
+            if match:
+                value = float(match.group(1))
+                if match.group(2).lower().startswith("min"):
+                    value *= 60
+                return int(value), path
     print(f"WARNING: no P0.T34 measured-budget.md found; falling back to the "
           f"ASSUMED per-run total of {ASSUMED_PER_RUN_TOTAL_S}s "
           f"(spec.md §8.2 ASSUMED, D51)", file=stream or sys.stdout)
@@ -578,7 +575,7 @@ def build_parser():
         help="Comparison level; default E1.")
     parser.add_argument(
         "--batch-id", required=True,
-        help="Batch id; also names $PIPE/evidence/_runs/<batch_id>.log.")
+        help="Batch id; also names $OTC/evidence/_runs/<batch_id>.log.")
     parser.add_argument(
         "--detach", action="store_true",
         help="Run detached with the out-of-process watchdog armed first.")

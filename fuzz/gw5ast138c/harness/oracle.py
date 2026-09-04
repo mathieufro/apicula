@@ -56,14 +56,6 @@ SYNTH_CLASS = "vg"
 DATASTORE = "/Users/alex/fine-line-data/open-toolchain-gw5ast"
 SMOKE_DIR = os.path.join(DATASTORE, "oracle-smoke")
 
-_PIPE_CANDIDATES = (
-    "/Users/alex/fine-line/.atelier/worktrees/"
-    "2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/"
-    "2026-09-03-open-toolchain-gw5ast-7e84",
-    "/Users/alex/fine-line/.atelier/pipelines/"
-    "2026-09-03-open-toolchain-gw5ast-7e84",
-)
-
 DEFAULT_TIMEOUT_S = 600
 PREFLIGHT_TIMEOUT_S = 60
 
@@ -200,14 +192,18 @@ def preflight(log_text, returncode):
 
 
 def selected_gowinhome():
-    """The oracle-of-record install recorded by `P0.T05` (`gowinhome.selected`)."""
-    for pipe in _PIPE_CANDIDATES:
-        path = os.path.join(pipe, "evidence", "_runs", "gowinhome.selected")
-        if os.path.isfile(path):
-            with open(path) as fh:
-                home = fh.read().strip()
-            if home:
-                return home
+    """The oracle-of-record install recorded by `P0.T05` (`gowinhome.selected`,
+    now at `$OTC/evidence/_runs/gowinhome.selected`, `C10`/`D80`)."""
+    try:
+        root = evidence.evidence_root()
+    except evidence.EvidenceSchemaError:
+        return None
+    path = os.path.join(root, "_runs", "gowinhome.selected")
+    if os.path.isfile(path):
+        with open(path) as fh:
+            home = fh.read().strip()
+        if home:
+            return home
     return None
 
 

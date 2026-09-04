@@ -1,8 +1,8 @@
 """The evidence row schema, the append-only writer and the roll-up (`P0.T28`).
 
 `spec-harness.md` §6 fixes **one JSON Lines row per (primitive, shape, sweep
-point)**, appended to `$PIPE/evidence/<slug>/runs.jsonl`, with `summary.md`
-beside it and `$PIPE/evidence/evidence-table.md` as the roll-up that
+point)**, appended to `$OTC/evidence/<slug>/runs.jsonl`, with `summary.md`
+beside it and `$OTC/evidence/evidence-table.md` as the roll-up that
 `spec-primitives.md`'s status column is filled from (`DEL-b`, `S25`).
 
 The field list is declared **once**, as `REQUIRED_FIELDS` -- the writer's key
@@ -12,15 +12,16 @@ the 29-name list in §6; one constant is what stops that drifting again.)
 
 Artefact **paths** in a row are absolute paths into the data store
 `/Users/alex/fine-line-data/open-toolchain-gw5ast/`, each with a recorded
-sha256; the committed `$PIPE/evidence/` tree carries text only (`D41`), which
+sha256; the committed `$OTC/evidence/` tree carries text only (`D41`), which
 `.gitignore` (written by `ensure_tree`) enforces deny-by-default.
 
 Module rooting is fixed: this module is always addressed as
 `fuzz.gw5ast138c.harness.evidence` and never depends on cwd -- the evidence
-tree is `--evidence-root` or `$GW5AST_EVIDENCE_ROOT` or the pipeline's own
-`evidence/`, and a recording run's design directory is passed as
-`--design-dir`.  `$PIPE/tools/evidence.py` is a shim onto `main()`, so
-`python $PIPE/tools/evidence.py --rollup` and
+tree is `--evidence-root` or `$OTC_EVIDENCE` or `$OTC/evidence` (`$OTC` is the
+`open-toolchain` submodule checked out beside this apicula checkout, `C10`/
+`D80`), and a recording run's design directory is passed as
+`--design-dir`.  `$OTC/tools/evidence.py` is a shim onto `main()`, so
+`python $OTC/tools/evidence.py --rollup` and
 `python -m fuzz.gw5ast138c.harness.evidence --rollup` are the same tool with
 the same flags.  The roll-up flag is spelled `--rollup` at every site.
 """
@@ -88,18 +89,8 @@ SLUGS = ("calibration", "chipdb", "e2e-p0", "harness-selftest",
          "oracle-smoke", "timing-l0-cfu")
 
 #: Environment override for the evidence tree root (used by tests and by any
-#: caller that must not write into the live pipeline directory).
-EVIDENCE_ROOT_ENV = "GW5AST_EVIDENCE_ROOT"
-
-_PIPE_CANDIDATES = (
-    # The live pipeline directory in the MAIN checkout is the evidence tree of
-    # record; the worktree copy is rsynced from it.
-    "/Users/alex/fine-line/.atelier/pipelines/"
-    "2026-09-03-open-toolchain-gw5ast-7e84",
-    "/Users/alex/fine-line/.atelier/worktrees/"
-    "2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/"
-    "2026-09-03-open-toolchain-gw5ast-7e84",
-)
+#: caller that must not write into the checked-out `open-toolchain` tree).
+EVIDENCE_ROOT_ENV = "OTC_EVIDENCE"
 
 ROLLUP_NAME = "evidence-table.md"
 ROWS_NAME = "runs.jsonl"
@@ -112,28 +103,55 @@ class EvidenceSchemaError(Exception):
 # --------------------------------------------------------------------------
 # 2. Paths
 # --------------------------------------------------------------------------
+def otc_root():
+    """`$OTC`, the `open-toolchain` submodule checked out as a sibling of
+    this apicula checkout in the umbrella worktree (`C10`/`D80`), or None
+    when it is not present there.
+
+    This module's own path is `<apicula>/fuzz/gw5ast138c/harness/evidence.py`
+    -- three `dirname()`s up is the apicula checkout root, and `open-toolchain`
+    is that root's sibling.
+    """
+    apicula_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    candidate = os.path.join(os.path.dirname(apicula_root), "open-toolchain")
+    return candidate if os.path.isdir(candidate) else None
+
+
 def pipeline_dir():
-    """`$PIPE`, or None when neither checkout is present."""
-    for pipe in _PIPE_CANDIDATES:
+    """The pipeline docs directory (documents only, `C10`) -- read-only,
+    never where evidence is written."""
+    for pipe in (
+            "/Users/alex/fine-line/.atelier/pipelines/"
+            "2026-09-03-open-toolchain-gw5ast-7e84",
+            "/Users/alex/fine-line/.atelier/worktrees/"
+            "2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/"
+            "2026-09-03-open-toolchain-gw5ast-7e84"):
         if os.path.isdir(pipe):
             return pipe
     return None
 
 
 def evidence_root(root=None):
-    """The evidence tree root: explicit > env > `$PIPE/evidence`."""
+    """The evidence tree root: explicit > `$OTC_EVIDENCE` > `$OTC/evidence`.
+
+    Fails loudly (`EvidenceSchemaError`) rather than silently falling back to
+    the pipeline directory, which no longer carries evidence (`C10`/`D80`).
+    """
     if root:
         return root
     env = os.environ.get(EVIDENCE_ROOT_ENV)
     if env:
         return env
-    for pipe in _PIPE_CANDIDATES:
-        path = os.path.join(pipe, "evidence")
+    otc = otc_root()
+    if otc:
+        path = os.path.join(otc, "evidence")
         if os.path.isdir(path):
             return path
     raise EvidenceSchemaError(
-        "no pipeline evidence directory found; pass --evidence-root or set "
-        f"{EVIDENCE_ROOT_ENV}")
+        "no open-toolchain evidence directory found; pass --evidence-root, "
+        f"set {EVIDENCE_ROOT_ENV}, or check out the open-toolchain submodule "
+        "beside this apicula checkout")
 
 
 def rows_path(slug, root=None):
@@ -483,7 +501,7 @@ def build_parser():
                         help="Evidence slug directory to append to.")
     parser.add_argument("--evidence-root", default=None,
                         help=f"Evidence tree root (default: ${EVIDENCE_ROOT_ENV} "
-                             "or $PIPE/evidence).")
+                             "or $OTC/evidence).")
     parser.add_argument("--row", default=None,
                         help="A JSON object to validate and append as a row.")
     parser.add_argument("--validate-only", action="store_true",
@@ -501,7 +519,7 @@ def build_tree_parser():
                         help="Create the slug directories and .gitignore.")
     parser.add_argument("--evidence-root", default=None,
                         help=f"Evidence tree root (default: ${EVIDENCE_ROOT_ENV} "
-                             "or $PIPE/evidence).")
+                             "or $OTC/evidence).")
     return parser
 
 

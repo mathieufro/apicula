@@ -13,25 +13,19 @@ import shutil
 
 import pytest
 
-# The pipeline directory exists in two places during this epic: the umbrella
-# *worktree* (day-to-day code work) and the main checkout (pipeline docs
-# only). Worktree is tried first, matching the convention `test_fse_version.py`
-# (P0.T11/T12) already used for the same lookup.
-_PIPE_CANDIDATES = (
-    '/Users/alex/fine-line/.atelier/worktrees/'
-    '2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/'
-    '2026-09-03-open-toolchain-gw5ast-7e84',
-    '/Users/alex/fine-line/.atelier/pipelines/'
-    '2026-09-03-open-toolchain-gw5ast-7e84',
-)
+from fuzz.gw5ast138c.harness import evidence
 
 
 def _selected_path():
-    for pipe in _PIPE_CANDIDATES:
-        path = os.path.join(pipe, 'evidence', '_runs', 'gowinhome.selected')
-        if os.path.isfile(path):
-            return path
-    return None
+    # `gowinhome.selected` lives at `$OTC/evidence/_runs/gowinhome.selected`
+    # (`C10`/`D80`); resolution goes through the harness's own
+    # `evidence.evidence_root()` (`$OTC_EVIDENCE` or `$OTC/evidence`).
+    try:
+        root = evidence.evidence_root()
+    except evidence.EvidenceSchemaError:
+        return None
+    path = os.path.join(root, '_runs', 'gowinhome.selected')
+    return path if os.path.isfile(path) else None
 
 
 @pytest.fixture

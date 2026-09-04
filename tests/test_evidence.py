@@ -161,15 +161,15 @@ def test_evidence_slug_dirs_created(tmp_path):
     assert os.path.isfile(os.path.join(root, ".gitignore"))
 
 
-PIPE = evidence.pipeline_dir()
-SHIM = os.path.join(PIPE, "tools", "evidence.py") if PIPE else ""
+OTC = evidence.otc_root()
+SHIM = os.path.join(OTC, "tools", "evidence.py") if OTC else ""
 
 
 @pytest.mark.skipif(not os.path.isfile(SHIM), reason=f"no shim at {SHIM}")
 def test_evidence_tools_shim_is_same_tool(tmp_path):
     root = str(tmp_path)
     _seed_three(root)
-    env = dict(os.environ, GW5AST_EVIDENCE_ROOT=root)
+    env = dict(os.environ, OTC_EVIDENCE=root)
     module = subprocess.run([sys.executable, "-m",
                              "fuzz.gw5ast138c.harness.evidence", "--rollup"],
                             cwd=REPO, env=env, capture_output=True)
@@ -186,14 +186,13 @@ def test_evidence_tools_shim_is_same_tool(tmp_path):
 
 
 # `-C` just needs to be inside the same repo as the path being checked, not
-# repo root -- and PIPE lives under one of two checkouts (the umbrella
-# worktree used for day-to-day code work, or the main checkout used for
-# pipeline docs, see conftest.py) that don't share a single hardcoded root.
-FL = PIPE
+# repo root -- and OTC (`open-toolchain`, C10/D80) is its own git checkout,
+# separate from apicula's.
+FL = OTC
 
 
-@pytest.mark.skipif(not PIPE or not os.path.isdir(os.path.join(PIPE, "evidence")),
-                    reason="no live pipeline evidence tree")
+@pytest.mark.skipif(not OTC or not os.path.isdir(os.path.join(OTC, "evidence")),
+                    reason="no open-toolchain evidence tree")
 def test_evidence_gitignore_denies_binaries():
     # When this test runs from inside a git hook (e.g. the local gate's own
     # pre-commit), git has already exported GIT_DIR/GIT_WORK_TREE/
@@ -202,7 +201,7 @@ def test_evidence_gitignore_denies_binaries():
     # regardless of -C. Strip them so -C is honoured.
     env = {k: v for k, v in os.environ.items()
            if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
-    ev = os.path.join(PIPE, "evidence")
+    ev = os.path.join(OTC, "evidence")
     denied = subprocess.run(["git", "-C", FL, "check-ignore", "-q",
                              os.path.join(ev, "_runs", "x.fs")], env=env)
     assert denied.returncode == 0
