@@ -444,6 +444,37 @@ class Datfile:
             ret.append(rowArr)
         return ret
 
+    # `CibFabricNode` -- the six (row, col, wire) triples that give the PINCFG
+    # bel its `UNK*_VCC` / `SSPI` input wires (`chipdb.fse_create_pincfg`).
+    # Its delta from the 5-series table anchor drifted between IDE releases:
+    # `0x27254` is the historical upstream value (Gowin IDE 1.9.10.03, the
+    # release upstream apycula pins), and every 1.9.11.03 / 1.9.12.03 `.dat`
+    # measured on this box holds the table 0xb8 further on, at `0x2730c`.
+    # Reading the stale delta returns an all-0xffff grid, which is *silently*
+    # legal (0xffff is the "port absent" marker), so `fse_create_pincfg` emits
+    # an empty `ins` map, apicula still sets `HAS_PINCFG`, and
+    # `nextpnr-himbaechel` fails at routing with
+    # `No wire found for port UNK0_VCC on destination cell PINCFG`.
+    # The candidates are therefore tried in order and the first *populated*
+    # one wins -- data-driven, so a 1.9.10 file still reads at its own offset
+    # and a future relocation is one list entry.
+    CIB_FABRIC_NODE_DELTAS = (0x27254, 0x2730c)
+
+    def read_cib_fabric_node(self, rs_table_offset: int):
+        last = None
+        for delta in self.CIB_FABRIC_NODE_DELTAS:
+            grid = self.read_scaledGrid16(6, 3, 6, 1, rs_table_offset + delta)
+            last = grid
+            populated = [row for row in grid if row != [0xffff] * 3]
+            if not populated:
+                continue
+            # A populated candidate must be internally consistent: every entry
+            # of a used row is a real (row, col, wire) index, never a mix of
+            # 0xffff and data, and never an implausibly large index.
+            if all(all(v < 0x8000 for v in row) for row in populated):
+                return grid
+        return last
+
     def read_scaledGrid16i(self, numRows, numCols, rowScaling, colScaling, baseOffset):
         ret = []
 
@@ -628,7 +659,7 @@ class Datfile:
         ret["Adc25kIns"]            = self.read_scaledGrid16i(25, 3, 6, 1, RSTable5ATOffset + 0x26dfe)
         ret["Adc25kOuts"]           = self.read_scaledGrid16i(28, 3, 6, 1, RSTable5ATOffset + 0x26e94)
 
-        ret["CibFabricNode"]        = self.read_scaledGrid16(6, 3, 6, 1, RSTable5ATOffset + 0x27254)
+        ret["CibFabricNode"]        = self.read_cib_fabric_node(RSTable5ATOffset)
         ret["SharedIOLogicIOBloc"]  = self.read_scaledGrid16(0x9c, 2, 2, RSTable5ATOffset + 0x13208, 0xe)
 
         ret["TopAMBGA121N"]         = self.read_arr16_at(200, RSTable5ATOffset + 0x2668e, 0)

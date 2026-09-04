@@ -22,9 +22,11 @@ HARNESS_MODULES = [
 # Modules whose owning task has landed. Their `main()` no longer raises
 # NotImplementedError; it parses arguments, so `main([])` exits via argparse
 # on the missing required `--design-dir`. Each owning task appends its own
-# module name here as it lands (P0.T19: oracle; P0.T20: gen; ...).
+# module name here as it lands (P0.T19: oracle; P0.T20: gen;
+# P0.T21: openflow; ...).
 IMPLEMENTED_MODULES = [
     "oracle",
+    "openflow",
 ]
 
 STUB_MODULES = [m for m in HARNESS_MODULES if m not in IMPLEMENTED_MODULES]
