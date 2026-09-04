@@ -103,6 +103,60 @@ def test_gen_smoke_has_primitive_and_scope(tmp_path):
     assert "R2C3[0][A]" in ins_loc[0]
 
 
+def test_gen_drive_outputs_only(tmp_path):
+    # DRIVE on an input pin -> DriveDirectionError (CT1108, measured P0.T19).
+    bad_pins = dict(smoke.SPEC.pins)
+    bad_pins["din"] = dataclasses.replace(bad_pins["din"], drive=8, direction="input")
+    drive_on_input = dataclasses.replace(smoke.SPEC, pins=bad_pins)
+    with pytest.raises(gen.DriveDirectionError) as exc:
+        gen.run(drive_on_input, tmp_path / "a")
+    assert "din" in str(exc.value)
+    assert not (tmp_path / "a").exists()
+
+    # DRIVE on the output pin is fine, and is the only pin that gets emitted.
+    cst = gen.render_cst(smoke.SPEC)
+    drive_lines = [ln for ln in cst.splitlines() if "DRIVE=" in ln]
+    assert len(drive_lines) == 1
+    assert '"dout"' in drive_lines[0]
+    for port in ("clk", "rst_n", "din"):
+        port_lines = [ln for ln in cst.splitlines() if ('"%s"' % port) in ln]
+        assert not any("DRIVE=" in ln for ln in port_lines)
+
+
+def test_gen_ins_loc_flat(tmp_path):
+    # a module-qualified INS_LOC instance path -> InsLocError (CT1135).
+    qualified = dataclasses.replace(
+        smoke.SPEC, ins_loc={"top.dut_dff": "R2C3[0][A]"}
+    )
+    with pytest.raises(gen.InsLocError) as exc:
+        gen.run(qualified, tmp_path / "a")
+    assert "top.dut_dff" in str(exc.value)
+    assert not (tmp_path / "a").exists()
+
+    # the flat name renders exactly 1 INS_LOC line naming it.
+    cst = gen.render_cst(smoke.SPEC)
+    ins_loc = [ln for ln in cst.splitlines() if ln.strip().startswith("INS_LOC")]
+    assert len(ins_loc) == 1
+    assert '"dut_dff"' in ins_loc[0]
+
+
+def test_gen_rejects_config_pin(tmp_path):
+    # a pin at a known config-role location (EMCCLK, measured P0.T19) ->
+    # ConfigPinError, whether or not the rest of the pin is otherwise clean.
+    bad_pins = dict(smoke.SPEC.pins)
+    bad_pins["din"] = dataclasses.replace(bad_pins["din"], loc="V22")
+    on_emcclk = dataclasses.replace(smoke.SPEC, pins=bad_pins)
+    with pytest.raises(gen.ConfigPinError) as exc:
+        gen.run(on_emcclk, tmp_path / "a")
+    assert "din" in str(exc.value)
+    assert "EMCCLK" in str(exc.value)
+    assert not (tmp_path / "a").exists()
+
+    # the smoke shape's real pins are all clear of the denylist.
+    for port, pin in smoke.SPEC.pins.items():
+        assert gen.config_role_of_loc(pin.loc) is None, port
+
+
 def test_gen_regenerated_oracle_smoke_passes_cst_assertion(tmp_path):
     reference = gen.run(smoke.SPEC, tmp_path)
     errors = gen.assert_cst_defaults(smoke.SPEC)

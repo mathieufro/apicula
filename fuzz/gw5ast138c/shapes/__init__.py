@@ -47,6 +47,11 @@ class PinSpec:
     the chipdb's `pin_bank` table for `GW5AST-LV138PG484AC1/I0` -- it is what
     the bank-6/7 policy is checked against, so it is never inferred from the
     port name.
+
+    `direction` is `"input"` or `"output"` -- it is what the `DRIVE`-on-output-
+    only rule (measured `P0.T19`: `CT1108 Illegal port attribute value
+    specified 'DRIVE = 8'` on an input) is checked against, so `gen.py` can
+    refuse a `drive` value on an input pin instead of silently emitting it.
     """
 
     loc: str                                   # package location, e.g. "V22"
@@ -55,6 +60,7 @@ class PinSpec:
     pull_mode: str = "NONE"
     pull_strength: Optional[str] = DEFAULT_PULL_STRENGTH
     drive: Optional[int] = 8
+    direction: str = "input"                   # "input" | "output" (D37/F-CT1108)
     extra: tuple = ()                          # ((key, value), ...) verbatim
 
 

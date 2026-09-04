@@ -13,6 +13,14 @@ written, every used pin must carry `IO_TYPE`, every bank in use must carry
 That is the same assertion the Hardware Gate runs, applied before a shape is
 admitted to a batch.  A bank/pull change on this silicon is a **live thermal
 hazard** (F73, PR #423), so the assertion has no opt-out and no flag.
+
+The same pass also enforces the vendor rules `P0.T19` measured against
+`gw_sh` directly, so `gen.py` -- not a hand-tuned shape file -- is the single
+source of truth for them: no pin may sit at a config-role package location
+(`ConfigPinError`; `config_role_of_loc`/`CONFIG_ROLE_PINS_PG484`), `DRIVE` may
+only be set on an output pin (`DriveDirectionError`; `CT1108`), and every
+`INS_LOC` instance path must be the flat instance name, never module-qualified
+(`InsLocError`; `CT1135`).
 """
 import argparse
 import importlib
@@ -42,6 +50,66 @@ class BankPolicyError(ShapeSpecError):
     """
 
 
+class DriveDirectionError(ShapeSpecError):
+    """`DRIVE` was set on a non-output pin.
+
+    Measured by `P0.T19`'s `V4` run: `gw_sh` raises `CT1108 Illegal port
+    attribute value specified 'DRIVE = 8'` (`DRIVE=NONE` included) for any
+    `DRIVE` attribute on an input port.  `DRIVE` is legal only on outputs.
+    """
+
+
+class InsLocError(ShapeSpecError):
+    """An `INS_LOC` instance path was not the flat instance name.
+
+    Measured by `P0.T19`'s `V4` run: `gw_sh` resolves only the flat instance
+    name (`dut_dff`) and raises `CT1135 Can't find object named 'top.dut_dff'`
+    on a module-qualified one.
+    """
+
+
+class ConfigPinError(ShapeSpecError):
+    """A pin location is reserved for a chip config-role function.
+
+    A shape must never claim a pin that the vendor tooling treats as a
+    configuration pin (`EMCCLK`, `SGCLK*`, `RECONFIG_N`, `READY`, `DONE`,
+    JTAG `TCK`/`TMS`/`TDI`/`TDO`, `MSPI*`/`SSPI*`) -- doing so either fails
+    generation-time placement or silently reprograms a config function,
+    neither of which is a plain I/O test.
+    """
+
+
+#: Package locations on `GW5AST-LV138PG484AC1/I0` (package `PG484`) measured
+#: or documented to carry a config-role function rather than plain I/O.  This
+#: is the fallback used when no chipdb pin-function table is loadable
+#: (`config_role_of_loc` tries the chipdb first) -- it is **not** exhaustive,
+#: but every location listed here is a confirmed config pin and must never be
+#: claimed by a shape (`P0.T19`: `V22` = `EMCCLK` raised a placement failure
+#: when used as a plain smoke pin; `Y12`/`U15` = `SGCLK` likewise).
+CONFIG_ROLE_PINS_PG484 = {
+    "V22": "EMCCLK",
+    "Y12": "SGCLK",
+    "U15": "SGCLK",
+}
+
+
+def config_role_of_loc(loc):
+    """Return the config-role name of package location `loc`, or `None`.
+
+    Measured (`P0.T20`): the saved chipdb (`$DATASTORE/chipdb/**/*.bin`) does
+    not load in this environment (`lzma.LZMAError: Input format not supported
+    by decoder`) and its `io_cfg` table is keyed by internal IO name (e.g.
+    `IOB53A`), not by package location, so there is no cheap location-keyed
+    lookup to fall back to at runtime without building one offline first.
+    Rather than trust a best-effort chipdb read that could silently return
+    `None` on a key-namespace mismatch (worse than not checking at all), this
+    always consults the documented `CONFIG_ROLE_PINS_PG484` denylist. Update
+    that table -- not this function -- when a location-keyed chipdb export
+    becomes available.
+    """
+    return CONFIG_ROLE_PINS_PG484.get(loc)
+
+
 def datastore_root():
     """Root of the data store; `$FL_DATASTORE` wins if set."""
     return Path(os.environ.get("FL_DATASTORE", DATASTORE_DEFAULT))
@@ -63,6 +131,22 @@ def assert_cst_defaults(spec):
     yields an empty error list, a dirty one never returns at all.
     """
     for port, pin in spec.pins.items():
+        # (d) no config-role pin, ever -- checked before anything else so a
+        # config pin never even gets a chance to look like a clean I/O.
+        role = config_role_of_loc(pin.loc)
+        if role is not None:
+            raise ConfigPinError(
+                "pin %r at %s is a config-role pin (%s) -- a shape must never "
+                "claim a config pin as plain I/O (measured, P0.T19/P0.T20)"
+                % (port, pin.loc, role)
+            )
+        # (e) DRIVE is legal on outputs only (CT1108, measured P0.T19).
+        if pin.drive is not None and pin.direction != "output":
+            raise DriveDirectionError(
+                "pin %r at %s: DRIVE=%s set on a %s pin -- DRIVE is legal "
+                "only on outputs (CT1108, P0.T19)"
+                % (port, pin.loc, pin.drive, pin.direction)
+            )
         # (c) bank 6/7 first: an LVCMOS* there is the thermal hazard, and it
         # must not be masked by the non-DDR default rule below.
         if pin.bank in DDR_BANKS:
@@ -100,6 +184,16 @@ def assert_cst_defaults(spec):
                     % (port, pin.loc, pin.bank, pin.pull_strength,
                        DEFAULT_PULL_STRENGTH)
                 )
+    # (f) every INS_LOC instance path is the flat instance name -- gw_sh
+    # resolves only that (CT1135, measured P0.T19).
+    for instance in spec.ins_loc:
+        if "." in instance:
+            raise InsLocError(
+                "INS_LOC instance %r is not a flat instance name -- gw_sh "
+                "raises CT1135 Can't find object named %r (P0.T19); use the "
+                "flat name (e.g. %r)"
+                % (instance, instance, instance.rsplit(".", 1)[-1])
+            )
     return []
 
 
