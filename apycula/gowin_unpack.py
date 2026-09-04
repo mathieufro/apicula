@@ -222,6 +222,68 @@ def get_dff_type(dff_idx, in_attrs):
         attrs['REGSET'] = 'SET'
     return _dff_types.get((attrs['REGSET'], attrs['LSRONMUX'], attrs['CLKMUX_CLK'], attrs['SRMODE']))
 
+# A bel mode is decoded by matching its fuse set against the tile's set bits.
+# A mode with an *empty* fuse set therefore matches every tile whose relevant
+# bits are clear, which is not evidence of anything.  That only bites RAM16:
+# chipdb.fse_luts() builds its shadow-SRAM mode from the fse shortval(28)
+# record keyed (2, 0), a record the GW5A slice tile types do not have, so on
+# GW5A the mode is empty and a RAM16 would be "decoded" in every slice tile --
+# ram16_remove_bels() then deletes LUT0-LUT5 and DFF4/DFF5 from each of them.
+# GW1N-9C and GW2A-18C carry exactly one real fuse in that mode, so this rule
+# cannot change pre-5A decoding.
+def mode_carries_evidence(bel_name, bits):
+    return bool(bits) or bel_name != "RAM16"
+
+# `LVDS_OUT=ON` is the marker parse_tile_() reads a differential buffer from,
+# and reading it makes the paired B bel disappear (skip_bels).  A longval
+# record's key is a *conjunction* and the encoder ORs the fuses of every
+# satisfied record, so a positive record whose fuse set is exactly the fuse set
+# of a default (negative-key) record contributes no bit of its own: the bits are
+# set by the default record for an ordinary buffer, and the decoder's
+# maximal-subset match then reports the positive record too.  Measured on the
+# shipped chipdbs: all 24 GW5AST-138C IOB tables alias LVDS_OUT=ON onto the two
+# fuses every plain input buffer sets (-ODMUX=TRIMUX, OPENDRAIN=OFF,
+# PADDI=PADDI); no IOB table of GW1N-1, GW1N-9C, GW1NZ-1, GW1NS-4 or GW2A-18C
+# does.  The test is on the table, not on the device name, so pre-5A decoding is
+# untouched and a future GW5A table that does distinguish LVDS_OUT starts
+# working on its own.
+_lvds_out_alias_cache = {}
+
+def _table_lvds_out_is_aliased(fuse_table, logicinfo_table):
+    lvds = attrids.iob_attrids['LVDS_OUT']
+    positives = []
+    defaults = set()
+    for key, bits in fuse_table.items():
+        if any(k < 0 for k in key):
+            defaults.add(frozenset(bits))
+            continue
+        for k in key:
+            entry = logicinfo_table.get(k) if hasattr(logicinfo_table, 'get') else None
+            if k > 0 and entry is not None and entry[0] == lvds:
+                positives.append(frozenset(bits))
+                break
+    return any(bits in defaults for bits in positives)
+
+def lvds_out_is_aliased(db, ttyp, table_name):
+    key = (_device, ttyp, table_name)
+    if key not in _lvds_out_alias_cache:
+        _lvds_out_alias_cache[key] = _table_lvds_out_is_aliased(
+                db.longval[ttyp][table_name], db.rev_logicinfo('IOB'))
+    return _lvds_out_alias_cache[key]
+
+# The aliased table is the marker of a fuse table that cannot carry the
+# differential inferences parse_tile_() draws from an IOB's attribute set: both
+# the LVDS_OUT marker and the "a B bel with IO_TYPE and no DRIVE is the negative
+# half of an ELVDS pair" rule turn a plain single-ended input into a
+# differential buffer and drop the paired bel from the netlist.  Measured on the
+# smoke design: every used GW5AST-138C input decodes with IO_TYPE, OPENDRAIN,
+# PADDI and LVDS_OUT and without DRIVE, so both rules fire on every one of them
+# -- while the packer's own GW5A defaults (gowin_pack.py default_ibuf_attrs) say
+# LVDS_OUT=OFF.  Both are therefore disabled together on such a table, and the
+# GW5A IOB attribute space is calibrated by the IO/IOLOGIC phase.
+def differential_decode_is_reliable(db, ttyp, table_name):
+    return not lvds_out_is_aliased(db, ttyp, table_name)
+
 # parse attributes and values use 'logicinfo' table
 # returns {attr: value}
 # attribute names are decoded with the attribute table, but the values are returned in raw form
@@ -541,7 +603,8 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 # Z-1 row 6
                 if _device in {'GW1NZ-1', 'GW1N-1'} and row == 5:
                     mode = 'IOBUF'
-                if 'LVDS_OUT' in attrvals:
+                reliable = differential_decode_is_reliable(db, io_ttyp, f'IOB{idx}')
+                if 'LVDS_OUT' in attrvals and reliable:
                     if mode == 'IOBUF':
                         mode = 'TBUF'
                     if 'MIPI' in attrvals:
@@ -552,7 +615,7 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                     skip_bels.update({name[:-1] + 'B'})
                 elif 'OD' in attrvals:
                     mode = 'I3C_IOBUF'
-                elif idx == 'B' and 'DRIVE' not in attrvals and 'IO_TYPE' in attrvals:
+                elif idx == 'B' and 'DRIVE' not in attrvals and 'IO_TYPE' in attrvals and reliable:
                     mode = f'ELVDS_{mode}'
                     # skip B bel
                     skip_bels.update({name})
@@ -593,6 +656,8 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
             #print("read mode:", sorted(mode_bits))
             for mode, bits in bel.modes.items():
                 #print(mode, sorted(bits))
+                if not mode_carries_evidence(name, bits):
+                    continue
                 if bits == mode_bits and (default or bits):
                     bels.setdefault(name, set()).add(mode)
         # simple flags

@@ -453,7 +453,8 @@ def _reset_unpacker_state(gu):
     so unpacking two bitstreams in one process without this would make the
     second side's cell indices depend on the first side's.
     """
-    for name in ("_pll_cells", "_bsram_cells", "_bank_fuse_tables"):
+    for name in ("_pll_cells", "_bsram_cells", "_bank_fuse_tables",
+                 "_lvds_out_alias_cache"):
         cache = getattr(gu, name, None)
         if isinstance(cache, dict):
             cache.clear()
