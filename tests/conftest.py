@@ -1,0 +1,84 @@
+"""Shared pytest fixtures for the apicula test suite (P0.T14).
+
+`tests/` does not exist upstream; created here so `spec.md` `V3`
+(`pytest tests -k "fse_version"`) and `V7` (`pytest tests -k "timing_c1i0"`)
+have something to run.
+
+This module is append-only for later phases: Phases 1-6 add their own
+`test_*.py` files under `tests/` and must not edit the fixtures below
+(`blueprints/P0-foundation.md` File ownership).
+"""
+import os
+import shutil
+
+import pytest
+
+# The pipeline directory exists in two places during this epic: the umbrella
+# *worktree* (day-to-day code work) and the main checkout (pipeline docs
+# only). Worktree is tried first, matching the convention `test_fse_version.py`
+# (P0.T11/T12) already used for the same lookup.
+_PIPE_CANDIDATES = (
+    '/Users/alex/fine-line/.atelier/worktrees/'
+    '2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/'
+    '2026-09-03-open-toolchain-gw5ast-7e84',
+    '/Users/alex/fine-line/.atelier/pipelines/'
+    '2026-09-03-open-toolchain-gw5ast-7e84',
+)
+
+
+def _selected_path():
+    for pipe in _PIPE_CANDIDATES:
+        path = os.path.join(pipe, 'evidence', '_runs', 'gowinhome.selected')
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+@pytest.fixture
+def gowinhome():
+    """The oracle-of-record Gowin install (`gowinhome.selected`, F3/D52).
+
+    `GOWINHOME` in the environment wins if set (matches the harness's own
+    resolution order); otherwise the pipeline's recorded selection is read.
+    Skips with a named reason, rather than failing, when neither is
+    available.
+    """
+    env = os.environ.get('GOWINHOME')
+    if env:
+        return env
+    path = _selected_path()
+    if path is None:
+        pytest.skip('no Gowin install selected: GOWINHOME is unset and '
+                     'gowinhome.selected is absent')
+    with open(path) as fh:
+        home = fh.read().strip()
+    if not home or not os.path.isdir(home):
+        pytest.skip(f'gowinhome.selected names {home!r}, which is not a '
+                     'directory')
+    return home
+
+
+@pytest.fixture
+def device_file(gowinhome):
+    """`device_file('GW5AST-138C', 'fse')` -> that device file's path (F4)."""
+    def _path(device, ext):
+        return f'{gowinhome}/IDE/share/device/{device}/{device}.{ext}'
+    return _path
+
+
+@pytest.fixture
+def mutated_header(tmp_path):
+    """`mutated_header(path, offset, byte)` -> a one-byte-mutated copy.
+
+    Copies `path` into `tmp_path` and overwrites the single byte at `offset`
+    with `byte`, returning the copy's path. Used to synthesize a
+    version-drifted header without touching the real installed file.
+    """
+    def _mutate(path, offset, byte):
+        dest = tmp_path / os.path.basename(path)
+        shutil.copyfile(path, dest)
+        with open(dest, 'r+b') as fh:
+            fh.seek(offset)
+            fh.write(bytes([byte]))
+        return dest
+    return _mutate
