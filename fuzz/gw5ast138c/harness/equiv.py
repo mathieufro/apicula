@@ -709,6 +709,395 @@ def _line_delta(vendor_fs, open_fs):
 
 
 # --------------------------------------------------------------------------
+# 6b. `residual()` and `decode_check()` (`D35`, `D34`, `P0.T25`)
+# --------------------------------------------------------------------------
+#: Categories a differing frame bit can land in.  The first three are
+#: **subtracted** by §5.1b ("every bit either unpacker accounted for is
+#: subtracted"); the last three are not, and are what `unexplained_bits`
+#: enumerates.
+RESIDUAL_CATEGORIES = {
+    "set_level_diff": (
+        "both unpackers produced cells in this tile and their cell/attr sets "
+        "differ: the difference is visible to the E0 set comparison, so the "
+        "bits are accounted for (spec-harness.md 5.1b)"),
+    "vendor_only_fill": (
+        "the vendor unpacks cells here and the open side unpacks none: "
+        "unused-tile fill, not configuration of any instantiated cell "
+        "(spec-harness.md 5.3 row 3, mask entry unused_tile_fill)"),
+    "open_only_fill": (
+        "the open side unpacks cells here and the vendor unpacks none: the "
+        "mirror image of unused-tile fill, same mask entry"),
+    "unmodelled_fuse": (
+        "BOTH unpackers produced the SAME cells and attributes in this tile "
+        "and the raw bits still differ: a fuse apicula does not model at all, "
+        "dropped on both sides during unpack. This is exactly the blind spot "
+        "D35 exists to catch and it is NOT masked"),
+    "unattributed_tile": (
+        "bits differ in a tile in which NEITHER side unpacks any cell: no "
+        "cell accounts for them (spec-harness.md 5.1c's named-error case)"),
+    "outside_every_tile": (
+        "differing bits in the fuse bitmap that fall outside every tile the "
+        "chipdb grid describes -- inter-tile padding the unpacker never reads"),
+    "extra_command_words": (
+        "whole command/preamble words one side emits and the other does not, "
+        "outside the fuse bitmap and outside the `//` comment block, so "
+        "neither the header-words nor the CRC mask entry covers them"),
+}
+
+#: Bels a nextpnr post-PnR netlist can name that leave no **bel** fuse for
+#: `gowin_unpack` to recover, so `c1` must not require them.  `VCC`/`GND` are
+#: the packer's constant drivers and `GSR`/`PINCFG` are whole-device config
+#: sites, none of which is a placed cell; `BUFG` is a clock-routing mux, and
+#: apicula recovers it as a pip, not as a bel (`gowin_unpack.py` returns it in
+#: `clock_pips`), so requiring it as a cell would assert something the decode
+#: does not claim to produce.  Measured on the smoke pair, 2026-09-04.
+NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG")
+
+
+def cells_by_tile(netlist):
+    """`{(row, col): frozenset((z, type, attrs))}` -- one side, per tile."""
+    out = {}
+    for cell, attrs in netlist.cells.items():
+        out.setdefault((cell.y, cell.x), set()).add((cell.z, cell.type, attrs))
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+def tile_delta_from_tiles(tiles_v, tiles_o):
+    """`({(row, col): differing_bits}, total)` for two already-split grids.
+
+    Split out from `tile_bit_delta` so the classifier can be exercised on a
+    hand-built grid: a bitstream compared with itself must produce `({}, 0)`.
+    """
+    per_tile = {}
+    total = 0
+    for key, a in tiles_v.items():
+        b = tiles_o.get(key)
+        if b is None:
+            continue
+        n = 0
+        for ra, rb in zip(a, b):
+            n += sum(1 for x, y in zip(ra, rb) if x != y)
+        if n:
+            per_tile[key] = n
+            total += n
+    return per_tile, total
+
+
+def tile_bit_delta(bitmap_v, bitmap_o, db):
+    """Differing fuse bits per `(row, col)` tile, plus the ones in no tile.
+
+    `chipdb.tile_bitmap` is the same grid split `gowin_unpack` itself uses, so
+    "which tile is this bit in" is answered exactly as the unpacker answers
+    it, never by a byte offset (§5.2).
+    """
+    from apycula import chipdb as _chipdb
+
+    return tile_delta_from_tiles(
+        _chipdb.tile_bitmap(db, bitmap_v, empty=True),
+        _chipdb.tile_bitmap(db, bitmap_o, empty=True))
+
+
+def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
+                      outside=None, mask=None, level="E0", shape_class=None):
+    """Split every differing bit into "accounted for" and `unexplained_bits`.
+
+    §5.1b, literally: *"every bit either unpacker accounted for is subtracted;
+    the residual must be empty or fully enumerated in the evidence row as
+    `unexplained_bits`, each entry carrying a justification. A non-empty,
+    non-enumerated residual is a `DIFF`. No row closes at E0, E1 or E2 with an
+    unexplained residual."*
+
+    A bit is **accounted for** when some cell either unpacker produced was
+    decoded from it -- which is the case in every tile where at least one side
+    unpacks a cell.  Unused-tile fill is such a case and is additionally named
+    by §5.3 row 3's mask entry, so it is reported with that entry's id rather
+    than silently dropped.  What is left over is what no cell explains, and it
+    is enumerated by category with the justification each category carries.
+    """
+    mask = mask if mask is not None else load_mask(None)
+    fill_entry = ("unused_tile_fill"
+                  if mask.explains("unused_tile_fill", level, shape_class)
+                  else None)
+
+    buckets = collections.defaultdict(lambda: {"bits": 0, "tiles": []})
+    for tile, bits in sorted(tile_delta.items()):
+        v, o = cells_v.get(tile, frozenset()), cells_o.get(tile, frozenset())
+        if v and o:
+            cat = "set_level_diff" if v != o else "unmodelled_fuse"
+        elif v:
+            cat = "vendor_only_fill"
+        elif o:
+            cat = "open_only_fill"
+        else:
+            cat = "unattributed_tile"
+        bucket = buckets[cat]
+        bucket["bits"] += bits
+        if len(bucket["tiles"]) < 16:
+            bucket["tiles"].append(f"({tile[1]},{tile[0]})")
+
+    if outside_every_tile:
+        buckets["outside_every_tile"]["bits"] += outside_every_tile
+
+    outside = outside or {}
+    unaccounted = abs(outside.get("unaccounted_bytes", 0) or 0)
+    header_masked = mask.explains("header_words", level, shape_class)
+
+    explained, unexplained = [], []
+    for cat, bucket in buckets.items():
+        row = {"category": cat, "bits": bucket["bits"],
+               "tiles": len([t for t in tile_delta
+                             if _category_of(t, cells_v, cells_o) == cat]),
+               "sample_tiles": bucket["tiles"],
+               "justification": RESIDUAL_CATEGORIES[cat]}
+        if cat in ("set_level_diff", "vendor_only_fill", "open_only_fill"):
+            if cat != "set_level_diff" and fill_entry:
+                row["mask_entry"] = fill_entry
+            explained.append(row)
+        else:
+            unexplained.append(row)
+
+    if outside.get("comment_delta_bytes"):
+        explained.append({
+            "category": "comment_header",
+            "bytes": abs(outside["comment_delta_bytes"]),
+            "mask_entry": "header_words" if header_masked else None,
+            "justification": (
+                "the `//` comment block bslib.read_bitstream discards before "
+                "the fuse bitmap exists: tool version, device, date, checksum, "
+                "user code -- metadata, not configuration "
+                "(spec-harness.md 5.3 row 1)"),
+        })
+    if unaccounted:
+        unexplained.append({
+            "category": "extra_command_words",
+            "bytes": unaccounted,
+            "lines": outside.get("line_delta", [])[:8],
+            "justification": RESIDUAL_CATEGORIES["extra_command_words"],
+        })
+
+    order = list(RESIDUAL_CATEGORIES)
+    key = lambda r: order.index(r["category"]) if r["category"] in order else 99  # noqa: E731
+    explained.sort(key=key)
+    unexplained.sort(key=key)
+    return {
+        "unexplained_bits": unexplained,
+        "explained": explained,
+        "unexplained_total_bits": sum(r.get("bits", 0) for r in unexplained),
+        "unexplained_total_bytes": sum(r.get("bytes", 0) for r in unexplained),
+        "mask_sha256": mask.sha256,
+    }
+
+
+def _category_of(tile, cells_v, cells_o):
+    v, o = cells_v.get(tile, frozenset()), cells_o.get(tile, frozenset())
+    if v and o:
+        return "set_level_diff" if v != o else "unmodelled_fuse"
+    if v:
+        return "vendor_only_fill"
+    if o:
+        return "open_only_fill"
+    return "unattributed_tile"
+
+
+def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
+             level="E0", shape_class=None, device=DEVICE):
+    """§5.1b's mandatory raw residual, computed on the two real `.fs`.
+
+    Returns `raw_bit_delta()`'s enumeration plus the `unexplained_bits` list
+    the evidence row must carry.  It is **always** computed: the unpacked
+    comparison is blind to any fuse apicula does not model, so a row that
+    closed on the three sets alone could be reporting `ok` for two bitstreams
+    that differ (`D35`).
+    """
+    from apycula.bslib import read_bitstream
+
+    if db is None:
+        db = load_db(device)
+    bmv, _, _, _ = read_bitstream(vendor_fs)
+    bmo, _, _, _ = read_bitstream(open_fs)
+
+    rows = min(len(bmv), len(bmo))
+    total = 0
+    per_row = {}
+    for r in range(rows):
+        ra, rb = bmv[r], bmo[r]
+        width = min(len(ra), len(rb))
+        n = int(sum(1 for c in range(width) if ra[c] != rb[c]))
+        n += abs(len(ra) - len(rb))
+        if n:
+            per_row[r] = n
+            total += n
+
+    tile_delta, in_tiles = tile_bit_delta(bmv, bmo, db)
+    if nl_v is None:
+        nl_v = unpack_netlist(vendor_fs, device=device, db=db)
+    if nl_o is None:
+        nl_o = unpack_netlist(open_fs, device=device, db=db)
+
+    out = {
+        "frame_bits": total,
+        "frame_rows": per_row,
+        "frame_bits_in_tiles": in_tiles,
+        "bitmap_shape": [[len(bmv), len(bmv[0]) if len(bmv) else 0],
+                         [len(bmo), len(bmo[0]) if len(bmo) else 0]],
+        "bitmap_row_delta": abs(len(bmv) - len(bmo)),
+        "outside_bitmap": _outside_bitmap(vendor_fs, open_fs),
+        "cells": {"vendor": len(nl_v.cells), "open": len(nl_o.cells)},
+    }
+    out.update(classify_residual(
+        tile_delta, cells_by_tile(nl_v), cells_by_tile(nl_o),
+        outside_every_tile=total - in_tiles + out["bitmap_row_delta"],
+        outside=out["outside_bitmap"], mask=mask, level=level,
+        shape_class=shape_class))
+    return out
+
+
+# --- the two-part decode check (`D34`, §5.4) -------------------------------
+def read_pnr_cells(pnr_path):
+    """The placed cells of a nextpnr post-PnR JSON, as `(x, y, bel)` sites.
+
+    A `.fs` -> `.fs` byte round-trip does not exist (§5.4: `gowin_unpack`
+    emits Verilog, `gowin_pack` consumes this JSON), so this file -- not a
+    repack -- is what `c1` checks the decode against.
+    """
+    with open(pnr_path) as f:
+        design = json.load(f)
+    cells = []
+    for mod in design.get("modules", {}).values():
+        for name, cell in mod.get("cells", {}).items():
+            attrs = cell.get("attributes", {}) or {}
+            bel = attrs.get("NEXTPNR_BEL")
+            if not bel:
+                cells.append({"name": name, "type": cell.get("type"),
+                              "bel": None, "site": None, "attrs": attrs,
+                              "params": cell.get("parameters", {}) or {}})
+                continue
+            site, belname = bel.split("/", 1)
+            x = int(site[1:site.index("Y")])
+            y = int(site[site.index("Y") + 1:])
+            cells.append({"name": name, "type": cell.get("type"), "bel": belname,
+                          "site": (x, y), "attrs": attrs,
+                          "params": cell.get("parameters", {}) or {}})
+    return cells
+
+
+def _expected_attrs(cell):
+    """`{name: value}` a placed cell asserts, from `&NAME=VALUE` and params."""
+    want = {}
+    for key, value in cell["attrs"].items():
+        if key.startswith("&") and "=" in key:
+            name, val = key[1:].split("=", 1)
+            want[name] = val
+    for key, value in cell["params"].items():
+        if isinstance(value, str):
+            want[key] = value
+    return want
+
+
+def decode_check_c1(pnr_cells, netlist):
+    """`c1` -- does the decode recover every cell the placement contains?
+
+    Required set = every placed cell whose bel is fuse-backed.  A packer
+    pseudo-bel (`NON_FUSE_BACKED_BELS`) and a cell nextpnr never placed leave
+    no fuse behind, so requiring them would make `c1` assert something the
+    bitstream format cannot carry; both are listed, never silently dropped.
+    """
+    by_site = collections.defaultdict(dict)
+    for cell, attrs in netlist.cells.items():
+        by_site[(cell.x, cell.y)][(cell.type, cell.z)] = attrs
+
+    required, skipped, missing, attr_mismatch = [], [], [], []
+    for cell in pnr_cells:
+        if cell["bel"] is None:
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "why": "not placed on any bel"})
+            continue
+        base, z = split_bel_name(cell["bel"])
+        if base in NON_FUSE_BACKED_BELS:
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "why": "pseudo-bel, no fuse"})
+            continue
+        required.append(cell)
+        site = by_site.get(cell["site"], {})
+        attrs = site.get((base, z))
+        if attrs is None:
+            missing.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "site": list(cell["site"])})
+            continue
+        have = dict(canon_attr(f) for f in attrs)
+        for name, value in _expected_attrs(cell).items():
+            if name in have and str(have[name]) != str(value):
+                attr_mismatch.append({
+                    "name": cell["name"], "attr": name,
+                    "expected": value, "recovered": str(have[name])})
+
+    return {
+        "c1": "ok" if not missing and not attr_mismatch else "mismatch",
+        "required_cells": len(required),
+        "recovered_cells": len(required) - len(missing),
+        "missing": missing[:16],
+        "attr_mismatch": attr_mismatch[:16],
+        "skipped": skipped,
+    }
+
+
+def _bitmap_bytes(bitmap):
+    """The fuse bitmap as bytes, so "byte-identical" is literally that."""
+    from apycula import bitmatrix
+
+    packed = bitmatrix.packbits(bitmap, axis=1)
+    if hasattr(packed, "tobytes"):
+        return packed.tobytes()
+    return bytes(v for row in packed for v in row)
+
+
+def decode_check_c2(fs_path, tmp_path=None):
+    """`c2` -- read the packed `.fs`, re-emit it, assert the bitmap is identical.
+
+    This is what "catches encode/decode asymmetry" can actually mean against
+    the shipped tools (§5.4): there is no repack path, but `bslib` owns both
+    directions of the *bitmap*, so a round-trip through it is runnable and is
+    a real assertion about the encoder.
+    """
+    import tempfile
+
+    from apycula import bitmatrix
+    from apycula.bslib import read_bitstream, write_bitstream
+
+    bs, hdr, ftr, slots = read_bitstream(fs_path)
+    tmp = tmp_path or os.path.join(tempfile.mkdtemp(prefix="equiv-c2-"),
+                                   "roundtrip.fs")
+    # `read_bitstream` returns `transpose(fliplr(lines))` for the 5A series and
+    # `write_bitstream` writes `fliplr(bs)` as its lines, so the inverse of the
+    # read is a single transpose.  `write_bitstream` mutates `hdr`, so it gets
+    # copies.
+    write_bitstream(tmp, bitmatrix.transpose(bs),
+                    [bytearray(x) for x in hdr], [bytearray(x) for x in ftr],
+                    False, slots)
+    again, _, _, _ = read_bitstream(tmp)
+
+    a, b = _bitmap_bytes(bs), _bitmap_bytes(again)
+    differing = sum(1 for x, y in zip(a, b) if x != y) + abs(len(a) - len(b))
+    return {"c2": "ok" if a == b else "mismatch",
+            "bitmap_bytes": len(a),
+            "differing_bytes": differing,
+            "roundtrip_path": tmp}
+
+
+def decode_check(open_fs, pnr_path, netlist=None, db=None, device=DEVICE,
+                 tmp_path=None):
+    """§5.4's two runnable halves, both required: `{c1: ..., c2: ...}`."""
+    if netlist is None:
+        netlist = unpack_netlist(open_fs, device=device, db=db, noalu=True)
+    c1 = decode_check_c1(read_pnr_cells(pnr_path), netlist)
+    c2 = decode_check_c2(open_fs, tmp_path=tmp_path)
+    out = {"c1": c1["c1"], "c2": c2["c2"]}
+    out.update({f"c1_{k}": v for k, v in c1.items() if k != "c1"})
+    out.update({f"c2_{k}": v for k, v in c2.items() if k != "c2"})
+    return out
+
+
+# --------------------------------------------------------------------------
 # 7. The comparison
 # --------------------------------------------------------------------------
 @dataclass
@@ -722,6 +1111,7 @@ class E0Result:
     mask_sha256: str = ""
     mask_entries: tuple = ()
     residual: dict = field(default_factory=dict)
+    decode_check: dict = field(default_factory=dict)
     per_tile: dict = field(default_factory=dict)
     notes: str = ""
 
@@ -833,6 +1223,14 @@ def _residual_is_dirty(residual):
     """
     if not residual:
         return False
+    if "unexplained_bits" in residual:
+        # `P0.T25`'s classified residual: what the two unpackers accounted for
+        # has already been subtracted, so anything still listed is a bit no
+        # cell explains -- "No row closes at E0, E1 or E2 with an unexplained
+        # residual" (§5.1b).
+        return bool(residual["unexplained_bits"])
+    # `raw_bit_delta()`'s unclassified shape (`P0.T23`): nothing is subtracted,
+    # so any delta at all is dirty.
     if residual.get("frame_bits"):
         return True
     if residual.get("bitmap_row_delta"):
@@ -877,6 +1275,30 @@ def report(result):
     else:
         lines.append("PER_TILE (none)")
     res = result.residual or {}
+    if "unexplained_bits" in res:
+        unexplained = res["unexplained_bits"]
+        lines.append(
+            f"RESIDUAL_UNEXPLAINED entries={len(unexplained)} "
+            f"bits={res.get('unexplained_total_bits', 0)} "
+            f"bytes={res.get('unexplained_total_bytes', 0)}")
+        for row in unexplained:
+            lines.append(
+                f"  UNEXPLAINED {row['category']} "
+                f"bits={row.get('bits', 0)} bytes={row.get('bytes', 0)} "
+                f"tiles={row.get('tiles', 0)} :: {row['justification']}")
+        for row in res.get("explained", []):
+            lines.append(
+                f"  ACCOUNTED {row['category']} bits={row.get('bits', 0)} "
+                f"bytes={row.get('bytes', 0)} tiles={row.get('tiles', 0)} "
+                f"mask_entry={row.get('mask_entry')}")
+    if result.decode_check:
+        dc = result.decode_check
+        lines.append(f"DECODE_CHECK c1={dc.get('c1')} c2={dc.get('c2')} "
+                     f"(c1 recovered {dc.get('c1_recovered_cells')}/"
+                     f"{dc.get('c1_required_cells')} placed cells, "
+                     f"{len(dc.get('c1_skipped') or [])} not fuse-backed; "
+                     f"c2 {dc.get('c2_differing_bytes')} differing bytes of "
+                     f"{dc.get('c2_bitmap_bytes')})")
     lines.append(f"RESIDUAL frame_bits={res.get('frame_bits', 0)} "
                  f"bitmap_row_delta={res.get('bitmap_row_delta', 0)} "
                  f"rows={sorted((res.get('frame_rows') or {}).items())[:8]}")
@@ -914,7 +1336,11 @@ def evidence_rows(result, run_id="equiv", primitive=None, shape=None):
         "verdict": verdict,
         "diff_count": result.diff_count,
         "first_diff": result.first_diff,
-        "unexplained_bits": result.residual,
+        "unexplained_bits": (result.residual.get("unexplained_bits")
+                             if "unexplained_bits" in result.residual
+                             else result.residual),
+        "residual": result.residual,
+        "decode_check": result.decode_check,
         "mask_sha256": result.mask_sha256,
         "mask_entries": list(result.mask_entries),
         "oracle_log": result.log_path,
@@ -966,7 +1392,7 @@ def load_spec(shape, design_dir):
 
 def compare_design(design_dir, shape=None, level="E0", mask_path=None,
                    calibration=False, device=DEVICE, vendor_fs=None,
-                   open_fs=None):
+                   open_fs=None, pnr_json=None):
     """Compare the two bitstreams of one design directory at `E0`.
 
     `ABORT` when either build is missing: the log path is printed and the row
@@ -999,9 +1425,28 @@ def compare_design(design_dir, shape=None, level="E0", mask_path=None,
     db = load_db(device)
     nl_v = unpack_netlist(vendor, device=device, db=db)
     nl_o = unpack_netlist(open_, device=device, db=db)
-    residual = raw_bit_delta(vendor, open_)
-    result = compare_e0(nl_v, nl_o, scope=scope, mask=mask, residual=residual)
+    shape_class = getattr(spec, "shape_class", None)
+    res = residual(vendor, open_, db=db, nl_v=nl_v, nl_o=nl_o, mask=mask,
+                   level=level, shape_class=shape_class, device=device)
+    result = compare_e0(nl_v, nl_o, scope=scope, mask=mask, residual=res)
     result.level = level
+
+    # §5.4's decode check is required for the row to be admissible, so it runs
+    # whenever the nextpnr post-PnR netlist `c1` needs is on disk beside the
+    # open-flow bitstream.
+    pnr = pnr_json or os.path.join(design_dir, "top_pnr.json")
+    if os.path.isfile(pnr):
+        nl_c1 = unpack_netlist(open_, device=device, db=db, noalu=True)
+        result.decode_check = decode_check(open_, pnr, netlist=nl_c1, db=db,
+                                           device=device)
+        if result.decode_check["c1"] != "ok" or result.decode_check["c2"] != "ok":
+            result.verdict = "DIFF"
+            result.notes = (result.notes + " " if result.notes else "") + (
+                "decode check failed (spec-harness.md 5.4, D34): "
+                f"c1={result.decode_check['c1']} c2={result.decode_check['c2']}")
+    else:
+        result.decode_check = {"c1": "skipped", "c2": "skipped",
+                               "why": f"no nextpnr post-PnR netlist at {pnr}"}
     return result
 
 
@@ -1035,6 +1480,9 @@ def build_parser():
     parser.add_argument("--calibration", action="store_true",
                         help="Whole-design comparison (S6 calibration only).")
     parser.add_argument("--level", default="E0", choices=["E0", "E1", "E2"])
+    parser.add_argument("--pnr-json", default=None,
+                        help="nextpnr post-PnR netlist for the decode check's "
+                             "c1; default is top_pnr.json in --design-dir.")
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -1047,7 +1495,8 @@ def main(argv=None):
             "P0.T23 implements E0 only")
     result = compare_design(args.design_dir, shape=args.shape,
                             level=args.level, mask_path=args.mask,
-                            calibration=args.calibration)
+                            calibration=args.calibration,
+                            pnr_json=args.pnr_json)
     for line in report(result):
         print(line)
     if args.json:
