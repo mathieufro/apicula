@@ -2223,6 +2223,48 @@ def compare(design_dir, spec=None, level="E0", **kwargs):
 # --------------------------------------------------------------------------
 # 9b. `S6` calibration reporting (`D32`, `P0.T33`)
 # --------------------------------------------------------------------------
+def evidence_fields(result):
+    """This checker's fragment of the one §6 row schema (`P0.T28` `adapt`).
+
+    `E0Result` is a dataclass, not a row: `__main__.real_runner` used to do
+    `row.update(result)` and raised `TypeError: 'E0Result' object is not
+    iterable`, so no batch could ever produce an evidence row (`P0.T39`).
+    This is the seam that was missing -- the only place the checker's result
+    is translated into schema field names, mirroring
+    `oracle.evidence_row` and `openflow.evidence_fields`.
+
+    `verdict` maps the §6 vocabulary: `ok` when nothing in scope differs and
+    no residual bit is unexplained, otherwise `diff`.  The checker's own
+    `EQUIV <level> ok` sentence is prose and is kept in `notes`.
+    """
+    dc = dict(result.diff_count or {})
+    residual = result.residual or {}
+    unexplained = list(residual.get("unexplained_bits", []))
+    set_diffs = sum(int(dc.get(k, 0) or 0) for k in ("cells", "attrs", "conns"))
+    verdict = "ok" if (set_diffs == 0 and not unexplained) else "diff"
+    # `decode_check` is exactly `{c1, c2}` in the schema; the checker also
+    # carries per-cell diagnostics (`c1_missing`, `c2_differing_bytes`, ...).
+    # They are kept -- as a note tail -- never dropped and never smuggled into
+    # the schema field, which `validate_row` rejects outright.
+    decode = dict(result.decode_check or {})
+    decode_check = {k: decode.pop(k) for k in ("c1", "c2") if k in decode}
+    notes = " ".join(part for part in (result.verdict, result.notes) if part)
+    if decode:
+        notes = (notes + " | " if notes else "") + "decode_detail=" + json.dumps(
+            decode, sort_keys=True, default=str)
+    return {
+        "level": result.level,
+        "verdict": verdict,
+        "diff_count": dc,
+        "first_diff": result.first_diff,
+        "fuses_moved": list(residual.get("fuses_moved", [])),
+        "unexplained_bits": unexplained,
+        "decode_check": decode_check,
+        "mask_sha256": result.mask_sha256,
+        "notes": notes,
+    }
+
+
 def calibration_summary(result):
     """`(diffs, unexplained)` for one whole-design calibration run.
 

@@ -291,3 +291,142 @@ def _readme_option_flags():
 def test_batch_cli_readme_matches_parser():
     assert os.path.isfile(README), README
     assert _readme_option_flags() == _parser_flags() == set(PUBLISHED)
+
+
+# --------------------------------------------------------------------------
+# The batch head's self-tests need a REFERENCE design pair (P0.T39 defect).
+#
+# `_selftest_gate` used to pass `os.getcwd()` as `--design-dir`, i.e. the
+# apicula checkout, which holds no vendor/open-flow pair at all.  The two head
+# gates therefore failed on every real batch and `BATCH_HEAD_BLOCKED` was the
+# only reachable outcome.  The guard below is what was missing: it asserts the
+# gate is pointed at the smoke pair, not at the cwd and not at the batch's own
+# (still empty) design directory.
+# --------------------------------------------------------------------------
+def test_selftest_gate_uses_the_smoke_pair_not_cwd(monkeypatch):
+    from fuzz.gw5ast138c.harness import __main__ as batch
+    from fuzz.gw5ast138c.harness import oracle
+
+    monkeypatch.delenv(batch.SELFTEST_DIR_ENV, raising=False)
+    assert batch.selftest_dir() == oracle.SMOKE_DIR
+    assert batch.selftest_dir() != os.getcwd()
+
+
+def test_selftest_gate_dir_is_overridable(monkeypatch, tmp_path):
+    from fuzz.gw5ast138c.harness import __main__ as batch
+
+    monkeypatch.setenv(batch.SELFTEST_DIR_ENV, str(tmp_path))
+    assert batch.selftest_dir() == str(tmp_path)
+
+
+def test_selftest_gate_passes_that_dir_to_selftest(monkeypatch, tmp_path):
+    from fuzz.gw5ast138c.harness import __main__ as batch
+    from fuzz.gw5ast138c.harness import selftest
+
+    monkeypatch.setenv(batch.SELFTEST_DIR_ENV, str(tmp_path))
+    seen = {}
+
+    def fake_main(argv):
+        seen["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr(selftest, "main", fake_main)
+    gate = batch._selftest_gate("--inject-one-fuse")
+    assert gate() == 0
+    assert seen["argv"] == ["--design-dir", str(tmp_path), "--inject-one-fuse"]
+
+
+# --------------------------------------------------------------------------
+# The batch runner must assemble a real §6 row (P0.T39 defect).
+#
+# `real_runner` used to hand-build a row and then `row.update(verdict)` the
+# checker's `E0Result` dataclass into it, which raised
+# `TypeError: 'E0Result' object is not iterable` on every real batch: the run
+# always came back `verdict=aborted` and the phase's E2E slug stayed empty.
+# The guards below pin the seam: the checker publishes a fragment, and the
+# fragment folds into a row that satisfies `evidence.validate_row`.
+# --------------------------------------------------------------------------
+def test_equiv_publishes_a_schema_fragment():
+    from fuzz.gw5ast138c.harness import equiv, evidence
+
+    result = equiv.E0Result()
+    fragment = equiv.evidence_fields(result)
+    assert set(fragment) <= set(evidence.REQUIRED_FIELDS)
+    assert fragment["verdict"] in evidence.VERDICTS
+
+
+def test_equiv_fragment_verdict_is_the_schema_vocabulary():
+    from fuzz.gw5ast138c.harness import equiv
+
+    clean = equiv.E0Result(diff_count={"cells": 0, "attrs": 0, "conns": 0,
+                                       "pips": 17})
+    assert equiv.evidence_fields(clean)["verdict"] == "ok"
+
+    dirty = equiv.E0Result(diff_count={"cells": 1, "attrs": 0, "conns": 0,
+                                       "pips": 0})
+    assert equiv.evidence_fields(dirty)["verdict"] == "diff"
+
+    unexplained = equiv.E0Result(
+        diff_count={"cells": 0, "attrs": 0, "conns": 0, "pips": 0},
+        residual={"unexplained_bits": [[1, 2, "t", 3]]})
+    assert equiv.evidence_fields(unexplained)["verdict"] == "diff"
+
+
+def test_equiv_fragment_folds_into_a_valid_row():
+    from fuzz.gw5ast138c.harness import equiv, evidence
+
+    result = equiv.E0Result()
+    row = evidence.adapt({"run_id": "b-smoke-0000", "primitive": "DFF",
+                          "shape": "smoke", "level": "E0"},
+                         **equiv.evidence_fields(result))
+    evidence.validate_row(row)          # raises if the seam drifts again
+    assert set(row) == set(evidence.REQUIRED_FIELDS)
+
+
+# --------------------------------------------------------------------------
+# `BATCH_SIZE source=` must be P0.T34's measurement, not the ASSUMED fallback
+# (P0.T39 defect: the ledger stated the number only inside a three-addend
+# worked derivation, which the reader's adjacency window could not reach, so
+# every batch silently sized itself off spec.md §8.2's 35-minute ASSUMED row).
+# --------------------------------------------------------------------------
+def test_measured_budget_is_machine_readable(tmp_path, monkeypatch):
+    from fuzz.gw5ast138c.harness import __main__ as batch
+    from fuzz.gw5ast138c.harness import evidence
+
+    root = tmp_path / "evidence"
+    (root / "calibration").mkdir(parents=True)
+    (root / "calibration" / "measured-budget.md").write_text(
+        "# derivation\n"
+        "measured_per_run_total = oracle + yosys + nextpnr\n"
+        "                        = 23.144 + 5.064 + 13.273\n"
+        "                        = 41.481 s\n\n"
+        "```\nmeasured_per_run_total = 41.481 s\n```\n")
+    monkeypatch.setenv(evidence.EVIDENCE_ROOT_ENV, str(root))
+
+    seconds, source = batch.measured_per_run_total()
+    assert source != "ASSUMED"
+    assert abs(seconds - 41.481) < 1e-6      # not truncated to 41
+    assert batch.batch_size()[0] == 867      # P0.T34's recorded number
+
+
+def test_the_real_measured_budget_is_readable():
+    """The checked-in ledger itself, not a fixture."""
+    from fuzz.gw5ast138c.harness import __main__ as batch
+
+    seconds, source = batch.measured_per_run_total()
+    assert source != "ASSUMED", "P0.T34's measured-budget.md is unreadable again"
+    assert seconds > 0
+
+
+def test_equiv_fragment_decode_check_is_only_c1_c2():
+    """`validate_row` rejects any other key; the diagnostics go to `notes`."""
+    from fuzz.gw5ast138c.harness import equiv, evidence
+
+    result = equiv.E0Result(decode_check={
+        "c1": "ok", "c2": "ok", "c1_missing": [], "c2_differing_bytes": 0})
+    fragment = equiv.evidence_fields(result)
+    assert set(fragment["decode_check"]) == {"c1", "c2"}
+    assert "c1_missing" in fragment["notes"]
+    evidence.validate_row(evidence.adapt(
+        {"run_id": "b-smoke-0000", "shape": "smoke", "level": "E0"},
+        **fragment))

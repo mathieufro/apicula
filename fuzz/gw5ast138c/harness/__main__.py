@@ -142,7 +142,9 @@ def measured_per_run_total(stream=None):
                 value = float(match.group(1))
                 if match.group(2).lower().startswith("min"):
                     value *= 60
-                return int(value), path
+                # Kept as measured (41.481 s, not 41): truncating here
+                # moved `batch_runs` off P0.T34's recorded 867 (P0.T39).
+                return value, path
     print(f"WARNING: no P0.T34 measured-budget.md found; falling back to the "
           f"ASSUMED per-run total of {ASSUMED_PER_RUN_TOTAL_S}s "
           f"(spec.md §8.2 ASSUMED, D51)", file=stream or sys.stdout)
@@ -246,10 +248,28 @@ class BatchLog:
 # --------------------------------------------------------------------------
 # 5. The batch head (`roadmap.md` §5.1c / §9)
 # --------------------------------------------------------------------------
+#: Where the batch-head self-tests find their reference design pair.  They are
+#: harness self-tests, not run self-tests: they need a design directory that
+#: already holds a matched vendor/open-flow pair, which the batch's own
+#: `--design-dir` does not yet at head time (it is empty until the first run
+#: generates into it).  `oracle.SMOKE_DIR` is that pair (`P0.T19`, `V4`/`V6`);
+#: `$FUZZ_HARNESS_SELFTEST_DIR` overrides it for tests and odd layouts.
+SELFTEST_DIR_ENV = "FUZZ_HARNESS_SELFTEST_DIR"
+
+
+def selftest_dir():
+    """Reference design pair for the batch-head self-tests."""
+    override = os.environ.get(SELFTEST_DIR_ENV)
+    if override:
+        return override
+    from . import oracle
+    return oracle.SMOKE_DIR
+
+
 def _selftest_gate(flag):
     def gate():
         from . import selftest
-        return selftest.main(["--design-dir", os.getcwd(), flag])
+        return selftest.main(["--design-dir", selftest_dir(), flag])
     return gate
 
 
@@ -320,55 +340,60 @@ def run_head_gates(log, gates=HEAD_GATES, skip=False):
 def real_runner(run_id, design_dir, shape, sweep_value, level):
     """gen -> oracle -> open flow -> equiv, for one sweep point.
 
-    Returns the evidence row.  `equiv.py` is authored by `P0.T23`-`P0.T26`; a
-    stub `equiv` yields a row with the two bitstreams and `verdict: aborted`
-    plus a note, never a silent `ok`.
+    Returns the evidence row, assembled the one way the harness assembles a
+    row: `evidence.adapt()` over the three producers' own fragments
+    (`oracle.evidence_row`, `openflow.evidence_fields`,
+    `equiv.evidence_fields`).  This module never hand-builds a row shape and
+    never merges a producer's result object into a dict -- that is what raised
+    `TypeError: 'E0Result' object is not iterable` on every real batch until
+    `P0.T39` measured it.
     """
-    from . import gen, oracle, openflow
+    from . import equiv, evidence, gen, oracle, openflow
 
-    row = {
+    spec = gen.load_shape(shape)
+    base = {
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "primitive": spec.primitive,
         "shape": shape,
-        "sweep": {},
+        "sweep": {spec.sweep_axis: sweep_value},
         "level": level,
         "verdict": "aborted",
-        "notes": "",
     }
-    spec = gen.load_shape(shape)
-    row["primitive"] = spec.primitive
-    row["sweep"] = {spec.sweep_axis: sweep_value}
     gen.run(spec, design_dir, sweep_value)
 
     started = time.time()
     oracle_result = oracle.run_oracle(design_dir, top_module=spec.top_module,
                                       extra_options=spec.extra_gwsh_options)
-    row["oracle_log"] = oracle_result["log_path"]
+    oracle_fragment = oracle.evidence_row(
+        oracle_result, run_id, primitive=spec.primitive, shape=shape)
+    oracle_fragment["level"] = level
+    oracle_fragment["verdict"] = "aborted"
+    oracle_fragment["notes"] = ""
     if not oracle_result["preflight"].ok:
-        row["notes"] = f"oracle pre-flight: {oracle_result['preflight'].reason}"
-        row["wall_clock_s"] = {"oracle": time.time() - started}
-        return row
+        return evidence.adapt(
+            oracle_fragment, base,
+            notes=f"oracle pre-flight: {oracle_result['preflight'].reason}",
+            wall_clock_s={"oracle": time.time() - started})
 
-    open_result = openflow.run_openflow(design_dir, top_module=spec.top_module,
+    open_result = openflow.run_openflow(design_dir,
+                                        top_module=spec.top_module,
                                         extra_gpio=spec.extra_pack_flags)
-    row["wall_clock_s"] = {"total": time.time() - started}
-    row["open_fs"] = open_result["fs_path"]
+    wall = {"oracle": oracle_result["wall_clock_s"],
+            "total": time.time() - started}
+    open_logs = [step["log_path"] for step in open_result["steps"]
+                 if step.get("log_path")]
+    open_fragment = openflow.evidence_fields(
+        open_result["provenance"], open_log=open_logs or None,
+        open_fs=open_result["fs_path"], wall_clock_s=wall)
     if not open_result["ok"]:
-        row["notes"] = f"open flow failed: {open_result['returncodes']}"
-        return row
+        return evidence.adapt(
+            oracle_fragment, open_fragment, base,
+            notes=f"open flow failed: {open_result['returncodes']}")
 
-    try:
-        from . import equiv
-        # `equiv.py` is authored by P0.T23-P0.T26; `compare_e0` is P0.T23's
-        # named entry, `compare` the level-dispatching one P0.T26 adds.
-        compare = getattr(equiv, "compare", None) or equiv.compare_e0
-        verdict = compare(design_dir, spec, level=level)
-    except (ImportError, AttributeError, NotImplementedError, TypeError) as exc:
-        row["notes"] = (f"equiv not available at this task id ({exc}); both "
-                        f"bitstreams built, comparison deferred")
-        return row
-    row.update(verdict)
-    return row
+    equiv_result = equiv.compare(design_dir, spec, level=level)
+    return evidence.adapt(oracle_fragment, open_fragment, base,
+                          **equiv.evidence_fields(equiv_result))
 
 
 def fake_runner(seconds):
