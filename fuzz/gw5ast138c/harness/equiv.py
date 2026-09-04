@@ -98,6 +98,9 @@ class Netlist:
     nets: dict = field(default_factory=dict)    # net_label -> frozenset((Cell, port))
     pip_count: int = 0
     tile_bits: dict = field(default_factory=dict)  # (x, y) -> frozenset((r, c))
+    #: `(row, col) -> {dest_global: src_global}`, kept because `E2`'s pip-set
+    #: identity (`P0.T26`) needs a net's pips, not just their count.
+    raw_pips: dict = field(default_factory=dict)
     source: str = ""
 
 
@@ -501,6 +504,7 @@ def unpack_netlist(fs_path, device=DEVICE, db=None, noalu=False):
             merged[_chipdb.wire2global(row + 1, col + 1, db, dest)] = \
                 _chipdb.wire2global(row + 1, col + 1, db, src)
         raw_pips[(row, col)] = merged
+        netlist.raw_pips[(row, col)] = merged
         netlist.pip_count += len(merged)
 
     for row, col in sorted(bank_positions):
@@ -1113,6 +1117,10 @@ class E0Result:
     residual: dict = field(default_factory=dict)
     decode_check: dict = field(default_factory=dict)
     per_tile: dict = field(default_factory=dict)
+    #: `P0.T26`'s two level payloads: `level_e1()`'s placement report and
+    #: `level_e2()`'s single-legal-path pip-set fraction.
+    e1: dict = field(default_factory=dict)
+    e2: dict = field(default_factory=dict)
     notes: str = ""
 
 
@@ -1291,6 +1299,33 @@ def report(result):
                 f"  ACCOUNTED {row['category']} bits={row.get('bits', 0)} "
                 f"bytes={row.get('bytes', 0)} tiles={row.get('tiles', 0)} "
                 f"mask_entry={row.get('mask_entry')}")
+    if result.e1:
+        e1 = result.e1
+        lines.append(
+            f"E1 placement level={e1['level']} constrained={e1['checked']} "
+            f"matched={len(e1['matched'])} mismatched={len(e1['mismatched'])} "
+            f"unobserved={len(e1['unobserved'])}")
+        for row in e1["mismatched"][:8]:
+            lines.append(f"  E1_MISMATCH \"{row['name']}\" "
+                         f"exported={row['exported']} "
+                         f"realised={row['realised']}")
+        for row in e1["unobserved"][:8]:
+            lines.append(f"  E1_UNOBSERVED \"{row['name']}\" "
+                         f"exported={row['exported']} "
+                         f"in_scope={row['in_scope']} in_vo={row['in_vo']}")
+    if result.e2:
+        e2 = result.e2
+        lines.append(
+            f"E2 single_path_nets candidates={e2['candidates']} "
+            f"identical={e2['identical']} fraction={e2['fraction']:.3f} "
+            "(bonus, never a done criterion)")
+        for row in e2["nets"][:8]:
+            lines.append(f"  E2_NET class={row['class']} "
+                         f"identical={row['identical']} "
+                         f"vendor_pips={row['vendor_pips']} "
+                         f"open_pips={row['open_pips']}")
+        if e2["note"]:
+            lines.append(f"  E2_NOTE {e2['note']}")
     if result.decode_check:
         dc = result.decode_check
         lines.append(f"DECODE_CHECK c1={dc.get('c1')} c2={dc.get('c2')} "
@@ -1326,7 +1361,8 @@ def evidence_rows(result, run_id="equiv", primitive=None, shape=None):
     An `ABORT` yields a row marked `aborted`; it is **never** silently retried
     into a clean-looking result (§5.2).
     """
-    verdict = {"EQUIV E0 ok": "ok", "DIFF": "diff", "ABORT": "aborted"}[
+    verdict = {"EQUIV E0 ok": "ok", "EQUIV E1 ok": "ok",
+               "EQUIV E2 ok": "ok", "DIFF": "diff", "ABORT": "aborted"}[
         result.verdict]
     return [{
         "run_id": run_id,
@@ -1341,11 +1377,412 @@ def evidence_rows(result, run_id="equiv", primitive=None, shape=None):
                              else result.residual),
         "residual": result.residual,
         "decode_check": result.decode_check,
+        "e1": result.e1,
+        "e2": result.e2,
         "mask_sha256": result.mask_sha256,
         "mask_entries": list(result.mask_entries),
         "oracle_log": result.log_path,
         "notes": result.notes,
     }]
+
+
+# --------------------------------------------------------------------------
+# 8b. Levels `E1` and `E2` (`P0.T26`, `D32`, `spec-harness.md` §3/§5.1)
+# --------------------------------------------------------------------------
+#: nextpnr's own `.cst` reader regex for the CLS spelling of `INS_LOC`
+#: (`himbaechel/uarch/gowin/cst.cc:94-96`), transliterated to Python by
+#: unescaping the C++ string escapes and nothing else.  Every line the
+#: exporter writes is matched against this **before** it reaches a `.cst`, so
+#: a line nextpnr could not read back can never be written.
+INSLOC_RE = re.compile(
+    r'INS_LOC +"([^"]+)" +R([0-9]+)C([0-9]+)\[([0-9])\]\[([AB])\] *;.*[\s\S]*')
+
+#: The bels that live in a CLS and therefore have a `RxCy[cls][A|B]` address.
+#: Everything else nextpnr places (IOB, BUFG, GSR, PINCFG, VCC/GND, ...) is
+#: either constrained by `IO_LOC`/`CLOCK_LOC` or has no `.cst` spelling at
+#: all; those are **listed as skipped**, never silently dropped.
+_CLS_BEL_RE = re.compile(r"^(LUT|DFF)([0-7])$")
+
+#: The block `export_insloc()` owns inside a `.cst`.  Re-exporting replaces
+#: the block, so the exporter is idempotent and never accumulates stale
+#: constraints from an earlier placement.
+INSLOC_BLOCK_BEGIN = ("// --- BEGIN nextpnr placement export "
+                      "(fuzz.gw5ast138c.harness.equiv.export_insloc) ---")
+INSLOC_BLOCK_END = "// --- END nextpnr placement export ---"
+
+
+def z_lut(cls, half):
+    """`z` of the LUT of CLS `cls`, half `A`/`B` (`gowin_arch_gen.py:1330`).
+
+    LUT `i` has `z = i*2` and `i = cls*2 + (half == "B")`, so
+    `z_lut = cls*4 + 2*(half == "B")`.
+    """
+    if cls not in (0, 1, 2, 3):
+        raise EquivError(f"CLS index {cls!r} outside 0..3")
+    if half not in ("A", "B"):
+        raise EquivError(f"CLS half {half!r} is neither 'A' nor 'B'")
+    return cls * 4 + 2 * (half == "B")
+
+
+def z_dff(cls, half):
+    """`z` of the DFF of CLS `cls`, half `A`/`B` (`gowin_arch_gen.py:1342`)."""
+    return z_lut(cls, half) + 1
+
+
+def cls_half(index):
+    """`LUT3`/`DFF3` -> `(cls, half)`, inverting `i = cls*2 + (half == "B")`."""
+    if not 0 <= index <= 7:
+        raise EquivError(f"CLS bel index {index!r} outside 0..7")
+    return index // 2, "B" if index % 2 else "A"
+
+
+def insloc_line(name, x, y, cls, half):
+    """One `INS_LOC` line: `R` is `y+1` and `C` is `x+1` (`spec-harness.md` §3).
+
+    The line is validated against nextpnr's own regex here, so an unwritable
+    line raises rather than reaching a `.cst`.
+    """
+    line = f'INS_LOC "{name}" R{y + 1}C{x + 1}[{cls}][{half}];'
+    if not INSLOC_RE.match(line):
+        raise EquivError(
+            f"generated INS_LOC line does not match nextpnr's reader regex "
+            f"(cst.cc:94-96): {line!r}")
+    return line
+
+
+def insloc_lines(pnr_cells, known_instances=None):
+    """`INS_LOC` lines for every placed CLS cell of a nextpnr placement.
+
+    Returns `{"lines", "exported", "skipped"}`.  `exported` maps the cell name
+    to `{"x", "y", "cls", "half", "z", "bel", "type", "line"}`; `skipped`
+    lists every placed cell that gets no line, each with the reason -- an IOB
+    is constrained by `IO_LOC`, a `BUFG` by `CLOCK_LOC`, and a packer
+    pseudo-bel by nothing at all.
+
+    `known_instances`, when given, is the set of instance names the **vendor's
+    own** netlist carries, and a cell whose name is not in it is skipped.  It
+    is not an optimisation: measured on the smoke design (`P0.T26`), a
+    constraint naming an instance GowinSynthesis renamed makes `gw_sh` print
+    `ERROR (CT1135) : Can't find object named ...` and abort the whole run, so
+    exporting a name the vendor does not have destroys the comparison instead
+    of tightening it.  Only names both flows agree on can be constrained, and
+    that is a property of the two synthesisers, not of this exporter.
+    """
+    lines, exported, skipped = [], {}, []
+    for cell in pnr_cells:
+        name, bel, site = cell["name"], cell["bel"], cell["site"]
+        if bel is None or site is None:
+            skipped.append({"name": name, "type": cell["type"], "bel": bel,
+                            "why": "not placed on any bel"})
+            continue
+        if known_instances is not None and name not in known_instances:
+            skipped.append({"name": name, "type": cell["type"], "bel": bel,
+                            "why": "not an instance of the vendor netlist "
+                                   "(renamed by GowinSynthesis); constraining "
+                                   "it aborts gw_sh with CT1135"})
+            continue
+        m = _CLS_BEL_RE.match(bel)
+        if m is None:
+            skipped.append({"name": name, "type": cell["type"], "bel": bel,
+                            "why": "not a CLS bel: no RxCy[cls][A|B] address"})
+            continue
+        kind, index = m.group(1), int(m.group(2))
+        cls, half = cls_half(index)
+        x, y = site
+        z = z_lut(cls, half) if kind == "LUT" else z_dff(cls, half)
+        line = insloc_line(name, x, y, cls, half)
+        lines.append(line)
+        exported[name] = {"x": x, "y": y, "cls": cls, "half": half, "z": z,
+                          "bel": bel, "type": cell["type"], "line": line}
+    return {"lines": lines, "exported": exported, "skipped": skipped}
+
+
+def export_insloc(pnr_json, cst_path, vendor_netlist=None):
+    """Export a nextpnr placement into a vendor `.cst` as `INS_LOC` lines.
+
+    **This is the named symbol** (`P0.T26`; `P2.T01` precondition (7), `P2.T22`
+    call, cross-phase `F15`): no other phase writes an exporter.  It reads the
+    post-PnR JSON, writes one `INS_LOC` line per placed CLS cell into an owned
+    block at the end of `cst_path` (replacing any earlier block, so it is
+    idempotent), and returns the same dict `insloc_lines()` does plus the
+    `.cst` path and the count.
+
+    The dataflow is the **export** direction only (nextpnr placement -> vendor
+    `.cst`); it needs no nextpnr change (`spec-harness.md` §3).
+
+    `vendor_netlist` is the vendor's own `.vg`/`.vo`; pass it and only
+    instance names the vendor also has are constrained (see `insloc_lines()`
+    for why that is mandatory rather than defensive).
+    """
+    known = (set(vendor_instances(vendor_netlist))
+             if vendor_netlist else None)
+    out = insloc_lines(read_pnr_cells(pnr_json), known_instances=known)
+    text = ""
+    if os.path.isfile(cst_path):
+        with open(cst_path) as fh:
+            text = fh.read()
+    head = text.split(INSLOC_BLOCK_BEGIN)[0].rstrip("\n")
+    block = "\n".join([INSLOC_BLOCK_BEGIN] + out["lines"] + [INSLOC_BLOCK_END])
+    with open(cst_path, "w") as fh:
+        fh.write((head + "\n\n" if head else "") + block + "\n")
+    out["cst"] = os.path.abspath(cst_path)
+    out["count"] = len(out["lines"])
+    return out
+
+
+# --- the vendor's realised placement (`run/impl/pnr/*.tr`, `*.vo`) ---------
+#: A `.tr` timing-path row: the `LOC` column carries the CLS address and the
+#: `NODE` column the instance and its port, e.g.
+#: `  6.582   5.968   tNET   RR   1        R2C3[0][A]    dut_dff/CLK`.
+_TR_LOC_RE = re.compile(
+    r"\bR([0-9]+)C([0-9]+)\[([0-9])\]\[([AB])\]\s+(\S+)")
+
+#: An instance header in a vendor Verilog netlist, `.vg` or `.vo`:
+#: `DFFRE dut_dff (` (the `.vg` indents it, the `.vo` does not).
+_VO_INST_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s+(\S+)\s*\(\s*$")
+
+
+def vendor_instances(path):
+    """`{instance: cell_type}` of a vendor `.vg`/`.vo` netlist."""
+    out = {}
+    if not path or not os.path.isfile(path):
+        return out
+    with open(path, errors="replace") as fh:
+        for row in fh:
+            m = _VO_INST_RE.match(row.rstrip())
+            if m is not None:
+                out[m.group(2)] = m.group(1)
+    return out
+
+
+def parse_vendor_placement(tr_path=None, vo_path=None, design_dir=None):
+    """The vendor's realised CLS placement, read from its own reports.
+
+    `.tr` carries the coordinates (its timing rows name `LOC` and `NODE`);
+    `.vo` carries the post-PnR instance list, which is what tells a *renamed*
+    instance apart from a *moved* one.  Returns
+    `{"placement": {inst: (x, y, cls, half)}, "instances": {...}, "tr", "vo"}`
+    with `x = C-1`, `y = R-1`, so it is directly comparable with the exporter.
+    """
+    if design_dir is not None:
+        pnr_dir = os.path.join(design_dir, "run", "impl", "pnr")
+        if tr_path is None:
+            tr_path = next(iter(sorted(
+                _glob(os.path.join(pnr_dir, "*.tr")))), None)
+        if vo_path is None:
+            vo_path = next(iter(sorted(
+                _glob(os.path.join(pnr_dir, "*.vo")))), None)
+
+    placement, conflicts = {}, []
+    if tr_path and os.path.isfile(tr_path):
+        with open(tr_path, errors="replace") as fh:
+            for row in fh:
+                m = _TR_LOC_RE.search(row)
+                if m is None:
+                    continue
+                r, c, cls, half, node = m.groups()
+                inst = node.rsplit("/", 1)[0] if "/" in node else node
+                site = (int(c) - 1, int(r) - 1, int(cls), half)
+                if placement.setdefault(inst, site) != site:
+                    conflicts.append({"instance": inst,
+                                      "sites": [placement[inst], site]})
+
+    instances = vendor_instances(vo_path)
+
+    return {"placement": placement, "instances": instances,
+            "conflicts": conflicts,
+            "tr": os.path.abspath(tr_path) if tr_path else None,
+            "vo": os.path.abspath(vo_path) if vo_path else None}
+
+
+def _glob(pattern):
+    import glob as _g
+    return _g.glob(pattern)
+
+
+def level_e1(exported, realised, scope=None):
+    """`E1`: does the vendor place every constrained cell where we asked?
+
+    Returns `{"level", "checked", "matched", "mismatched", "unobserved",
+    "notes"}`.  `level` is `E1` when every constrained cell **that the vendor's
+    own reports show** sits at its exported address and at least one such cell
+    lies in the comparison scope; otherwise `E0`, and `notes` says why
+    (`EC9`).  A constrained cell the vendor's reports never name is
+    *unobserved*, not *moved*: GowinSynthesis renames instances, so absence is
+    evidence about the report, not about the placement -- it is listed, and an
+    unobserved **in-scope** cell is enough to withhold `E1`.
+    """
+    placed = realised.get("placement", {})
+    instances = realised.get("instances", {})
+    matched, mismatched, unobserved = [], [], []
+    in_scope_seen = 0
+    for name, want in sorted(exported.items()):
+        inside = scope is None or (want["x"], want["y"]) in {
+            tuple(t) for t in scope.tiles}
+        got = placed.get(name)
+        if got is None:
+            unobserved.append({
+                "name": name, "in_scope": inside,
+                "exported": f"R{want['y'] + 1}C{want['x'] + 1}"
+                            f"[{want['cls']}][{want['half']}]",
+                "in_vo": name in instances})
+            continue
+        gx, gy, gcls, ghalf = got
+        if (gx, gy, gcls, ghalf) == (want["x"], want["y"], want["cls"],
+                                     want["half"]):
+            matched.append({"name": name, "in_scope": inside,
+                            "site": f"R{gy + 1}C{gx + 1}[{gcls}][{ghalf}]"})
+            in_scope_seen += bool(inside)
+        else:
+            mismatched.append({
+                "name": name, "in_scope": inside,
+                "exported": f"R{want['y'] + 1}C{want['x'] + 1}"
+                            f"[{want['cls']}][{want['half']}]",
+                "realised": f"R{gy + 1}C{gx + 1}[{gcls}][{ghalf}]"})
+
+    notes = ""
+    level = "E1"
+    if mismatched:
+        level = "E0"
+        first = mismatched[0]
+        notes = (f"EC9: the vendor ignored {len(mismatched)} INS_LOC "
+                 f"constraint(s); first is {first['name']!r} exported at "
+                 f"{first['exported']} but realised at {first['realised']} -- "
+                 "placement identity is not assertable, so the row closes at E0")
+    else:
+        blind = [u for u in unobserved if u["in_scope"]]
+        if not exported:
+            level = "E0"
+            notes = ("EC9: the open placement exported no CLS constraint, so "
+                     "there is nothing for E1 to assert")
+        elif blind:
+            level = "E0"
+            notes = (f"EC9: {len(blind)} in-scope constrained cell(s) are not "
+                     "named by the vendor's .tr/.vo (GowinSynthesis renames "
+                     f"instances); first is {blind[0]['name']!r} exported at "
+                     f"{blind[0]['exported']} -- placement identity cannot be "
+                     "observed, so the row closes at E0")
+        elif not in_scope_seen:
+            level = "E0"
+            notes = ("EC9: no constrained cell lies inside the comparison "
+                     "scope, so E1 would assert nothing about the primitive "
+                     "under test")
+        elif unobserved:
+            notes = (f"E1 holds in scope; {len(unobserved)} out-of-scope "
+                     "constrained cell(s) are not named by the vendor's "
+                     ".tr/.vo (renamed by GowinSynthesis), so their placement "
+                     "is unobserved, not moved")
+    return {"level": level, "checked": len(exported), "matched": matched,
+            "mismatched": mismatched, "unobserved": unobserved, "notes": notes}
+
+
+# --- `E2`: the pip-set bonus on single-legal-path nets ---------------------
+#: The only net classes `spec-harness.md` §5.1 admits at `E2` -- nets with
+#: exactly one legal path, so two independent routers *must* agree.  A net is
+#: a candidate when one of its endpoints is a `(cell type prefix, port)` pair
+#: below.  Nothing else is ever compared at `E2`, because for an ordinary
+#: fabric net a pip difference is a routing choice, not a defect (`D32`).
+SINGLE_PATH_NET_CLASSES = {
+    "dqs_strobe": (("DQS",), ("DQSR90", "DQSW0", "DQSW270", "RCLKSEL",
+                              "WSTEP", "READ")),
+    "hclk_to_fclk": (("HCLKMUX", "CLKDIV", "DHCEN", "HCLK"), ("FCLK",)),
+    "pll_to_core_clk": (("PLL", "PLLA", "RPLLA", "PLLVR"),
+                        ("CLKOUT", "CLKOUTP", "CLKOUTD", "CLKOUTD3")),
+}
+
+
+def _net_class(endpoints):
+    for label, (types, ports) in sorted(SINGLE_PATH_NET_CLASSES.items()):
+        for cell, port in endpoints:
+            if cell.type.startswith(tuple(types)) and port in ports:
+                return label
+    return None
+
+
+def _pips_by_net(netlist):
+    """`{net root: {(src, dest)}}` -- the pips of each connected component.
+
+    Rebuilt from `Netlist.raw_pips` with the same union-find `_build_nets()`
+    used, so a root here is the label `Netlist.nets` carries.
+    """
+    uf = _UnionFind()
+    for tile_pips in netlist.raw_pips.values():
+        for dest, src in tile_pips.items():
+            uf.setdefault(dest, dest)
+            uf.setdefault(src, src)
+            uf.union(src, dest)
+    out = collections.defaultdict(set)
+    for tile_pips in netlist.raw_pips.values():
+        for dest, src in tile_pips.items():
+            out[uf.find(dest)].add((src, dest))
+    return out
+
+
+def level_e2(vendor, open_, scope=None):
+    """`E2`: pip-set identity on the single-legal-path nets of the shape.
+
+    Reported as an **achieved fraction**, never a done criterion (`D32`,
+    §5.1): a fraction of 0.0 -- including the honest 0.0 of a shape with no
+    such net -- leaves the verdict exactly where `E1` left it.  Nets are
+    matched across the two sides by `net_id()`, i.e. by their endpoint sets,
+    which is meaningful precisely because `E2` is only ever computed once
+    `E1` has established that the cells sit at the same sites.
+    """
+    pips_v, pips_o = _pips_by_net(vendor), _pips_by_net(open_)
+    sides = []
+    for netlist, pips in ((vendor, pips_v), (open_, pips_o)):
+        by_id = {}
+        for label, endpoints in netlist.nets.items():
+            eps = {(c, p) for c, p in endpoints if in_scope(c, scope)}
+            if not eps:
+                continue
+            cls = _net_class(eps)
+            if cls is None:
+                continue
+            by_id[net_id(endpoints)] = (cls, pips.get(label, set()))
+        sides.append(by_id)
+    by_v, by_o = sides
+
+    nets, identical = [], 0
+    for key in sorted(set(by_v) & set(by_o)):
+        cls, pv = by_v[key]
+        _cls_o, po = by_o[key]
+        same = pv == po
+        identical += bool(same)
+        nets.append({"net": key, "class": cls, "identical": bool(same),
+                     "vendor_pips": len(pv), "open_pips": len(po),
+                     "only_vendor": len(pv - po), "only_open": len(po - pv)})
+    candidates = len(nets)
+    note = ""
+    if not candidates:
+        note = ("no single-legal-path net in scope (DQS strobe, HCLK->FCLK or "
+                "PLL->CORE_CLK); E2 is a bonus and reports 0.0, which is never "
+                "a verdict term")
+    return {"candidates": candidates, "identical": identical,
+            "fraction": (identical / candidates) if candidates else 0.0,
+            "nets": nets, "note": note}
+
+
+def apply_level(result, requested):
+    """Fold `result.e1`/`result.e2` into the level and the verdict line.
+
+    `E2` is reached only when `E1` holds **and** every single-legal-path net
+    in scope has an identical pip set; a partial fraction leaves the row at
+    `E1` (§5.2: `EQUIV E2 ok` is "a bonus line, never required").
+    """
+    level = "E0"
+    if requested != "E0" and result.e1:
+        level = result.e1["level"]
+        if result.e1["notes"]:
+            result.notes = ((result.notes + " " if result.notes else "")
+                            + result.e1["notes"])
+    if level == "E1" and requested == "E2" and result.e2:
+        if result.e2["candidates"] and result.e2["fraction"] == 1.0:
+            level = "E2"
+    result.level = level
+    if result.verdict.startswith("EQUIV"):
+        result.verdict = f"EQUIV {level} ok"
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -1392,8 +1829,8 @@ def load_spec(shape, design_dir):
 
 def compare_design(design_dir, shape=None, level="E0", mask_path=None,
                    calibration=False, device=DEVICE, vendor_fs=None,
-                   open_fs=None, pnr_json=None):
-    """Compare the two bitstreams of one design directory at `E0`.
+                   open_fs=None, pnr_json=None, tr_path=None, vo_path=None):
+    """Compare the two bitstreams of one design directory at `E0`/`E1`/`E2`.
 
     `ABORT` when either build is missing: the log path is printed and the row
     is marked `aborted` (§5.2).
@@ -1447,7 +1884,46 @@ def compare_design(design_dir, shape=None, level="E0", mask_path=None,
     else:
         result.decode_check = {"c1": "skipped", "c2": "skipped",
                                "why": f"no nextpnr post-PnR netlist at {pnr}"}
+
+    # `E1`/`E2` (`P0.T26`).  `E1` needs the open placement (the post-PnR JSON
+    # the exporter reads) and the vendor's own reports; when either is absent
+    # the row stays at `E0` and says so, which is exactly `EC9`'s shape.
+    if level != "E0":
+        if os.path.isfile(pnr):
+            realised = parse_vendor_placement(
+                tr_path=tr_path, vo_path=vo_path, design_dir=design_dir)
+            exported = insloc_lines(
+                read_pnr_cells(pnr),
+                known_instances=set(realised["instances"]) or None)["exported"]
+            if realised["tr"] is None and realised["vo"] is None:
+                result.e1 = {"level": "E0", "checked": len(exported),
+                             "matched": [], "mismatched": [],
+                             "unobserved": [],
+                             "notes": ("EC9: no vendor .tr/.vo under "
+                                       f"{design_dir}/run/impl/pnr, so the "
+                                       "realised placement cannot be read")}
+            else:
+                result.e1 = level_e1(exported, realised, scope=scope)
+        else:
+            result.e1 = {"level": "E0", "checked": 0, "matched": [],
+                         "mismatched": [], "unobserved": [],
+                         "notes": ("EC9: no nextpnr post-PnR netlist at "
+                                   f"{pnr}, so there is no placement to export")}
+        if level == "E2" and result.e1["level"] == "E1":
+            result.e2 = level_e2(nl_v, nl_o, scope=scope)
+        apply_level(result, level)
     return result
+
+
+def compare(design_dir, spec=None, level="E0", **kwargs):
+    """The level-dispatching entry `__main__.real_runner` calls (`P0.T22`).
+
+    `compare_e0()` is the set algebra; this is the whole comparison at the
+    level a batch asked for.  A `ShapeSpec` is accepted directly because that
+    is what the batch has in hand.
+    """
+    shape = getattr(spec, "name", spec) if spec is not None else None
+    return compare_design(design_dir, shape=shape, level=level, **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -1483,20 +1959,24 @@ def build_parser():
     parser.add_argument("--pnr-json", default=None,
                         help="nextpnr post-PnR netlist for the decode check's "
                              "c1; default is top_pnr.json in --design-dir.")
+    parser.add_argument("--tr", default=None,
+                        help="Vendor timing report holding the realised CLS "
+                             "placement; default run/impl/pnr/*.tr under "
+                             "--design-dir (E1).")
+    parser.add_argument("--vo", default=None,
+                        help="Vendor post-PnR netlist; default "
+                             "run/impl/pnr/*.vo under --design-dir (E1).")
     parser.add_argument("--json", action="store_true")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.level != "E0":
-        raise EquivError(
-            f"--level {args.level} is P0.T26's (level_e1/level_e2); "
-            "P0.T23 implements E0 only")
     result = compare_design(args.design_dir, shape=args.shape,
                             level=args.level, mask_path=args.mask,
                             calibration=args.calibration,
-                            pnr_json=args.pnr_json)
+                            pnr_json=args.pnr_json, tr_path=args.tr,
+                            vo_path=args.vo)
     for line in report(result):
         print(line)
     if args.json:
