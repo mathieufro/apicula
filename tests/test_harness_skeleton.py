@@ -24,7 +24,7 @@ HARNESS_MODULES = [
 # on the missing required `--design-dir`. Each owning task appends its own
 # module name here as it lands (P0.T19: oracle; P0.T20: gen;
 # P0.T21: openflow; P0.T22: __main__; P0.T23: equiv; P0.T27: attribute;
-# P0.T28: evidence; ...).
+# P0.T28: evidence; P0.T29: selftest; ...).
 IMPLEMENTED_MODULES = [
     "oracle",
     "openflow",
@@ -32,6 +32,7 @@ IMPLEMENTED_MODULES = [
     "equiv",
     "attribute",
     "evidence",
+    "selftest",
 ]
 
 STUB_MODULES = [m for m in HARNESS_MODULES if m not in IMPLEMENTED_MODULES]
