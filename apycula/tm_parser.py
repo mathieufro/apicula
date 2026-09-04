@@ -279,9 +279,50 @@ def parse_chunk(chunk):
         if off < len(chunk):
             yield parser.__name__[6:], parser(chunk[off:])
 
-_aliases = {
-        "gw5a" : {"ES": ["C1/I0", "A0"]},
-        }
+# Per-family speed-grade aliases: a chunk that is published under more than one
+# grade name.  GW1N/GW2A have no entries; the GW5A entry
+# {"ES": ["C1/I0", "A0"]} was removed by S17a -- see `_gw5a_chunk_order` and
+# `C1_I0_FROM_C2_I1` below, and `doc/timing-c1i0.md`.
+_aliases = {}
+
+# GW5A-family chunk labels.  Chunk 0's numbers match the **C2/I1** column of
+# DS1239E Table 3-13 to three decimals (CFU tSR 1.075-1.148, tCO 0.200-0.230),
+# so chunk 0 is the C2/I1 source of record even though the vendor tooling's
+# ordering was previously guessed to be "ES" first.  Chunks 1 and 2 carry
+# plausible but unidentified tables (chunk 1 shares chunk 0's DFF numbers but
+# not its LUT numbers; chunk 2 is a uniform 0.862x scaling of chunk 0) and are
+# therefore published under non-grade keys so `set_speed_grade` can never
+# select them.  Chunk 3 onward is not in chunk format at all (the values decode
+# as garbage floats), which is what the `i >= 3` break below stops at.
+_gw5a_chunk_order = [
+    "C2/I1",          # chunk 0: matches DS1239E Table 3-13 C2/I1 to three
+                      # decimals.  C1/I0 is derived from it after the loop.
+    "unidentified_1", # chunk 1: content not identified.
+    "unidentified_2", # chunk 2: idem.
+    "3", "4", "5", "6", "7", "8", "9", "10", "11",
+]
+
+# DS1239E Table 3-13 (CFU) and Table 3-14 (BSRAM) give C1/I0 = 1.25 x C2/I1 on
+# every published row of our own device's datasheet.  The .tm file carries no
+# C1/I0 chunk, so the C1/I0 table is derived from the C2/I1 chunk by this
+# ratio.  See `doc/timing-c1i0.md`.
+C1_I0_FROM_C2_I1 = 1.25
+
+def _scale(tm, factor):
+    """Multiply every delay in one parsed group table by `factor`.
+
+    Only floats are delays.  `parse_fanout` also emits integer fanout *counts*
+    (`X0FanNum` and friends), which are topology, not timing, and are carried
+    through unscaled.
+    """
+    if isinstance(tm, dict):
+        return {k: _scale(v, factor) for k, v in tm.items()}
+    if isinstance(tm, list):
+        return [_scale(v, factor) for v in tm]
+    if isinstance(tm, float):
+        return tm * factor
+    return tm
+
 def read_tm(f, device):
     if device.lower().startswith("gw1n"):
         chunk_order = [
@@ -312,21 +353,7 @@ def read_tm(f, device):
             "C9/I8_LV",
         ]
     elif device.lower().startswith("gw5a"):
-        chunk_order = [
-            "ES", # In the case of GW5A-25 engineering samples (ES), ‘C1/I0’
-                  # and ‘A0’ use the same delay variant. A duplicate set of delays
-                  # should be considered in the future.
-            "C2/I1",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            "10",
-            "11",
-        ]
+        chunk_order = _gw5a_chunk_order
     else:
         raise Exception("unknown family")
 
@@ -354,6 +381,10 @@ def read_tm(f, device):
                     if device.lower().startswith(series) and speed_class in aliases:
                         for al in aliases[speed_class]:
                             tmdat.setdefault(al, {})[name] = tm
+    if "C2/I1" in tmdat and device.lower().startswith("gw5a"):
+        # C1/I0 has no chunk of its own; derive it from the C2/I1 chunk.
+        tmdat["C1/I0"] = {name: _scale(tm, C1_I0_FROM_C2_I1)
+                          for name, tm in tmdat["C2/I1"].items()}
     return tmdat
 
 
