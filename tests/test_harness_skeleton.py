@@ -11,7 +11,6 @@ import pytest
 
 HARNESS_MODULES = [
     "__main__",
-    "gen",
     "oracle",
     "openflow",
     "equiv",
@@ -20,12 +19,30 @@ HARNESS_MODULES = [
     "selftest",
 ]
 
+# Modules whose owning task has landed. Their `main()` no longer raises
+# NotImplementedError; it parses arguments, so `main([])` exits via argparse
+# on the missing required `--design-dir`. Each owning task appends its own
+# module name here as it lands (P0.T19: oracle; P0.T20: gen; ...).
+IMPLEMENTED_MODULES = [
+    "oracle",
+]
 
-@pytest.mark.parametrize("module_name", HARNESS_MODULES)
+STUB_MODULES = [m for m in HARNESS_MODULES if m not in IMPLEMENTED_MODULES]
+
+
+@pytest.mark.parametrize("module_name", STUB_MODULES)
 def test_harness_package_importable(module_name):
     mod = importlib.import_module("fuzz.gw5ast138c.harness." + module_name)
     assert hasattr(mod, "main")
     with pytest.raises(NotImplementedError):
+        mod.main([])
+
+
+@pytest.mark.parametrize("module_name", IMPLEMENTED_MODULES)
+def test_harness_implemented_module_requires_design_dir(module_name):
+    mod = importlib.import_module("fuzz.gw5ast138c.harness." + module_name)
+    assert hasattr(mod, "main")
+    with pytest.raises(SystemExit):
         mod.main([])
 
 
