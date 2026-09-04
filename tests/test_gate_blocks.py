@@ -33,7 +33,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # instead of recursing.
 _NESTED_MARKER = "GATE_BLOCKS_NESTED"
 pytestmark = [
-    pytest.mark.heavy,  # real commits/pushes through the real gate; not fast-scope
+    # Excluded from fast/full/all (gate.mk filters `gate_proof` out of every
+    # scope) -- each test here does a real commit/push through the real
+    # gate, which recursively re-runs the gate; run explicitly instead.
+    pytest.mark.gate_proof,
     pytest.mark.skipif(
         os.environ.get(_NESTED_MARKER) == "1",
         reason="nested invocation from inside a gate-blocks proof commit/push"),

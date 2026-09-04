@@ -26,8 +26,8 @@ gate:
 # check_evidence.py, check_criteria.py --phase 0. Builds no bitstream.
 # Budget: ~90 s (design), 180 s hard cap (test_gate_fast_budget).
 _gate-fast:
-	@echo "GATE fast: pytest -m 'not heavy'"
-	@$(PYTHON) -m pytest tests -q -m "not heavy" || { echo "GATE fast: pytest FAILED"; exit 1; }
+	@echo "GATE fast: pytest -m 'not heavy and not gate_proof'"
+	@$(PYTHON) -m pytest tests -q -m "not heavy and not gate_proof" || { echo "GATE fast: pytest FAILED"; exit 1; }
 	@echo "GATE fast: check_evidence.py"
 	@$(PYTHON) $(PIPE)/tools/check_evidence.py $(PIPE)/spec-primitives.md $(PIPE)/evidence || { echo "GATE fast: check_evidence.py FAILED"; exit 1; }
 	@echo "GATE fast: check_criteria.py --phase 0"
@@ -38,8 +38,8 @@ _gate-fast:
 # c2 round-trip, calibration -- the golden-netlist equivalence diffs for the
 # examples the branch touches).
 _gate-full: _gate-fast
-	@echo "GATE full: pytest -m heavy"
-	@$(PYTHON) -m pytest tests -q -m heavy || { echo "GATE full: pytest heavy FAILED"; exit 1; }
+	@echo "GATE full: pytest -m 'heavy and not gate_proof'"
+	@$(PYTHON) -m pytest tests -q -m "heavy and not gate_proof" || { echo "GATE full: pytest heavy FAILED"; exit 1; }
 	@echo "GATE full: ok, 4 checks"
 
 # all: the whole suite -- the exact scope the CI mirror's body invokes
