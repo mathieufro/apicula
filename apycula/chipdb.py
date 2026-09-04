@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dc_fields, is_dataclass
 from typing import Dict, List, Optional, Set, Tuple, Union, Any
 from itertools import chain
 import os
@@ -243,12 +243,91 @@ class Device:
         return self.rev_li[name]
 
 
+# Scalars that can never contain a `set`, so the canonicaliser can stop.
+_ATOMS = (str, bytes, bytearray, int, float, bool, type(None))
+
+
+def _canonical_order(values):
+    """`values` as a list in an order that does not depend on `hash()`."""
+    try:
+        return sorted(values)
+    except TypeError:                       # mixed element types
+        return sorted(values, key=repr)
+
+
+def _seed_sensitive(value):
+    """True when `value` in a `set` can move that set's iteration order.
+
+    `PYTHONHASHSEED` randomises `hash()` for `str` and `bytes` only; `int`s and
+    tuples built from them hash to the same value in every process, so a set of
+    bit coordinates already iterates identically run to run. Leaving those
+    alone keeps the canonicaliser from reordering anything it does not have to
+    -- notably the `Any`-typed `extra_func` payloads, which decode as lists and
+    would otherwise compare unequal against a database built before this fix.
+    """
+    if isinstance(value, (str, bytes, bytearray)):
+        return True
+    if isinstance(value, (tuple, frozenset, set, list)):
+        return any(_seed_sensitive(item) for item in value)
+    return False
+
+
+def canonicalize(value):
+    """Replace every `set` reachable from `value` with a sorted list.
+
+    A msgpack `set` is written as an array -- and a `dict` as a map -- in
+    *iteration* order, and CPython iterates a set of strings, or a dict that
+    was filled by iterating such a set, in an order that depends on
+    `PYTHONHASHSEED`. That made `chipdb_builder` emit a different byte stream -- and so a different sha256 -- on every run of the same
+    (device, install), even though the content was identical (P0.T13b (c);
+    two builds under a fixed seed already matched byte for byte, which is what
+    identified the cause). Sorting is purely an ordering change: a msgpack
+    array decodes back into the declared `Set[...]` field either way, so the
+    loaded `Device` is unchanged.
+
+    Mutates `value` in place where it can (the database is written once, at
+    the end of a build, and not used afterwards) and returns the replacement.
+    Ordering is the only thing that changes: every key, element and value is
+    preserved, so the `Device` that `load_chipdb` returns is unchanged.
+    """
+    if isinstance(value, _ATOMS):
+        return value
+    if isinstance(value, (set, frozenset)):
+        items = list(value)
+        if any(_seed_sensitive(item) for item in items):
+            items = _canonical_order(items)
+        return [canonicalize(item) for item in items]
+    if isinstance(value, dict):
+        # msgpack writes a map in insertion order, and many of these maps were
+        # filled by iterating a set, so the key order carries the same hash
+        # randomisation as the sets themselves.
+        return {key: canonicalize(value[key])
+                for key in _canonical_order(value.keys())}
+    if isinstance(value, list):
+        for idx, item in enumerate(value):
+            value[idx] = canonicalize(item)
+        return value
+    if isinstance(value, tuple):
+        if all(isinstance(item, _ATOMS) for item in value):
+            return value
+        return tuple(canonicalize(item) for item in value)
+    if is_dataclass(value) and not isinstance(value, type):
+        for fld in dc_fields(value):
+            setattr(value, fld.name, canonicalize(getattr(value, fld.name)))
+        return value
+    return value
+
+
 try:
     import msgspec
 
     def save_chipdb(db: Device, path: str) -> None:
-        """Save a Device database to a compressed MessagePack file."""
-        data = msgspec.msgpack.encode(db)
+        """Save a Device database to a compressed MessagePack file.
+
+        The database is canonicalised first so the file is reproducible: the
+        same (device, install) must yield the same sha256 on every run.
+        """
+        data = msgspec.msgpack.encode(canonicalize(db))
         with lzma.open(path, 'wb', preset=1) as f:
             f.write(data)
 
