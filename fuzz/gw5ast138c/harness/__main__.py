@@ -190,6 +190,18 @@ def terminal_run_ids(rows):
 
 
 def append_row(rows_path, row):
+    """Append one row to the batch's own `<batch_id>.rows.jsonl`.
+
+    The row is normalised onto the single §6 schema declared in `evidence.py`
+    (P0.T28, `evidence.REQUIRED_FIELDS`) first, so a batch row and a slug row
+    have identical columns; measurements a runner made that are not §6 fields
+    are folded into `notes` by `adapt`, never dropped and never added as a
+    private column.  Normalise, do not validate: a batch records what happened,
+    including a run that died before it had a level, and `check_evidence.py`
+    (P0.T30) is the gate that rejects an incomplete row at validate time.
+    """
+    from . import evidence
+    row = evidence.adapt(row)
     os.makedirs(os.path.dirname(rows_path), exist_ok=True)
     with open(rows_path, "a") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")

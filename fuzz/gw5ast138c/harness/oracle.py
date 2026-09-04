@@ -33,6 +33,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from . import evidence
+
 DEVICE = "GW5AST-138C"
 PART = "GW5AST-LV138PG484AC1/I0"
 DEVICE_VERSION = "C"
@@ -544,7 +546,12 @@ def evidence_row(result, run_id, primitive="DFF", shape="smoke",
     repo = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__)))))
     pf = result["preflight"]
-    return {
+    # `evidence.py` (P0.T28) owns the one and only row schema
+    # (`spec-harness.md` §6, `evidence.REQUIRED_FIELDS`); `adapt` normalises
+    # this fragment onto it and folds the oracle-only measurements
+    # (pre-flight detail, the .vo/.vg artefacts) into `notes` rather than
+    # inventing extra columns.
+    return evidence.adapt({
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "primitive": primitive,
@@ -572,21 +579,18 @@ def evidence_row(result, run_id, primitive="DFF", shape="smoke",
         "vg": paths(SYNTH_CLASS),
         "wall_clock_s": {"oracle": result["wall_clock_s"]},
         "notes": "E0: P0.T19 oracle smoke; no open-flow side at this task id",
-    }
+    })
 
 
 def append_evidence(row, slug="oracle-smoke"):
     # Evidence is appended to the *live* pipeline directory (the main
     # checkout), which is the source the worktree copy is rsynced from.
-    for pipe in reversed(_PIPE_CANDIDATES):
-        if os.path.isdir(os.path.join(pipe, "evidence")):
-            out_dir = os.path.join(pipe, "evidence", slug)
-            os.makedirs(out_dir, exist_ok=True)
-            path = os.path.join(out_dir, "runs.jsonl")
-            with open(path, "a") as fh:
-                fh.write(json.dumps(row, sort_keys=True) + "\n")
-            return path
-    raise OracleError("no pipeline evidence directory found")
+    # The writer, the validation and the append-only guarantee all live in
+    # `evidence.py` (P0.T28) -- this is one call site of one writer.
+    try:
+        return evidence.append_row(evidence.adapt(row), slug)
+    except evidence.EvidenceSchemaError as exc:
+        raise OracleError(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------

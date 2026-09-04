@@ -285,6 +285,30 @@ def provenance(yosys, nextpnr, chipdb, nextpnr_log=""):
     }
 
 
+#: The §6 evidence-row fields the open flow supplies (`evidence.py`, P0.T28).
+#: `timing_allow_fail_needed` is a flow fact, not a row column: it reaches the
+#: row through `evidence.adapt`, which folds it into `notes`.
+EVIDENCE_PROVENANCE_KEYS = ("yosys_version", "apicula_sha", "nextpnr_sha",
+                            "chipdb_sha256")
+
+
+def evidence_fields(prov, open_log=None, open_fs=None, wall_clock_s=None):
+    """This flow's fragment of the one §6 row schema.
+
+    `evidence.adapt(oracle_fragment, openflow.evidence_fields(prov), ...)` is
+    how a full row is assembled; no module here builds a row of its own shape.
+    """
+    fragment = {key: prov.get(key) for key in EVIDENCE_PROVENANCE_KEYS}
+    fragment["timing_allow_fail_needed"] = prov.get("timing_allow_fail_needed")
+    if open_log is not None:
+        fragment["open_log"] = open_log
+    if open_fs is not None:
+        fragment["open_fs"] = open_fs
+    if wall_clock_s is not None:
+        fragment["wall_clock_s"] = wall_clock_s
+    return fragment
+
+
 #: Field separator of the provenance line. `yosys --version` is recorded
 #: verbatim and contains spaces, so the five fields are separated by ` | `,
 #: never by whitespace.
