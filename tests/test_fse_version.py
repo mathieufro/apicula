@@ -144,10 +144,16 @@ def test_fse_version_longfuse_width_is_derived(monkeypatch):
     assert shape_set == 'v1_9_11plus', shape_set
     # the flat descriptor is still the historical 17; 14 is a subtype override
     assert shapes['longfuse'] == 17, shapes['longfuse']
+    # the 14-wide override is scoped to the 5-series (P0.T13b); a pre-5-series
+    # device on the same install keeps the flat 17
+    gw5a = fse_parser.device_series('GW5AST-138C')
     for typ in NARROW_LONGFUSE:
-        assert fse_parser.row_width(shape_set, shapes, 'longfuse', typ) == 14
+        assert fse_parser.row_width(shape_set, shapes, 'longfuse', typ,
+                                    gw5a) == 14
+        assert fse_parser.row_width(shape_set, shapes, 'longfuse', typ,
+                                    fse_parser.device_series('GW1N-9C')) == 17
         assert fse_parser.row_width('v1_9_10', TABLE_SHAPES_V1_9_10,
-                                    'longfuse', typ) == 17
+                                    'longfuse', typ, gw5a) == 17
 
     _tiles, _end, seen = _parse_selected_fse(monkeypatch)
     assert seen, 'no longfuse table was read at all'

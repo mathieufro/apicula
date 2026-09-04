@@ -61,16 +61,45 @@ def test_five_series_fuse_and_wire_widths_unchanged():
     assert all(len(row) == 9 for row in tmap['wire'][0x02])
 
 
-def test_shape_sets_agree_until_p0_t12_discriminates_longfuse():
-    """P0.T11 ships descriptors only; no width VALUE changes between sets.
+# The only flat widths that differ between shape sets, and why. Anything else
+# differing means a width changed without a recorded measurement behind it.
+RECORDED_SET_DIFFERENCES = {
+    'v1_9_10': {},
+    'v1_9_11plus': {},
+    # P0.T13b: `drpfuse` rows grew 10 -> 30 u16 in Gowin IDE 1.9.12.03.
+    'v1_9_12plus': {'drpfuse': 30},
+}
 
-    P0.T12 is the task that makes `longfuse` data-driven. Until then every
-    shape set must be identical, or GW1N/GW2A parsing would silently change on
-    a 1.9.11/1.9.12 install.
+
+def test_shape_sets_differ_only_where_measured():
+    """Every flat-width difference between shape sets is a recorded one.
+
+    P0.T11 shipped descriptors only. P0.T12 made `longfuse` per-subtype (in
+    `TABLE_SUBTYPE_SHAPES`, not here) and P0.T13b widened `drpfuse` for
+    1.9.12. Any other divergence would silently change GW1N/GW2A parsing on a
+    1.9.11/1.9.12 install.
     """
     base = fse_parser.TABLE_SHAPES['v1_9_10']
     for name, shapes in fse_parser.TABLE_SHAPES.items():
-        assert shapes == base, (name, shapes)
+        expected = dict(base, **RECORDED_SET_DIFFERENCES[name])
+        assert shapes == expected, (name, shapes)
+
+
+def test_pre_5series_keeps_flat_longfuse_width_on_every_shape_set():
+    """P0.T13b: the 0x35/0x36 -> 14 override is 5-series only.
+
+    P0.T12 keyed it on the IDE version alone, so every pre-5-series `.fse`
+    desynced at its first 0x35 table on a 1.9.11+ install.
+    """
+    for name, shapes in fse_parser.TABLE_SHAPES.items():
+        for typ in (0x12, 0x13, 0x35, 0x36, 0x3a):
+            assert fse_parser.row_width(
+                name, shapes, 'longfuse', typ,
+                fse_parser.device_series('GW1N-9C')) == 17
+        assert fse_parser.row_width(
+            name, shapes, 'longfuse', 0x35,
+            fse_parser.device_series('GW5AST-138C')) == (
+                14 if name != 'v1_9_10' else 17)
 
 
 def test_gw5ast_138c_still_routes_to_logicinfo_for_0x43():

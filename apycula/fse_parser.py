@@ -45,22 +45,54 @@ _SHAPES_V1_9_10 = {
     "drpfuse": 10,
 }
 
+# `v1_9_12plus` is Gowin IDE 1.9.12.03. It keeps every width of `v1_9_11plus`
+# except `drpfuse` (type 0x8b), whose row grew from 10 to 30 u16 (P0.T13b).
+# The drift is per *IDE version*, not per device or per subtype: the only two
+# devices that ship a `drpfuse` table at all -- GW5A-25A (tile 150, table idx
+# 2, 1053 rows, offset 0x707160) and GW5AT-60B (tile 150, idx 2, 2323 rows,
+# offset 0x866228) -- both read at 10 on 1.9.11.03 and at 30 on 1.9.12.03, and
+# both `.fse` files then parse to EOF. GW5AST-138C ships no `drpfuse` table in
+# either edition, which is why the 138C build never saw this.
+_SHAPES_V1_9_12 = dict(_SHAPES_V1_9_10, drpfuse=30)
+
 TABLE_SHAPES: dict[str, dict[str, int]] = {
     "v1_9_10": dict(_SHAPES_V1_9_10),
     "v1_9_11plus": dict(_SHAPES_V1_9_10),
+    "v1_9_12plus": dict(_SHAPES_V1_9_12),
 }
 
-# Per-shape-set, per-table-*subtype* row widths, consulted before the flat width
-# above (P0.T12). A `.fse` row width is not always a property of the table kind
-# alone: from Gowin IDE 1.9.11 the longfuse subtypes 0x35/0x36 carry 14 u16 per
-# row while every other longfuse subtype (0x12, 0x13, 0x3a) still carries 17.
-# Measured on `GW5AST-138C.fse` from both installed editions -- see
-# `$PIPE/evidence/_runs/fse-desync.md` for the per-table offsets and row counts.
+# Device series a subtype override may be scoped to. A `.fse` row width can
+# depend on the device generation as well as the IDE version, so the override
+# table below carries the series as an explicit key rather than assuming the
+# 5-series layout holds for every part the same install ships.
+SERIES_GW5A = "gw5a"
+SERIES_DEFAULT = "default"
+
+
+def device_series(device: str) -> str:
+    """`"GW5AST-138C"` -> `"gw5a"`; every pre-5-series part -> `"default"`."""
+    return SERIES_GW5A if (device or "").lower().startswith("gw5a") \
+        else SERIES_DEFAULT
+
+
+# Per-shape-set, per-series, per-table-*subtype* row widths, consulted before
+# the flat width above (P0.T12, rescoped by P0.T13b). A `.fse` row width is not
+# always a property of the table kind alone: from Gowin IDE 1.9.11 the longfuse
+# subtypes 0x35/0x36 carry 14 u16 per row **on 5-series devices**, while every
+# other longfuse subtype (0x12, 0x13, 0x3a) -- and every longfuse subtype at
+# all on pre-5-series devices from the same install -- still carries 17.
+# Measured on `GW5AST-138C.fse`, `GW5A-25A.fse` and `GW5AT-60B.fse` (14) and on
+# `GW1N-9C.fse`, `GW1NZ-1.fse`, `GW2A-18C.fse` (17) from both installed
+# editions; all twelve files then parse to EOF.
+# P0.T12 keyed this on the IDE version alone, which
+# made every pre-5-series `.fse` desync at its first 0x35 table on a 1.9.11+
+# install; the series key is the missing dimension.
 # A subtype absent here falls back to `TABLE_SHAPES[shape_set][table]`, so
 # `v1_9_10` (empty) parses exactly as it did before.
-TABLE_SUBTYPE_SHAPES: dict[str, dict[str, dict[int, int]]] = {
+TABLE_SUBTYPE_SHAPES: dict[str, dict[str, dict[str, dict[int, int]]]] = {
     "v1_9_10": {},
-    "v1_9_11plus": {"longfuse": {0x35: 14, 0x36: 14}},
+    "v1_9_11plus": {SERIES_GW5A: {"longfuse": {0x35: 14, 0x36: 14}}},
+    "v1_9_12plus": {SERIES_GW5A: {"longfuse": {0x35: 14, 0x36: 14}}},
 }
 
 DEFAULT_SHAPE_SET = "v1_9_10"
@@ -94,9 +126,22 @@ def detect_ide_version(gowinhome: str) -> str:
         "set GOWIN_IDE_VERSION to override")
 
 
+def _version_tuple(ide_version: str) -> tuple[int, ...]:
+    """`"1.9.12.03"` -> `(1, 9, 12, 3)`; a non-numeric field ends the tuple."""
+    parts = []
+    for field in (ide_version or "").split("."):
+        if not field.isdigit():
+            break
+        parts.append(int(field))
+    return tuple(parts)
+
+
 def select_shapes(ide_version: str) -> tuple[str, dict[str, int]]:
     """Map a detected IDE version onto (shape set name, shape descriptor)."""
-    if ide_version and not ide_version.startswith("1.9.10."):
+    version = _version_tuple(ide_version)[:3]
+    if version >= (1, 9, 12):
+        name = "v1_9_12plus"
+    elif ide_version and not ide_version.startswith("1.9.10."):
         name = "v1_9_11plus"
     else:
         name = DEFAULT_SHAPE_SET
@@ -205,10 +250,11 @@ def _diagnose_desync(f, prev):
     return width, found, typn
 
 
-def row_width(shape_set, shapes, table, typ=None):
-    """Row width for `table`, honouring a per-subtype override for `typ`."""
+def row_width(shape_set, shapes, table, typ=None, series=SERIES_DEFAULT):
+    """Row width for `table`, honouring a per-series/subtype override."""
     if typ is not None:
-        override = TABLE_SUBTYPE_SHAPES.get(shape_set, {}).get(table, {})
+        override = (TABLE_SUBTYPE_SHAPES.get(shape_set, {})
+                    .get(series, {}).get(table, {}))
         if typ in override:
             return override[typ]
     return shapes[table]
@@ -286,6 +332,7 @@ def read_one_file(f, tile_type, device, shape_ctx=None):
     #v1 = tile_type
 
     is_5_series = device.lower().startswith("gw5a")
+    series = device_series(device)
 
     # the previously-read table, so a desync can name the table that caused it
     prev = None
@@ -345,7 +392,7 @@ def read_one_file(f, tile_type, device, shape_ctx=None):
             t = read_table(f, size, width, 2)
         elif typ in {0x12, 0x13, 0x35, 0x36, 0x3a}:
             typn = "longfuse"
-            width = row_width(shape_set, shapes, "longfuse", typ)
+            width = row_width(shape_set, shapes, "longfuse", typ, series)
             width = _confirm_row_width(f, size, data_start, width, typn,
                                        ide_version, shape_set)
             t = read_table(f, size, width, 2)
@@ -370,7 +417,9 @@ def read_one_file(f, tile_type, device, shape_ctx=None):
             t = read_table(f, size, width, 2)
         elif typ == 0x8b:
             typn = "drpfuse"
-            width = shapes["drpfuse"]
+            width = row_width(shape_set, shapes, "drpfuse", typ, series)
+            width = _confirm_row_width(f, size, data_start, width, typn,
+                                       ide_version, shape_set)
             t = read_table(f, size, width, 2)
         elif typ == 0x9a: # 60K
             typn = "logicinfo"
