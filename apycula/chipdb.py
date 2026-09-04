@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union, Any
 from itertools import chain
+import os
 import re
+import sys
 import copy
 import lzma
 from functools import reduce
@@ -2110,9 +2112,50 @@ def fse_create_hclk_nodes(dev, device, fse, dat: Datfile):
                                 if src.startswith('HCLK'):
                                     hclks[src].add((row, col, src))
 
+# A `.dat` port table row is [row, col, wire_index]; the vendor fills every
+# field of an absent port with -1. `fse_create_adc` used to test only the row
+# and column, so a row like [92, 124, -1] -- present in the ADC output table of
+# every GW5A-25A `.dat` shipped by IDE 1.9.11.03 and 1.9.12.03 -- reached
+# `wirenames[-1]` and died with a bare `KeyError: -1` (P0.T13b).
+def _port_row_present(entry):
+    return len(entry) >= 3 and -1 not in (entry[0], entry[1], entry[2])
+
+
+def _adc_description_present(dat):
+    """True when the device data describes the ADC at all.
+
+    The GW5A-25A `.dat` of both installed editions (Education 1.9.11.03 and
+    Standard 1.9.12.03) carries `Adc25kIns` filled entirely with -1: the ADC
+    input block is simply not described in these IDE versions, so there is no
+    ADC to build. Measured on both installs, not assumed: `Adc25kOuts` in the
+    same files is populated, so this is an absent description and not a
+    mis-read offset.
+    """
+    stuff = getattr(dat, 'gw5aStuff', None) or {}
+    ins = stuff.get('Adc25kIns') or []
+    outs = stuff.get('Adc25kOuts') or []
+    return (any(_port_row_present(e) for e in ins)
+            and any(_port_row_present(e) for e in outs))
+
+
+def _gowin_install_label():
+    """`"Gowin IDE <version> at <GOWINHOME>"`, best effort, for a warning."""
+    gowinhome = os.environ.get('GOWINHOME', '')
+    try:
+        version = fuse.detect_ide_version(gowinhome)
+    except fuse.FseVersionError:
+        version = 'unknown'
+    return f"Gowin IDE {version} at {gowinhome or '<GOWINHOME unset>'}"
+
+
 # ADC in GW5A series are placed in slots AND in the main grid.
 def fse_create_adc(dev, device, fse, dat):
     if device not in {"GW5A-25A"}:
+        return
+    if not _adc_description_present(dat):
+        print(f"warning: {device}: the device data of {_gowin_install_label()} "
+              "carries no ADC description (Adc25kIns/Adc25kOuts are absent or "
+              "all -1); skipping ADC bel creation.", file=sys.stderr)
         return
     row, col = 0, dev.cols - 1
     dev[row, col].bels['ADC'] = Bel()
@@ -2122,9 +2165,10 @@ def fse_create_adc(dev, device, fse, dat):
 
     portmap = adc.setdefault('inputs', {})
     for idx, nam in _adc_inputs:
-        wrow, wcol, wire_idx = dat.gw5aStuff['Adc25kIns'][idx]
-        if wrow == -1 or wcol == -1:
+        entry = dat.gw5aStuff['Adc25kIns'][idx]
+        if not _port_row_present(entry):
             continue
+        wrow, wcol, wire_idx = entry
         wrow -= 1
         wcol -= 1
         wire_type = 'ADC_I'
@@ -2141,9 +2185,10 @@ def fse_create_adc(dev, device, fse, dat):
 
     portmap = adc.setdefault('outputs', {})
     for idx, nam in _adc_outputs:
-        wrow, wcol, wire_idx = dat.gw5aStuff['Adc25kOuts'][idx]
-        if wrow == -1 or wcol == -1:
+        entry = dat.gw5aStuff['Adc25kOuts'][idx]
+        if not _port_row_present(entry):
             continue
+        wrow, wcol, wire_idx = entry
         wrow -= 1
         wcol -= 1
         wire_type = 'ADC_O'
