@@ -91,6 +91,7 @@ def test_residual_masked_fill_is_accounted_not_unexplained():
 # D34 -- the two-part decode check
 # --------------------------------------------------------------------------
 @needs_smoke
+@pytest.mark.heavy
 def test_decode_check_c2_bitmap_roundtrip(tmp_path):
     """bslib out and back in: the fuse bitmap must be byte-identical."""
     out = equiv.decode_check_c2(SMOKE_OPEN_FS,

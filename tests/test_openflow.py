@@ -97,6 +97,7 @@ def test_openflow_records_provenance():
 # The real flow
 # --------------------------------------------------------------------------
 
+@pytest.mark.heavy
 def test_openflow_smoke_produces_fs(tmp_path):
     yosys, nextpnr, chipdb = _tool_or_skip()
     for name in ("top.v", "top.cst"):

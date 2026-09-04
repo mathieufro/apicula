@@ -185,17 +185,28 @@ def test_evidence_tools_shim_is_same_tool(tmp_path):
     assert open(SHIM).read().count("def ") == 0
 
 
-FL = "/Users/alex/fine-line"
+# `-C` just needs to be inside the same repo as the path being checked, not
+# repo root -- and PIPE lives under one of two checkouts (the umbrella
+# worktree used for day-to-day code work, or the main checkout used for
+# pipeline docs, see conftest.py) that don't share a single hardcoded root.
+FL = PIPE
 
 
 @pytest.mark.skipif(not PIPE or not os.path.isdir(os.path.join(PIPE, "evidence")),
                     reason="no live pipeline evidence tree")
 def test_evidence_gitignore_denies_binaries():
+    # When this test runs from inside a git hook (e.g. the local gate's own
+    # pre-commit), git has already exported GIT_DIR/GIT_WORK_TREE/
+    # GIT_INDEX_FILE for *this* repo (apicula); a nested `git -C <FL>`
+    # inherits them and resolves against that repo instead of FL's own,
+    # regardless of -C. Strip them so -C is honoured.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
     ev = os.path.join(PIPE, "evidence")
     denied = subprocess.run(["git", "-C", FL, "check-ignore", "-q",
-                             os.path.join(ev, "_runs", "x.fs")])
+                             os.path.join(ev, "_runs", "x.fs")], env=env)
     assert denied.returncode == 0
     allowed = subprocess.run(["git", "-C", FL, "check-ignore",
                               os.path.join(ev, "chipdb", "summary.md")],
-                             capture_output=True)
+                             capture_output=True, env=env)
     assert allowed.returncode != 0

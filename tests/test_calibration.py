@@ -25,10 +25,18 @@ APICULA = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _rows():
+    """The `S6` whole-design calibration rows -- one per `DESIGNS` entry.
+
+    `runs.jsonl` is append-only and shared with every other primitive/shape
+    this evidence *slug* records (`spec-harness.md` Sec 5), so this filters
+    to rows carrying a `design` key naming one of `DESIGNS` rather than
+    assuming the file holds nothing else.
+    """
     if not os.path.isfile(RUNS):
         pytest.skip(f"no calibration evidence yet at {RUNS}")
     with open(RUNS) as fh:
-        return [json.loads(line) for line in fh if line.strip()]
+        rows = [json.loads(line) for line in fh if line.strip()]
+    return [r for r in rows if r.get("design") in DESIGNS]
 
 
 def _stdout():

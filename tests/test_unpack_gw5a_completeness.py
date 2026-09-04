@@ -98,6 +98,7 @@ def test_lvds_out_alias_ignores_tables_without_the_attribute():
 # 3. the two misses, on the real smoke bitstream
 # --------------------------------------------------------------------------
 @needs_smoke
+@pytest.mark.heavy
 def test_smoke_unpack_recovers_luts_at_tile_2_1():
     """`LUT0`/`LUT2`/`LUT3` survive: no spurious `RAM16` removes them."""
     nl = equiv.unpack_netlist(SMOKE_OPEN_FS, noalu=True)
@@ -108,6 +109,7 @@ def test_smoke_unpack_recovers_luts_at_tile_2_1():
 
 
 @needs_smoke
+@pytest.mark.heavy
 def test_smoke_unpack_recovers_iobb_at_55_108():
     """The `IOBB` paired with a plain-`IBUF` `IOBA` is not skipped."""
     nl = equiv.unpack_netlist(SMOKE_OPEN_FS, noalu=True)
@@ -116,6 +118,7 @@ def test_smoke_unpack_recovers_iobb_at_55_108():
 
 
 @needs_smoke
+@pytest.mark.heavy
 def test_smoke_decode_check_c1_ok():
     """`c1` -- every fuse-backed placed cell is recovered (`S6b`)."""
     nl = equiv.unpack_netlist(SMOKE_OPEN_FS, noalu=True)

@@ -51,6 +51,7 @@ def _fake_compare(differences):
 # S5 -- the injected fuse
 # --------------------------------------------------------------------------
 @needs_smoke
+@pytest.mark.heavy
 def test_selftest_inject_one_fuse_reports_exactly_one(capsys):
     """`V6` line 1: exact stdout, exit status 0."""
     status = selftest.main(["--design-dir", SMOKE, "--inject-one-fuse"])
@@ -60,6 +61,7 @@ def test_selftest_inject_one_fuse_reports_exactly_one(capsys):
 
 
 @needs_smoke
+@pytest.mark.heavy
 def test_selftest_detects_over_masking(smoke_db, capsys):
     """A checker that reports nothing is a harness defect, not a pass."""
     with pytest.raises(selftest.SelftestError) as err:
@@ -74,6 +76,7 @@ def test_selftest_detects_over_masking(smoke_db, capsys):
 
 
 @needs_smoke
+@pytest.mark.heavy
 def test_selftest_detects_unstable_canonicalisation(smoke_db):
     """More than one difference for one fuse means the canonicalisation moved."""
     with pytest.raises(selftest.SelftestError) as err:
@@ -85,6 +88,7 @@ def test_selftest_detects_unstable_canonicalisation(smoke_db):
 
 
 @needs_smoke
+@pytest.mark.heavy
 def test_selftest_injects_exactly_one_fuse(smoke_db, smoke_netlist, tmp_path):
     """The injected bitstream differs from the original by one bit, no more."""
     from apycula import chipdb as _chipdb
@@ -104,6 +108,7 @@ def test_selftest_injects_exactly_one_fuse(smoke_db, smoke_netlist, tmp_path):
 # S6b -- unpacker completeness
 # --------------------------------------------------------------------------
 @needs_smoke
+@pytest.mark.heavy
 def test_completeness_zero_unattributed(capsys):
     """`V6` line 2: exact stdout, exit status 0."""
     status = selftest.main(["--design-dir", SMOKE, "--unpacker-completeness"])
@@ -113,6 +118,7 @@ def test_completeness_zero_unattributed(capsys):
 
 
 @needs_smoke
+@pytest.mark.heavy
 def test_completeness_fails_on_unattributed_tile(monkeypatch, smoke_db,
                                                  smoke_netlist, capsys):
     """One tile with set fuses and nothing decoded from it blocks the batch."""

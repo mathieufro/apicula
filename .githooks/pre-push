@@ -1,0 +1,36 @@
+#!/bin/sh
+# Local blocking gate -- pre-push (C8, D75-D77).
+#
+# git feeds one line per pushed ref on stdin:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# Scope (D77): GATE_SCOPE=all when the remote ref is refs/heads/integration
+# or refs/heads/main; GATE_SCOPE=full otherwise (any task branch). Runs in
+# the foreground and refuses the push on any failing check. Never bypassed
+# with the bypass flag.
+set -e
+
+root="$(git rev-parse --show-toplevel)"
+
+if [ -f "$root/gate.env" ]; then
+    . "$root/gate.env"
+fi
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "$local_ref" ] && continue
+    case "$remote_ref" in
+        refs/heads/integration|refs/heads/main)
+            scope=all
+            ;;
+        *)
+            scope=full
+            ;;
+    esac
+    echo "pre-push: gating $local_ref -> $remote_ref (GATE_SCOPE=$scope)" >&2
+    if ! make -C "$root" gate "GATE_SCOPE=$scope"; then
+        echo "pre-push: REFUSED -- gate failed for $local_ref -> $remote_ref (GATE_SCOPE=$scope)" >&2
+        status=1
+    fi
+done
+
+exit $status
