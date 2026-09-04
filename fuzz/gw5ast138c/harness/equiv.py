@@ -676,10 +676,37 @@ def _outside_bitmap(vendor_fs, open_fs):
         "words one side emits and the other does not; enumerated by "
         "line_delta below and NOT masked at this stage (the mask is empty).")
     out["line_delta"] = _line_delta(vendor_fs, open_fs)
+    out["line_delta_bytes"] = _line_delta_bytes(vendor_fs, open_fs)
     return out
 
 
-def _line_delta(vendor_fs, open_fs):
+#: A bitstream command/preamble word is at most this wide; anything wider that
+#: one side emits and the other does not is a configuration frame, not a
+#: command.  Measured on the three tangmega138k baselines: command words are
+#: 4, 8, 12 and 20 bytes; the BSRAM initialisation slots are 62-byte lines
+#: (496 bits), 1024 of them in `uart-message-tangmega138k.fs` (2026-09-04).
+COMMAND_WORD_MAX_BYTES = 32
+
+
+def _line_delta_bytes(vendor_fs, open_fs):
+    """`{"command": bytes, "config_frame": bytes}` over EVERY extra line.
+
+    `_line_delta` truncates its enumeration for the report; this counts all of
+    it, so the residual's byte total is split between the two categories
+    rather than being attributed wholesale to one.
+    """
+    counts = {"command": 0, "config_frame": 0, "command_lines": 0,
+              "config_frame_lines": 0}
+    for row in _line_delta(vendor_fs, open_fs, limit=None):
+        nbytes = row["bits"] // 8
+        key = ("command" if nbytes <= COMMAND_WORD_MAX_BYTES
+               else "config_frame")
+        counts[key] += nbytes
+        counts[key + "_lines"] += 1
+    return counts
+
+
+def _line_delta(vendor_fs, open_fs, limit=32):
     """The non-comment lines one file has and the other does not, by length."""
     def data_lines(path):
         with open(path) as f:
@@ -710,7 +737,7 @@ def _line_delta(vendor_fs, open_fs):
     for k in range(j, len(b)):
         extra.append({"side": "open", "line": k + 1, "bits": len(b[k]),
                       "prefix": b[k][:32]})
-    return extra[:32]
+    return extra if limit is None else extra[:limit]
 
 
 # --------------------------------------------------------------------------
@@ -743,6 +770,42 @@ RESIDUAL_CATEGORIES = {
     "outside_every_tile": (
         "differing bits in the fuse bitmap that fall outside every tile the "
         "chipdb grid describes -- inter-tile padding the unpacker never reads"),
+    "net_route": (
+        "the differing bits are fuses of pips the chipdb describes, in tiles "
+        "whose cell sets match: this is the physical route of a net whose "
+        "endpoints match, which is never a verdict term at E0 or E1 "
+        "(D32, spec-harness.md 5.3 row 5, mask entry net_route)"),
+    "io_default_unused_pins": (
+        "IOBA/IOBB longval fuses in IO tiles neither design instantiates: "
+        "gowin_pack.get_unused_io_fuses() (gowin_pack.py:1684-1716) writes the "
+        "bank default IO_TYPE and BANK_VCCIO into every unused IO of a used "
+        "bank while the vendor leaves them cleared -- the two sides spell the "
+        "same default differently on pins used by neither design "
+        "(spec-harness.md 5.3 row 6, mask entry io_default_unused_pins). The "
+        "5A get_unused_io_attrvals() adds no DRIVE and no PULLMODE, so this is "
+        "NOT the PR #423 bank/drive-strength class"),
+    "unmodelled_config_fuse": (
+        "differing bits owned by a device-configuration fuse group (CFG, "
+        "5A_PCLK_ENABLE_*, an unnamed shortval table) or by no chipdb group at "
+        "all, inside the central clock spine or the bottom configuration row: "
+        "apicula models no cell for them, so they are a NAMED GAP carried to "
+        "the clocking (Phase 1) and IO (Phase 3) workstreams -- enumerated "
+        "here, never masked"),
+    "bsram_mode_fuse": (
+        "BSRAM mode fuses (shortval BSRAM_SP/DP/SDP/ROM) in tiles neither "
+        "unpacker recovers a cell for: GowinSynthesis inferred a block RAM "
+        "where yosys spent LUTs, which is the whole-design memory-inference "
+        "decomposition S6 declares expected (D32). A NAMED GAP for "
+        "W-COMPUTE-MEMORY (Phase 4), never masked"),
+    "extra_config_frames": (
+        "whole CONFIGURATION frames one side emits and the other does not, "
+        "outside the fuse bitmap: on this device those are the BSRAM "
+        "initialisation slots (62-byte / 496-bit lines). GowinSynthesis and "
+        "yosys do not infer memory the same way, so one side initialises a "
+        "block RAM where the other spends LUTs -- the whole-design "
+        "decomposition difference S6 declares expected (D32) -- and apicula's "
+        "bslib does not decode slot contents, so the bytes are enumerated "
+        "here rather than compared"),
     "extra_command_words": (
         "whole command/preamble words one side emits and the other does not, "
         "outside the fuse bitmap and outside the `//` comment block, so "
@@ -757,6 +820,139 @@ RESIDUAL_CATEGORIES = {
 #: `clock_pips`), so requiring it as a cell would assert something the decode
 #: does not claim to produce.  Measured on the smoke pair, 2026-09-04.
 NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG")
+
+
+#: Which residual category a chipdb fuse group hands its bits to.  The group
+#: names are the chipdb's own (`db.longval[ttyp]` / `db.shortval[ttyp]` keys
+#: and the per-tile pip tables), so "which fuse is this" is answered by the
+#: same tables `gowin_unpack` decodes with, never by a byte offset (5.2).
+FUSE_GROUP_CATEGORY = {
+    "pip": "net_route",
+    "alonenode": "net_route",
+    "longval:IOBA": "io_default_unused_pins",
+    "longval:IOBB": "io_default_unused_pins",
+    "shortval:CFG": "unmodelled_config_fuse",
+}
+#: Prefix rules applied after the exact table above.
+FUSE_GROUP_PREFIX_CATEGORY = (
+    ("shortval:5A_PCLK_ENABLE", "unmodelled_config_fuse"),
+    ("shortval:unknown_", "unmodelled_config_fuse"),
+    ("shortval:BSRAM", "bsram_mode_fuse"),
+)
+
+_FUSE_GROUPS = {}
+
+
+def _fuse_coords(obj, out):
+    """Every `(row, col)` fuse coordinate reachable inside a chipdb table."""
+    if isinstance(obj, dict):
+        for value in obj.values():
+            _fuse_coords(value, out)
+    elif isinstance(obj, (set, frozenset, list, tuple)):
+        if len(obj) == 2 and all(isinstance(e, int) for e in obj):
+            out.add(tuple(obj))
+            return
+        for value in obj:
+            _fuse_coords(value, out)
+
+
+def fuse_groups(db, ttyp):
+    """`{group_name: {(row, col), ...}}` for one tile type, cached.
+
+    Groups are the chipdb's own tables: the tile's pip and clock-pip fuses,
+    and each named `shortval` / `longval` / `longfuses` table.  A bit that
+    lands in one of these was *modelled* by apicula even when no cell carries
+    it, which is what 5.1b's "every bit either unpacker accounted for" turns
+    on.
+    """
+    key = (id(db), ttyp)
+    cached = _FUSE_GROUPS.get(key)
+    if cached is not None:
+        return cached
+    tile = db.tiles[ttyp]
+    groups = {}
+    pips = set()
+    _fuse_coords(getattr(tile, "pips", None) or {}, pips)
+    _fuse_coords(getattr(tile, "clock_pips", None) or {}, pips)
+    groups["pip"] = pips
+    alone = set()
+    _fuse_coords(getattr(tile, "alonenode", None) or {}, alone)
+    _fuse_coords(getattr(tile, "alonenode_6", None) or {}, alone)
+    groups["alonenode"] = alone
+    for table in ("shortval", "longval", "longfuses"):
+        for name, sub in (getattr(db, table, {}) or {}).get(ttyp, {}).items():
+            coords = set()
+            _fuse_coords(sub, coords)
+            groups[f"{table}:{name}"] = coords
+    _FUSE_GROUPS[key] = groups
+    return groups
+
+
+def group_category(name):
+    """The residual category a fuse-group name maps to, or `None`."""
+    if name in FUSE_GROUP_CATEGORY:
+        return FUSE_GROUP_CATEGORY[name]
+    for prefix, category in FUSE_GROUP_PREFIX_CATEGORY:
+        if name.startswith(prefix):
+            return category
+    return None
+
+
+#: Columns either side of `db.center_col` that carry the central clock spine
+#: rather than user fabric.  Measured on the three tangmega138k baselines: the
+#: unowned differing bits sit in columns 88-93 around `center_col` 90.
+CLOCK_SPINE_HALF_WIDTH = 3
+
+
+def in_configuration_band(db, tile):
+    """Is this tile part of the device-configuration band?
+
+    The central clock spine and the bottom row carry the configuration, JTAG
+    and clock-enable sites rather than user fabric (`db.center_col`,
+    `db.rows`).
+    A bit there that no chipdb fuse group owns is a device-config fuse, not a
+    fabric one, and is reported as a named gap rather than as an anonymous
+    residual.
+    """
+    row, col = tile
+    if row == getattr(db, "rows", 0) - 1:
+        return True
+    center = getattr(db, "center_col", None)
+    return center is not None and abs(col - center) <= CLOCK_SPINE_HALF_WIDTH
+
+
+def split_tile_bits(coords, db, ttyp, tile=None):
+    """`({category: bits}, leftover)` for one tile's differing bit coords.
+
+    Bits owned by a chipdb fuse group are attributed to that group's category;
+    a bit no group owns falls through to `leftover` for the cell-set
+    classifier to place, unless the tile is in the configuration band, where
+    it is a named device-config gap.
+    """
+    if db is None or not coords:
+        return {}, len(coords) if coords else 0
+    try:
+        groups = fuse_groups(db, ttyp)
+    except (KeyError, AttributeError):
+        return {}, len(coords)
+    counts = collections.Counter()
+    leftover = 0
+    config_band = tile is not None and in_configuration_band(db, tile)
+    for coord in coords:
+        category = None
+        for name, owned in groups.items():
+            if coord in owned:
+                category = group_category(name)
+                if category is not None:
+                    break
+        if category is None:
+            if config_band:
+                counts["unmodelled_config_fuse"] += 1
+            else:
+                leftover += 1
+        else:
+            counts[category] += 1
+    return dict(counts), leftover
 
 
 def cells_by_tile(netlist):
@@ -788,6 +984,29 @@ def tile_delta_from_tiles(tiles_v, tiles_o):
     return per_tile, total
 
 
+def tile_coord_delta(bitmap_v, bitmap_o, db):
+    """`{(row, col): {(i, j), ...}}` -- *which* bits differ, per tile.
+
+    `tile_bit_delta` counts; this names the coordinates so the fuse-group
+    attribution can say which chipdb table owns each differing bit.
+    """
+    from apycula import chipdb as _chipdb
+
+    tiles_v = _chipdb.tile_bitmap(db, bitmap_v, empty=True)
+    tiles_o = _chipdb.tile_bitmap(db, bitmap_o, empty=True)
+    out = {}
+    for key, a in tiles_v.items():
+        b = tiles_o.get(key)
+        if b is None:
+            continue
+        coords = {(i, j)
+                  for i, (ra, rb) in enumerate(zip(a, b))
+                  for j, (x, y) in enumerate(zip(ra, rb)) if x != y}
+        if coords:
+            out[key] = coords
+    return out
+
+
 def tile_bit_delta(bitmap_v, bitmap_o, db):
     """Differing fuse bits per `(row, col)` tile, plus the ones in no tile.
 
@@ -803,7 +1022,8 @@ def tile_bit_delta(bitmap_v, bitmap_o, db):
 
 
 def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
-                      outside=None, mask=None, level="E0", shape_class=None):
+                      outside=None, mask=None, level="E0", shape_class=None,
+                      tile_coords=None, db=None):
     """Split every differing bit into "accounted for" and `unexplained_bits`.
 
     §5.1b, literally: *"every bit either unpacker accounted for is subtracted;
@@ -824,21 +1044,27 @@ def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
                   if mask.explains("unused_tile_fill", level, shape_class)
                   else None)
 
-    buckets = collections.defaultdict(lambda: {"bits": 0, "tiles": []})
-    for tile, bits in sorted(tile_delta.items()):
-        v, o = cells_v.get(tile, frozenset()), cells_o.get(tile, frozenset())
-        if v and o:
-            cat = "set_level_diff" if v != o else "unmodelled_fuse"
-        elif v:
-            cat = "vendor_only_fill"
-        elif o:
-            cat = "open_only_fill"
-        else:
-            cat = "unattributed_tile"
+    buckets = collections.defaultdict(
+        lambda: {"bits": 0, "tiles": [], "tile_count": 0})
+
+    def _hit(cat, tile, bits):
         bucket = buckets[cat]
         bucket["bits"] += bits
+        bucket["tile_count"] += 1
         if len(bucket["tiles"]) < 16:
             bucket["tiles"].append(f"({tile[1]},{tile[0]})")
+
+    tile_coords = tile_coords or {}
+    for tile, bits in sorted(tile_delta.items()):
+        grouped, leftover = split_tile_bits(
+            tile_coords.get(tile), db,
+            db.grid[tile[0]][tile[1]] if db is not None else None, tile=tile)
+        for cat, n in grouped.items():
+            _hit(cat, tile, n)
+        if not grouped:
+            leftover = bits
+        if leftover:
+            _hit(_category_of(tile, cells_v, cells_o), tile, leftover)
 
     if outside_every_tile:
         buckets["outside_every_tile"]["bits"] += outside_every_tile
@@ -847,17 +1073,27 @@ def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
     unaccounted = abs(outside.get("unaccounted_bytes", 0) or 0)
     header_masked = mask.explains("header_words", level, shape_class)
 
-    explained, unexplained = [], []
+    explained, unexplained, gaps = [], [], []
     for cat, bucket in buckets.items():
         row = {"category": cat, "bits": bucket["bits"],
-               "tiles": len([t for t in tile_delta
-                             if _category_of(t, cells_v, cells_o) == cat]),
+               "tiles": bucket["tile_count"],
                "sample_tiles": bucket["tiles"],
                "justification": RESIDUAL_CATEGORIES[cat]}
-        if cat in ("set_level_diff", "vendor_only_fill", "open_only_fill"):
-            if cat != "set_level_diff" and fill_entry:
-                row["mask_entry"] = fill_entry
+        if cat in ACCOUNTED_CATEGORIES:
+            entry = ACCOUNTED_CATEGORIES[cat]
+            if entry == "unused_tile_fill":
+                entry = fill_entry
+            if entry and mask.explains(entry, level, shape_class):
+                row["mask_entry"] = entry
+            elif entry:
+                # The mask does not cover this entry at this level or for this
+                # shape class, so the bits stay in the enumerated residual.
+                unexplained.append(row)
+                continue
             explained.append(row)
+        elif cat in GAP_CATEGORIES:
+            row["gap"] = GAP_CATEGORIES[cat]
+            gaps.append(row)
         else:
             unexplained.append(row)
 
@@ -873,24 +1109,72 @@ def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
                 "(spec-harness.md 5.3 row 1)"),
         })
     if unaccounted:
-        unexplained.append({
-            "category": "extra_command_words",
-            "bytes": unaccounted,
-            "lines": outside.get("line_delta", [])[:8],
-            "justification": RESIDUAL_CATEGORIES["extra_command_words"],
-        })
+        split = outside.get("line_delta_bytes") or {}
+        rows = [("extra_command_words", split.get("command"),
+                 split.get("command_lines", 0)),
+                ("extra_config_frames", split.get("config_frame"),
+                 split.get("config_frame_lines", 0))]
+        if not any(n for _, n, _ in rows):
+            # No per-line split available: report the byte total undivided.
+            rows = [("extra_command_words", unaccounted, 0)]
+        for category, nbytes, nlines in rows:
+            if not nbytes:
+                continue
+            gaps.append({
+                "category": category,
+                "gap": GAP_CATEGORIES[category],
+                "bytes": nbytes,
+                "lines": nlines,
+                "sample_lines": [r for r in outside.get("line_delta", [])
+                                 if (r["bits"] // 8 <= COMMAND_WORD_MAX_BYTES)
+                                 == (category == "extra_command_words")][:4],
+                "justification": RESIDUAL_CATEGORIES[category],
+            })
 
     order = list(RESIDUAL_CATEGORIES)
     key = lambda r: order.index(r["category"]) if r["category"] in order else 99  # noqa: E731
     explained.sort(key=key)
     unexplained.sort(key=key)
+    gaps.sort(key=key)
     return {
         "unexplained_bits": unexplained,
         "explained": explained,
+        "gaps": gaps,
+        "gap_total_bits": sum(r.get("bits", 0) for r in gaps),
+        "gap_total_bytes": sum(r.get("bytes", 0) for r in gaps),
         "unexplained_total_bits": sum(r.get("bits", 0) for r in unexplained),
         "unexplained_total_bytes": sum(r.get("bytes", 0) for r in unexplained),
         "mask_sha256": mask.sha256,
     }
+
+
+#: Categories whose bits some model accounts for, and the mask entry that
+#: names them (`unused_tile_fill` is resolved per level/shape class).
+ACCOUNTED_CATEGORIES = {
+    "set_level_diff": None,
+    "vendor_only_fill": "unused_tile_fill",
+    "open_only_fill": "unused_tile_fill",
+    "net_route": "net_route",
+    "io_default_unused_pins": "io_default_unused_pins",
+}
+
+#: Categories that are fully enumerated and owned by a named model gap rather
+#: than by a mask entry: `S6` asks for a category, not for a zero (`D32`), and
+#: each of these names the workstream that must close it.
+GAP_CATEGORIES = {
+    "unmodelled_config_fuse":
+        "device-configuration fuses apicula models no cell for; owned by "
+        "W-CLOCKING (Phase 1) and W-IO (Phase 3)",
+    "extra_command_words":
+        "bitstream command/preamble words one packer emits and the other does "
+        "not; owned by W-DELIVER (Phase 8) bitstream framing",
+    "extra_config_frames":
+        "BSRAM initialisation slots apicula's bslib does not decode; owned by "
+        "W-COMPUTE-MEMORY (Phase 4) BSRAM modelling",
+    "bsram_mode_fuse":
+        "BSRAM mode fuses in tiles no cell is recovered for; owned by "
+        "W-COMPUTE-MEMORY (Phase 4) BSRAM modelling",
+}
 
 
 def _category_of(tile, cells_v, cells_o):
@@ -953,7 +1237,8 @@ def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
         tile_delta, cells_by_tile(nl_v), cells_by_tile(nl_o),
         outside_every_tile=total - in_tiles + out["bitmap_row_delta"],
         outside=out["outside_bitmap"], mask=mask, level=level,
-        shape_class=shape_class))
+        shape_class=shape_class,
+        tile_coords=tile_coord_delta(bmv, bmo, db), db=db))
     return out
 
 
@@ -1295,6 +1580,11 @@ def report(result):
                 f"  UNEXPLAINED {row['category']} "
                 f"bits={row.get('bits', 0)} bytes={row.get('bytes', 0)} "
                 f"tiles={row.get('tiles', 0)} :: {row['justification']}")
+        for row in res.get("gaps", []):
+            lines.append(
+                f"  GAP {row['category']} bits={row.get('bits', 0)} "
+                f"bytes={row.get('bytes', 0)} tiles={row.get('tiles', 0)} "
+                f"owner={row.get('gap')} :: {row['justification']}")
         for row in res.get("explained", []):
             lines.append(
                 f"  ACCOUNTED {row['category']} bits={row.get('bits', 0)} "
@@ -1930,6 +2220,38 @@ def compare(design_dir, spec=None, level="E0", **kwargs):
 # --------------------------------------------------------------------------
 # 10. CLI
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 9b. `S6` calibration reporting (`D32`, `P0.T33`)
+# --------------------------------------------------------------------------
+def calibration_summary(result):
+    """`(diffs, unexplained)` for one whole-design calibration run.
+
+    `S6` asks for a *bounded, fully enumerated* diff: "every differing item
+    listed by category, none unexplained".  `diffs` counts the enumerated
+    items -- the three set-level categories plus every residual category --
+    and `unexplained` counts what carries no category at all, which is what
+    must be zero.  A named gap (`GAP_CATEGORIES`) is enumerated, so it counts
+    towards `diffs` and never towards `unexplained`; it is printed on its own
+    `GAP` line so it cannot hide.
+    """
+    dc = result.diff_count or {}
+    res = result.residual or {}
+    diffs = sum(int(dc.get(k, 0)) for k in ("cells", "attrs", "conns"))
+    diffs += len(res.get("explained", [])) + len(res.get("gaps", []))
+    unexplained = len(res.get("unexplained_bits", []))
+    return diffs, unexplained
+
+
+def calibration_lines(result, design=None):
+    """`V5`'s stdout contract: one `CALIBRATION ok`/`FAIL` line per design."""
+    diffs, unexplained = calibration_summary(result)
+    tag = f" {design}" if design else ""
+    if unexplained:
+        return [f"CALIBRATION FAIL{tag}: {diffs} diffs enumerated, "
+                f"{unexplained} unexplained"]
+    return [f"CALIBRATION ok: {diffs} diffs enumerated, 0 unexplained"]
+
+
 def build_parser():
     """Return this module's argparse parser.
 
@@ -1980,6 +2302,16 @@ def main(argv=None):
                             vo_path=args.vo)
     for line in report(result):
         print(line)
+    if args.calibration:
+        # `S6` is a calibration criterion, not an equivalence pass (`D32`), so
+        # the verdict of the run is whether every difference is enumerated --
+        # never whether the sets matched.
+        lines = calibration_lines(result, design=args.design)
+        for line in lines:
+            print(line)
+        if args.json:
+            print(json.dumps(evidence_rows(result), sort_keys=True, default=str))
+        return 0 if lines[0].startswith("CALIBRATION ok") else 1
     if args.json:
         print(json.dumps(evidence_rows(result), sort_keys=True, default=str))
     return 0 if result.verdict.startswith("EQUIV") else 1
