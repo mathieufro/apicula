@@ -21,20 +21,68 @@ Only the first three decode as timing tables:
 | 3+ | — | 2.0e-04 6.1e-04 6.0e+19 1.3e-05 | 3.3e+12 -1.4e+19 … | … | not chunk-formatted |
 
 From chunk 3 on the same offsets decode as denormals, infinities and values of
-order 1e+37 — the file is not a 202-entry chunk array, and `read_tm`'s
+order 1e+37 — the file is not a 202-entry chunk array (`P0.T36`: every chunk
+from 3 on has a distinct md5 and a *different* md5 per device, so the tail is
+device-specific data on another layout, not padding), and `read_tm`'s
 `if i >= 3 and device in {...}: break` (`apycula/tm_parser.py:344`) is what
 stops the parser before that garbage. That break is **not** touched here; it is
 Phase 6's (`S17b`).
 
 Chunk 1 carries chunk 0's DFF numbers with different LUT numbers; chunk 2 is a
 uniform **0.862x** scaling of chunk 0 across every parsed group. Neither matches
-a published grade column, so neither is published under a grade key. Identifying
-them is `P0.T36`/`S17b`; **renaming them is not done in this phase**, because a
-key rename changes what `set_speed_grade` can select.
+a published grade column, so neither is published under a grade key. `P0.T36`
+measured both (below) and **confirmed** that neither is a DS1239E column, so the
+`unidentified_*` labels stand and `C1/I0` stays derived; **renaming them is not
+done in this phase**, because a key rename changes what `set_speed_grade` can
+select.
 
-The three parsed chunks are byte-identical across GW5A-25A / GW5AT-60B /
-GW5AST-138B / GW5AST-138C: the model is family-generic, and whether that is
-adequate for the 138K die is what the L0 measurement (`D49d`) tests.
+## What `P0.T36` measured (`D49b`, the first `W-TIMING` measurement)
+
+Full dump, cross-device sweep and per-chunk evidence:
+`$PIPE/evidence/timing-l0-cfu/chunks.md`. The four load-bearing results:
+
+1. **Chunk 0 = C2/I1, high confidence.** `dff.lsr_q` min/max are *exactly*
+   DS1239E `tSR_CFU` C2/I1 (1.075 / 1.148), and those two literals occur
+   nowhere else in the 1,944 float scalars of chunks 0-2. `tCO_CFU` agrees to
+   0.002 ns. The discriminator against chunk 1 is the LUT: the published
+   `tLUT4_CFU` C2/I1 max of 0.539 is bracketed by chunk 0 (0.549 / 0.570) but
+   is out of chunk 1's reach (max 0.440).
+2. **Chunk 1 is not a grade.** 540 of its 648 float scalars are byte-equal to
+   chunk 0; the 108 that move are exactly `lut` (44/44), `alu` (32/32),
+   `sram.rad*_do` (16) and `wire` (16) -- `dff`, `bram`, `glbsrc`, `hclk`,
+   `iodelay` and `fanout` are identical. All 27 tuples it moves *collapse*
+   (slot[2]==slot[0], slot[3]==slot[1]): no min/max spread. The F-to-OFX1 mux
+   delay is redistributed (`m0_ofx0` 0.189 + `fx_ofx1` 0.060 becomes
+   0.076 + 0.213), i.e. a different model of the same silicon. Stays
+   `unidentified_1`.
+3. **Chunk 2 is not a grade either.** It is exactly `0.862 x` chunk 0 on 607 of
+   608 non-zero, non-`fanout` scalars (the exception, `iodelay.SDTAP_DO`, is a
+   tap constant); the `fanout` group is not scaled. A uniformly scaled table is
+   a *derived* table, and DS1239E admits only two ratios, 1.00 and 1.25 -- and
+   0.862x is *faster* than the fastest grade the part ships (DS1239E §4.1:
+   "C2/I1 Fastest"). The two surviving hypotheses -- a higher core-voltage
+   corner (the part is 0.9 V / 1.0 V, and this parser's GW1N chunk order already
+   alternates `<grade>`/`<grade>_LV`) or a typical/fast process corner -- are
+   separated by `S17b`'s L1 vendor-STA measurement, not by the file. Stays
+   `unidentified_2`.
+4. **Chunks 0-2 are a family-generic preamble, not a grade array.** GW5AT-60ES
+   (one published grade, ES) and GW5A-25A (four, including A0) carry the
+   identical three chunks, as does a GW3A part; chunk 3 onward has a distinct
+   md5 for every device (198/198 distinct within GW5AST-138C alone) and only
+   31-57 % of its floats land in a plausible delay range. So the tail is
+   device-specific payload on a layout this parser does not know -- not
+   all-denormal, not constant -- and opening it stays behind `D24`'s gate.
+
+`P0.T36` made **no source edit**: no chunk was identified as `C1/I0`, so the
+`1.25 x` derivation below is confirmed rather than replaced, and no
+`unidentified_*` label earned a rename.
+
+The three parsed chunks are byte-identical across **every** GW5-family `.tm`
+Gowin EDA Standard 1.9.12.03 ships (22 devices, GW5A-25A / GW5AT-60B /
+GW5AST-138B / GW5AST-138C among them) **and** across the two GW3A parts, and
+they did not change between IDE 1.9.11.03 and 1.9.12.03. The model is
+family-generic, and whether that is adequate for the 138K die is what the L0
+measurement (`D49d`) tests.
 
 ## The bug this replaces
 
