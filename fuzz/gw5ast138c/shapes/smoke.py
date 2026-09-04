@@ -1,7 +1,7 @@
 """`smoke` -- the one shape Phase 0 ships (`P0.T20`).
 
 A 4-stage shift register whose **primitive under test is a single `DFF`**.
-The `DFF` instance is pinned by an `INS_LOC "top.dut_dff" R2C3[0][A];` line so
+The `DFF` instance is pinned by an `INS_LOC "dut_dff" R2C3[0][A];` line so
 its tile is deterministic, and `scope=ScopeSpec(tiles=[(2, 1)])` names exactly
 that one tile: R2C3 is row 2, column 3, i.e. 0-based `(x, y) = (2, 1)`.
 
@@ -14,10 +14,20 @@ Pins are in banks 4 and 5 -- never 6 or 7 (`D20c`, `D54`) -- at package
 locations taken from `examples/gw5a/tangmega138k.cst` and cross-checked
 against the chipdb `pin_bank` table for `GW5AST-LV138PG484AC1/I0`:
 
-    clk   V22  IOB104B  bank 4
-    rst_n Y12  IOB60B   bank 5
-    din   V14  IOB66B   bank 5
-    dout  P19  IOB99A   bank 4
+    clk   AA9  IOB53A   bank 5
+    rst_n AA10 IOB56A   bank 5
+    din   AA11 IOB56B   bank 5
+    dout  P20  IOB92A   bank 4
+
+Two vendor rules measured by `P0.T19` shape this table, both hard errors:
+
+* every location above is an ordinary I/O with **no CFG function**.  The
+  earlier V22/Y12/V14 choices are EMCCLK and SGCLK config pins.
+* `DRIVE` is legal only on an **output**.  Any `DRIVE` on an input raises
+  `CT1108 Illegal port attribute value specified 'DRIVE = 8'`, `DRIVE=NONE`
+  included, so the three inputs carry `drive=None`.
+* `INS_LOC` takes the **flat** instance name `dut_dff`; the blueprint's
+  `top.dut_dff` raises `CT1135 Can't find object named 'top.dut_dff'`.
 
 `smoke` is a **single-point** shape: it has no swept parameter (`sweep_axis`
 is `"none"`, one sweep value), because its job is to prove the flow end to end,
@@ -82,14 +92,14 @@ SPEC = ShapeSpec(
     sweep_values=[None],
     baseline_value=None,
     pins={
-        "clk": PinSpec(loc="V22", bank=4),
-        "rst_n": PinSpec(loc="Y12", bank=5, pull_mode="UP"),
-        "din": PinSpec(loc="V14", bank=5, pull_mode="UP"),
-        "dout": PinSpec(loc="P19", bank=4),
+        "clk": PinSpec(loc="AA9", bank=5, drive=None),
+        "rst_n": PinSpec(loc="AA10", bank=5, pull_mode="UP", drive=None),
+        "din": PinSpec(loc="AA11", bank=5, pull_mode="UP", drive=None),
+        "dout": PinSpec(loc="P20", bank=4),
     },
     bank_vccio={4: "3.3", 5: "3.3"},
     scope=ScopeSpec(tiles=[(2, 1)]),
     rtl=rtl,
-    ins_loc={"top.dut_dff": "R2C3[0][A]"},
+    ins_loc={"dut_dff": "R2C3[0][A]"},
     clocks={"clk": 20.0},
 )

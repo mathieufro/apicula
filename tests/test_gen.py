@@ -96,7 +96,10 @@ def test_gen_smoke_has_primitive_and_scope(tmp_path):
     cst = (tmp_path / "top.cst").read_text()
     ins_loc = [ln for ln in cst.splitlines() if ln.strip().startswith("INS_LOC")]
     assert len(ins_loc) == 1
-    assert "top.dut_dff" in ins_loc[0]
+    # P0.T20 states `top.dut_dff`; measured, the vendor resolves only the flat
+    # instance name and raises `CT1135 Can't find object named 'top.dut_dff'`
+    # on the qualified one (P0.T19's V4 run). Deviation recorded.
+    assert '"dut_dff"' in ins_loc[0]
     assert "R2C3[0][A]" in ins_loc[0]
 
 

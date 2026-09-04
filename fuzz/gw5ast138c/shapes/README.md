@@ -49,4 +49,4 @@ nothing, if the shape fails the `.cst` assertion.
 
 | Shape | Primitive under test | Scope tiles | Sweep |
 |---|---|---|---|
-| `smoke` | `DFF` (`INS_LOC "top.dut_dff" R2C3[0][A]`) | `[(2, 1)]` | none (single point) |
+| `smoke` | `DFF` (`INS_LOC "dut_dff" R2C3[0][A]`) | `[(2, 1)]` | none (single point) |
