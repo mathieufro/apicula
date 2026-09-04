@@ -66,6 +66,38 @@ def device_file(gowinhome):
     return _path
 
 
+# The Education 1.9.11.03 install was removed from disk on 2026-09-04 (owner
+# constraint C9 / D79: the licensed Standard 1.9.12.03 install is GOWINHOME for
+# everything). Its `IDE/share/device/` tree was archived beforehand, as a bare
+# `<device>/<device>.<ext>` tree with no surrounding IDE, so a 1.9.11-specific
+# parser test points the parser at the archived file *directly* and forces the
+# version with `GOWIN_IDE_VERSION` (no GOWINHOME-shaped symlink view is built:
+# nothing under `IDE/` other than `share/device` was archived, and
+# `detect_ide_version` already documents the env override as the mechanism for
+# "odd layouts").
+ARCHIVED_EDU_DEVICE_TREE = (
+    '/Users/alex/fine-line-data/open-toolchain-gw5ast/'
+    'ide-share-device/edu-1.9.11.03'
+)
+ARCHIVED_EDU_VERSION = '1.9.11.03'
+
+
+@pytest.fixture
+def archived_device_file():
+    """`archived_device_file('GW5AST-138C', 'fse')` -> archived 1.9.11 path.
+
+    Skips (never fails) when the archive is absent, matching `gowinhome`.
+    """
+    def _path(device, ext):
+        path = os.path.join(ARCHIVED_EDU_DEVICE_TREE, device,
+                            f'{device}.{ext}')
+        if not os.path.isfile(path):
+            pytest.skip(f'archived Education 1.9.11.03 {device}.{ext} absent '
+                        f'({path})')
+        return path
+    return _path
+
+
 @pytest.fixture
 def mutated_header(tmp_path):
     """`mutated_header(path, offset, byte)` -> a one-byte-mutated copy.

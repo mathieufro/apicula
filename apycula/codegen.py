@@ -3,9 +3,30 @@ from itertools import chain
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import shutil
 from apycula import bslib
+
+
+def gw_sh_command(gowinhome, tcl):
+    """(argv, env) that runs `gw_sh` on `tcl` on this platform.
+
+    On Linux the fontconfig shipped with the Programmer is preloaded, which is
+    what the historical `/usr/bin/env LD_PRELOAD=... gw_sh` form did. On macOS
+    that form is actively harmful: `/usr/bin/env` is a SIP-protected system
+    binary, so dyld strips every `DYLD_*` variable when exec'ing it, and
+    `gw_sh` then dies with `Library not loaded: @rpath/libGWTE.dylib` even
+    though `DYLD_LIBRARY_PATH`/`DYLD_FRAMEWORK_PATH` were exported correctly.
+    Exec'ing `gw_sh` directly keeps them (`gw_sh` is not restricted), and
+    `LD_PRELOAD` means nothing to the macOS loader anyway.
+    """
+    env = dict(os.environ)
+    argv = [os.path.join(gowinhome, "IDE/bin/gw_sh"), tcl]
+    if sys.platform.startswith("linux"):
+        env["LD_PRELOAD"] = os.path.join(
+            gowinhome, "Programmer/bin/libfontconfig.so.1")
+    return argv, env
 
 
 class Module:
@@ -267,7 +288,8 @@ run pnr
             with open(tmpdir+"/run.tcl", "w") as f:
                 self.write(f, cst=cst, netlist=netlist)
 
-            subprocess.run(["/usr/bin/env", "LD_PRELOAD=" + self.gowinhome + "/Programmer/bin/libfontconfig.so.1", self.gowinhome + "/IDE/bin/gw_sh", tmpdir+"/run.tcl"], cwd = tmpdir)
+            cmd, env = gw_sh_command(self.gowinhome, tmpdir+"/run.tcl")
+            subprocess.run(cmd, cwd = tmpdir, env = env)
             #print(tmpdir); input()
             try:
                 constrs = self.cst if isinstance(self.cst, Constraints) else Constraints()

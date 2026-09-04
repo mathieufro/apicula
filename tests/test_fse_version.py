@@ -113,12 +113,15 @@ def _selected_fse():
     return path if os.path.isfile(path) else None
 
 
-def _parse_selected_fse(monkeypatch):
-    """Parse the installed `.fse`, recording every longfuse width decision.
+def _parse_selected_fse(monkeypatch, path=None):
+    """Parse a GW5AST-138C `.fse`, recording every longfuse width decision.
 
+    `path` defaults to the selected install's copy; a 1.9.11 test passes the
+    archived Education file instead (see `tests/conftest.py`).
     Returns (tiles, end_offset, [(typ, data_start, rows, derived, used)]).
     """
-    path = _selected_fse()
+    if path is None:
+        path = _selected_fse()
     if path is None:
         pytest.skip('no GW5AST-138C.fse in the selected Gowin install')
     seen = []
@@ -138,10 +141,31 @@ def _parse_selected_fse(monkeypatch):
     return tiles, end, seen
 
 
-def test_fse_version_longfuse_width_is_derived(monkeypatch):
-    """The narrow longfuse width comes from the file, not from a constant."""
-    _ver, shape_set, shapes = fse_parser._active_shapes()
-    assert shape_set == 'v1_9_11plus', shape_set
+# (IDE version, shape set) pairs the 14-u16 longfuse rule covers. 1.9.11.03 is
+# read from the archived Education device tree: that install was removed from
+# disk on 2026-09-04 (C9/D79), so the file, not the install, is the reference.
+NARROW_LONGFUSE_VERSIONS = [
+    ('1.9.11.03', 'v1_9_11plus'),
+    ('1.9.12.03', 'v1_9_12plus'),
+]
+
+
+@pytest.mark.parametrize('ide_version,shape_set', NARROW_LONGFUSE_VERSIONS)
+def test_fse_version_longfuse_width_is_derived(monkeypatch, archived_device_file,
+                                               ide_version, shape_set):
+    """The narrow longfuse width comes from the file, not from a constant.
+
+    Run for both shape sets that carry the rule. The 1.9.11 case parses the
+    archived Education `.fse` with `GOWIN_IDE_VERSION` forced; the 1.9.12 case
+    parses the selected (Standard) install's own copy.
+    """
+    if ide_version == '1.9.11.03':
+        path = archived_device_file('GW5AST-138C', 'fse')
+    else:
+        path = _selected_fse()
+    monkeypatch.setenv('GOWIN_IDE_VERSION', ide_version)
+    ver, active_set, shapes = fse_parser._active_shapes()
+    assert (ver, active_set) == (ide_version, shape_set), (ver, active_set)
     # the flat descriptor is still the historical 17; 14 is a subtype override
     assert shapes['longfuse'] == 17, shapes['longfuse']
     # the 14-wide override is scoped to the 5-series (P0.T13b); a pre-5-series
@@ -155,7 +179,7 @@ def test_fse_version_longfuse_width_is_derived(monkeypatch):
         assert fse_parser.row_width('v1_9_10', TABLE_SHAPES_V1_9_10,
                                     'longfuse', typ, gw5a) == 17
 
-    _tiles, _end, seen = _parse_selected_fse(monkeypatch)
+    _tiles, _end, seen = _parse_selected_fse(monkeypatch, path)
     assert seen, 'no longfuse table was read at all'
     narrow = [row for row in seen if row[4] == 14]
     assert len(narrow) >= 1, [(hex(r[1]), r[3], r[4]) for r in seen]

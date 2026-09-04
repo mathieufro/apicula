@@ -43,14 +43,37 @@ LEGACY_WIDTHS = [
 ]
 
 
+# The IDE version each shape set stands for, for an explicit `shape_ctx`. The
+# widths below are a property of the shape set, not of whichever install
+# happens to be on the box, so the test passes one in rather than inheriting
+# the ambient `GOWINHOME` (Standard 1.9.12.03 since 2026-09-04, C9/D79).
+SHAPE_SET_VERSIONS = {
+    'v1_9_10': '1.9.10.03',
+    'v1_9_11plus': '1.9.11.03',
+    'v1_9_12plus': '1.9.12.03',
+}
+
+
 @pytest.mark.parametrize('device', ['GW1N-9C', 'GW2A-18C'])
+@pytest.mark.parametrize('shape_set', sorted(SHAPE_SET_VERSIONS))
 @pytest.mark.parametrize('typ,typn,width', LEGACY_WIDTHS)
-def test_legacy_device_row_widths_unchanged(device, typ, typn, width):
-    tmap = fse_parser.read_one_file(_one_table_stream(typ, width), 0, device)
+def test_legacy_device_row_widths_unchanged(device, shape_set, typ, typn,
+                                            width):
+    """Pre-5-series row widths, per shape set.
+
+    `width` is the pre-1.9.11 width; a set that measured a different one is
+    listed in `RECORDED_SET_DIFFERENCES` (P0.T13b measured `drpfuse` 10 -> 30
+    u16 in 1.9.12.03) and that measured width is what is asserted there.
+    """
+    expected = RECORDED_SET_DIFFERENCES[shape_set].get(typn, width)
+    shape_ctx = (SHAPE_SET_VERSIONS[shape_set], shape_set,
+                 fse_parser.TABLE_SHAPES[shape_set])
+    tmap = fse_parser.read_one_file(_one_table_stream(typ, expected), 0,
+                                    device, shape_ctx=shape_ctx)
     assert typn in tmap, tmap.keys()
     table = tmap[typn][typ]
     assert len(table) == 2
-    assert all(len(row) == width for row in table)
+    assert all(len(row) == expected for row in table)
 
 
 def test_five_series_fuse_and_wire_widths_unchanged():
