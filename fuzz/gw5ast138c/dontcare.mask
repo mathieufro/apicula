@@ -1,0 +1,68 @@
+# dontcare.mask -- the don't-care mask for GW5AST-138C equivalence runs.
+#
+# Policy owner: `spec-harness.md` §5.3.  This file is the whole mask; there is
+# no second one and no per-run override.  Phase 0 ships **exactly** the six
+# base entries §5.3 admits without new evidence.  Phases 1-5b append entries
+# under the §5.3 rules; nothing is ever deleted, and nothing is ever widened
+# after a result, because every evidence row records this file's sha256.
+#
+# Format -- one `[entry]` block per masked difference, `key: value` inside it.
+# Required on EVERY entry (five keys):
+#     id, levels, justification, citation, initials
+# Required ONLY on the IO-default entry, and forbidden elsewhere:
+#     disabled_for_shape_classes
+# Rejected outright (`MaskPolicyError`): a `primitive:` key.  A difference that
+# only ever appears for one primitive is a finding ABOUT that primitive, not a
+# don't-care (§5.3, rule 2).
+#
+# `levels` is the comma-separated subset of E0/E1/E2 at which the entry
+# applies.  An entry that does not apply at the level being compared is not
+# consulted at all.
+#
+# Every justification below is a MEASUREMENT on the real smoke pair
+# ($DATASTORE/oracle-smoke: vendor `run/impl/pnr/run.fs`, 34,668,941 B, built
+# by gw_sh 1.9.12.03; open `top.fs`, 34,668,145 B, built by
+# yosys 0.63 -> nextpnr-himbaechel -> gowin_pack), taken 2026-09-04.
+
+[entry]
+id: header_words
+levels: E0,E1,E2
+justification: Metadata, not configuration; differs between any two builds of the same design.
+citation: spec-harness.md 5.3 row 1. MEASURED on oracle-smoke: the vendor run.fs opens with a 24-line, 634-byte `//` comment block carrying Tool Version V1.9.12.03 (86715), Device GW5AST-138, Device Version C, Part Number GW5AST-LV138PG484AC1/I0, CheckSum 0xE586 and UserCode 0x0000E586; gowin_pack's top.fs emits no comment block at all (0 lines, 0 bytes), and bslib.read_bitstream discards these lines before the fuse bitmap exists. 634 of the 796-byte size delta is exactly this block.
+initials: ws_00
+
+[entry]
+id: crc_checksum_padding
+levels: E0,E1,E2
+justification: Derived from the payload, not configuration; openFPGALoader's GW5 checksum is a stub anyway.
+citation: spec-harness.md 5.3 row 2. MEASURED on oracle-smoke: the two files' 0x0a footer words differ only in their low 16 bits -- vendor `...1110010110000110` = 0xE586, open `...0011001100100101` = 0x3325 -- which are the two builds' CheckSum values; and bslib.write_bitstream recomputes every frame line's trailing CRC16-ARC plus its 48 pad bits from the payload it just wrote (bslib.py:388-397), so neither can be an independent configuration difference.
+initials: ws_00
+
+[entry]
+id: unused_tile_fill
+levels: E0,E1,E2
+justification: Not configuration of any instantiated cell.
+citation: spec-harness.md 5.3 row 3. MEASURED on oracle-smoke: gowin_unpack recovers 121,136 cells from the vendor bitstream against 400 from the open one; 3,868,643 of the 3,871,789 tile-resolved differing frame bits fall in the 17,270 tiles where the vendor has unpacked cells and the open side has none -- vendor fill, in tiles no cell of the shape under test occupies. Both sides' bits there ARE accounted for by the unpacker (D35's residual subtracts them), so this entry masks them from the set comparison, never from the raw residual.
+initials: ws_00
+
+[entry]
+id: free_placement
+levels: E0
+justification: E0 is explicitly placement-free; at E1 placement identity is asserted and this entry does not apply.
+citation: spec-harness.md 5.3 row 4 and 5.1 (the E0/E1/E2 ladder, D32). MEASURED on oracle-smoke: nextpnr ignores the INS_LOC constraints gen.py exports (himbaechel/uarch/gowin/cst.cc has no `case insloc:`, EC9, P0.T38), so the same DFF lands in tile (2,1) on the vendor side and elsewhere on the open side -- a placement difference with identical cell type and attributes, which is exactly what E0 is defined not to compare and what E1 is defined to catch.
+initials: ws_00
+
+[entry]
+id: net_route
+levels: E0,E1
+justification: Routing is never a verdict term; the pip delta is reported as diff_count.pips, not masked away silently. At E2 this entry does not apply.
+citation: spec-harness.md 5.3 row 5 and 5.1 ("Routing is never a pass/fail term at E0 or E1", D32, EC14). MEASURED on oracle-smoke: the two flows' pip counts differ while net identity is canonicalised to the sorted endpoint set (equiv.py net_id/_build_nets), so a net with matching endpoints and a different physical path is a statistic; the vendor flow has no route-import mechanism at all (INS_LOC is placement-only, SUG935 A.3).
+initials: ws_00
+
+[entry]
+id: io_default_unused_pins
+levels: E0,E1,E2
+justification: Vendor and apicula may spell the same default differently on a pin neither design uses; a difference in the default ITSELF is never masked, because that is exactly the PR #423 unfused-IO-bank overheating defect class.
+citation: spec-harness.md 5.3 row 6 and its two following rules. MEASURED on oracle-smoke: the smoke shape uses 4 of PG484's pins (clk, rst_n, din, dout), yet gowin_unpack recovers 322 IOB cells from the open bitstream against 168 from the vendor one -- a 154-cell surplus of IOB configuration on pins NEITHER design instantiates, which is the defaulted-IO case this row names. It applies ONLY when both sides carry a defaulted value: a difference in the default itself is a finding, not a don't-care.
+disabled_for_shape_classes: iob,lvds,iodelay,iologic_mem
+initials: ws_00

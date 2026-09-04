@@ -34,10 +34,11 @@ between a real verdict and a comfortable one:
   `P0.T25` owns the richer `residual()` / `decode_check()` pair; this module
   owns only the raw differential report `E0` cannot be read without.
 
-`load_mask()` here is deliberately a **stub** (§1 ownership table): it reads
-the file and returns an empty-but-valid `Mask`, so `E0` runs against
-`P0.T18`'s placeholder `dontcare.mask` before `P0.T24` lands.  `P0.T24` fills
-its body and the policy checks; no dependency runs backwards (F22).
+`load_mask()` (`P0.T24`) parses the checked-in `dontcare.mask` and enforces
+§5.3 on it: five required keys per entry, the sixth only on the IO-default
+entry, no `primitive:`-scoped entry, and the file's sha256 carried into every
+evidence row so a result cannot be improved after the fact by widening the
+mask.
 """
 import argparse
 import collections
@@ -101,40 +102,234 @@ class Netlist:
 
 
 # --------------------------------------------------------------------------
-# 2. The mask -- a STUB owned by P0.T24 (§1 ownership table)
+# 2. The mask (§5.3, `P0.T24`)
 # --------------------------------------------------------------------------
+#: Where the checked-in mask lives.  `load_mask(None)` reads **this** file, so
+#: no run can quietly compare against a mask that is not the reviewed one.
+DEFAULT_MASK_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dontcare.mask")
+
+#: The five keys every entry must carry (§5.3: "Every entry carries a one-line
+#: justification and a citation", plus the initials the third rule demands).
+REQUIRED_MASK_KEYS = ("id", "levels", "justification", "citation", "initials")
+
+#: The sixth key, required on the IO-default entry and forbidden on every
+#: other one -- §5.3's "The IO-default entry is disabled for any run whose
+#: shape is an IO or IOLOGIC primitive ... because there the default *is* the
+#: thing under test."
+SHAPE_CLASS_KEY = "disabled_for_shape_classes"
+IO_DEFAULT_ENTRY_ID = "io_default_unused_pins"
+IO_SHAPE_CLASSES = ("iob", "lvds", "iodelay", "iologic_mem")
+
+#: The base set §5.3 admits without new evidence.  Phase 0 ships exactly these
+#: six; a seventh entry is a Phase 1-5b decision, reviewed as a claim about
+#: the hardware.
+BASE_MASK_ENTRY_IDS = ("header_words", "crc_checksum_padding",
+                       "unused_tile_fill", "free_placement", "net_route",
+                       IO_DEFAULT_ENTRY_ID)
+
+LEVELS = ("E0", "E1", "E2")
+
+
+class MaskPolicyError(EquivError):
+    """The mask file breaks a §5.3 rule.
+
+    Raised, never warned: a mask entry is a claim about the hardware and an
+    unreviewable one is worse than no mask at all.
+    """
+
+
+@dataclass(frozen=True)
+class MaskEntry:
+    """One reviewed don't-care, with the metadata that makes it checkable."""
+
+    id: str
+    levels: tuple
+    justification: str
+    citation: str
+    initials: str
+    disabled_for_shape_classes: tuple = None
+
+    def applies_at(self, level):
+        return level in self.levels
+
+    def active_for(self, level, shape_class=None):
+        """Does this entry apply for `level` and this shape class?
+
+        The IO-default entry is switched **off** for an IO/IOLOGIC shape,
+        because there the default is the thing under test (§5.3).
+        """
+        if not self.applies_at(level):
+            return False
+        disabled = self.disabled_for_shape_classes or ()
+        return not (shape_class and shape_class in disabled)
+
+
 @dataclass(frozen=True)
 class Mask:
-    """A don't-care mask.  `P0.T23` ships it empty-but-valid, by design."""
+    """The parsed don't-care mask plus the sha256 every evidence row records."""
 
     entries: tuple = ()
     sha256: str = ""
     path: str = None
 
-    def masks(self, kind, item):
-        """Is `item` (of set `kind`) a don't-care?  Always `False` here."""
+    def masks(self, kind, item, level="E0", shape_class=None):
+        """Is `item` (of set `kind`) a don't-care?
+
+        **`False` for every member of the three `E0` sets, by construction.**
+        None of the six base entries names a cell, an attribute or a
+        connection: header words and CRC words are not in the bitmap at all,
+        unused-tile fill and defaulted IO are outside the shape's tile scope
+        (`scope_of`, `D32`), free placement is what `E0` is defined not to
+        compare and `E1` is defined to assert, and a route is never a verdict
+        term.  A cell/attr/conn difference inside the scope is therefore
+        always reported -- "An unmasked difference is a failure" (§5.3), and
+        Phase 0 masks none of them.
+        """
         return False
+
+    def entry(self, entry_id):
+        for e in self.entries:
+            if e.id == entry_id:
+                return e
+        return None
+
+    def active(self, level="E0", shape_class=None):
+        """The entries in force for this comparison, in file order."""
+        return tuple(e for e in self.entries
+                     if e.active_for(level, shape_class))
+
+    def explains(self, entry_id, level="E0", shape_class=None):
+        """Is `entry_id` in force here?  Used to attribute a residual (§5.1b)."""
+        entry = self.entry(entry_id)
+        return entry is not None and entry.active_for(level, shape_class)
+
+    @property
+    def ids(self):
+        return tuple(e.id for e in self.entries)
 
     @property
     def is_empty(self):
         return not self.entries
 
 
-def load_mask(path):
-    """Read `path` and return an empty-but-valid `Mask` (**stub**, `P0.T23`).
+def _parse_mask_text(text, path):
+    """`[entry]` blocks of `key: value` lines into a list of dicts.
 
-    `P0.T24` fills this body and adds the §5.3 policy checks.  Until then the
-    mask is empty: **every** difference is reported, which is the safe
-    direction for a stub to fail in.  The file's sha256 is still computed and
-    carried, because every evidence row records it (§5.3, last rule).
+    Deliberately dumb and diff-friendly: a mask is reviewed by reading it, so
+    the file format is the one a reviewer can read without a parser.
+    """
+    blocks = []
+    current = None
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[entry]":
+            current = {}
+            blocks.append(current)
+            continue
+        if current is None:
+            raise MaskPolicyError(
+                f"{path}:{lineno}: {line!r} outside any [entry] block")
+        if ":" not in line:
+            raise MaskPolicyError(
+                f"{path}:{lineno}: {line!r} is not a `key: value` line")
+        key, value = line.split(":", 1)
+        key, value = key.strip(), value.strip()
+        if key in current:
+            raise MaskPolicyError(f"{path}:{lineno}: duplicate key {key!r}")
+        current[key] = value
+    return blocks
+
+
+def load_mask(path=None):
+    """Parse the don't-care mask and enforce §5.3's rules on it.
+
+    `path=None` means the checked-in `dontcare.mask`; the sha256 returned is
+    the file's, because every evidence row records it and "a result cannot be
+    silently improved by widening the mask after the fact" (§5.3, last rule).
+
+    Refuses (`MaskPolicyError`):
+
+    * an entry carrying a `primitive:` key -- §5.3 rule 2, "A mask entry may
+      never be scoped to a specific primitive row.  If a difference only ever
+      appears for one primitive, it is a finding about that primitive, not a
+      don't-care";
+    * an entry missing any of the five required keys, or with an empty
+      justification or citation -- §5.3, "Every entry carries a one-line
+      justification and a citation";
+    * `disabled_for_shape_classes` on anything but the IO-default entry, or
+      missing from it;
+    * a level outside E0/E1/E2, or a duplicate id.
     """
     if path is None:
-        return Mask(entries=(), sha256=hashlib.sha256(b"").hexdigest(), path=None)
+        path = DEFAULT_MASK_PATH
     if not os.path.isfile(path):
         raise EquivError(f"no mask file {path}")
     with open(path, "rb") as f:
         blob = f.read()
-    return Mask(entries=(), sha256=hashlib.sha256(blob).hexdigest(), path=path)
+    sha = hashlib.sha256(blob).hexdigest()
+
+    entries = []
+    seen = set()
+    for block in _parse_mask_text(blob.decode(), path):
+        if "primitive" in block:
+            raise MaskPolicyError(
+                f"{path}: entry {block.get('id', '<no id>')!r} is scoped to "
+                f"primitive {block['primitive']!r}: a mask entry may never be "
+                "scoped to a specific primitive row (spec-harness.md 5.3). A "
+                "difference that only appears for one primitive is a finding "
+                "about that primitive, not a don't-care.")
+        missing = [k for k in REQUIRED_MASK_KEYS if not block.get(k)]
+        if missing:
+            raise MaskPolicyError(
+                f"{path}: entry {block.get('id', '<no id>')!r} is missing or "
+                f"empties {', '.join(missing)}; all of "
+                f"{', '.join(REQUIRED_MASK_KEYS)} are required")
+        entry_id = block["id"]
+        if entry_id in seen:
+            raise MaskPolicyError(f"{path}: duplicate entry id {entry_id!r}")
+        seen.add(entry_id)
+
+        levels = tuple(v.strip() for v in block["levels"].split(",") if v.strip())
+        bad = [lv for lv in levels if lv not in LEVELS]
+        if bad or not levels:
+            raise MaskPolicyError(
+                f"{path}: entry {entry_id!r} has levels {block['levels']!r}; "
+                f"each must be one of {', '.join(LEVELS)}")
+
+        shape_classes = block.get(SHAPE_CLASS_KEY)
+        if entry_id == IO_DEFAULT_ENTRY_ID:
+            if not shape_classes:
+                raise MaskPolicyError(
+                    f"{path}: the IO-default entry {entry_id!r} must carry "
+                    f"{SHAPE_CLASS_KEY}: it is disabled for any IO/IOLOGIC "
+                    "shape, because there the default is the thing under test "
+                    "(spec-harness.md 5.3)")
+        elif shape_classes:
+            raise MaskPolicyError(
+                f"{path}: entry {entry_id!r} carries {SHAPE_CLASS_KEY}, which "
+                f"is admissible only on {IO_DEFAULT_ENTRY_ID!r}")
+
+        extra = set(block) - set(REQUIRED_MASK_KEYS) - {SHAPE_CLASS_KEY}
+        if extra:
+            raise MaskPolicyError(
+                f"{path}: entry {entry_id!r} carries unknown key(s) "
+                f"{', '.join(sorted(extra))}")
+
+        entries.append(MaskEntry(
+            id=entry_id,
+            levels=levels,
+            justification=block["justification"],
+            citation=block["citation"],
+            initials=block["initials"],
+            disabled_for_shape_classes=(
+                tuple(v.strip() for v in shape_classes.split(",") if v.strip())
+                if shape_classes else None),
+        ))
+
+    return Mask(entries=tuple(entries), sha256=sha, path=path)
 
 
 # --------------------------------------------------------------------------
@@ -525,6 +720,7 @@ class E0Result:
     first_diff: str = None
     log_path: str = None
     mask_sha256: str = ""
+    mask_entries: tuple = ()
     residual: dict = field(default_factory=dict)
     per_tile: dict = field(default_factory=dict)
     notes: str = ""
@@ -570,7 +766,7 @@ def compare_e0(vendor, open_, scope=None, mask=None, residual=None):
     only_av, only_ao = attrs_v - attrs_o, attrs_o - attrs_v
     only_nv, only_no = conns_v - conns_o, conns_o - conns_v
 
-    result = E0Result(mask_sha256=mask.sha256)
+    result = E0Result(mask_sha256=mask.sha256, mask_entries=mask.ids)
     # Counted **by key, not by set element**: a cell whose type changed at one
     # site is ONE differing cell, not one missing plus one added.  The key of a
     # cell is its site `(x, y, z)`, of an attribute `(cell, attr_name)`, of a
@@ -695,7 +891,8 @@ def report(result):
                          f"line={entry['line']} bits={entry['bits']} "
                          f"prefix={entry['prefix']}")
     lines.append(f"MASK sha256={result.mask_sha256} "
-                 f"(empty at P0.T23; P0.T24 fills it)")
+                 f"entries={len(result.mask_entries)} "
+                 f"[{','.join(result.mask_entries)}]")
     if result.notes:
         lines.append(f"NOTE {result.notes}")
     return lines
@@ -719,6 +916,7 @@ def evidence_rows(result, run_id="equiv", primitive=None, shape=None):
         "first_diff": result.first_diff,
         "unexplained_bits": result.residual,
         "mask_sha256": result.mask_sha256,
+        "mask_entries": list(result.mask_entries),
         "oracle_log": result.log_path,
         "notes": result.notes,
     }]
@@ -783,6 +981,7 @@ def compare_design(design_dir, shape=None, level="E0", mask_path=None,
     if missing:
         return E0Result(verdict="ABORT", level=level,
                         log_path=find_log(design_dir), mask_sha256=mask.sha256,
+                        mask_entries=mask.ids,
                         notes="missing bitstream(s): " + ", ".join(missing))
 
     spec = load_spec(shape, design_dir)
@@ -832,7 +1031,7 @@ def build_parser():
     parser.add_argument("--shape", default=None,
                         help="Shape name; its ScopeSpec restricts the compare.")
     parser.add_argument("--mask", default=None,
-                        help="Path to dontcare.mask (P0.T24 fills its policy).")
+                        help="Path to dontcare.mask; default is the checked-in one.")
     parser.add_argument("--calibration", action="store_true",
                         help="Whole-design comparison (S6 calibration only).")
     parser.add_argument("--level", default="E0", choices=["E0", "E1", "E2"])
