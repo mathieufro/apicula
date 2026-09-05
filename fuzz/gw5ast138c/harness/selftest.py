@@ -276,7 +276,160 @@ def unpacker_completeness(design_dir, open_fs=None, pnr_json=None,
 
 
 # --------------------------------------------------------------------------
-# 3. CLI
+# 3. Probing every masked class (`S5`/`S6b` generalised, gestalt G3/G5)
+# --------------------------------------------------------------------------
+#: Exact stdout of a passing `--probe-mask-classes`.
+MASK_PROBE_OK = "MASKPROBE ok: 5 classes probed, 5 reported"
+
+#: The five residual classes a differing *tile* bit can land in under
+#: `spec-harness.md` §5.3.  `--inject-one-fuse` deliberately picks "a clear
+#: single-bit LUT flag inside a tile the unpacker already decodes a cell
+#: from", so it proves the checker sees a fuse in a **modelled** tile and
+#: proves nothing about these five.  This probe flips one bit inside each of
+#: them, on the real chipdb's own fuse tables, and asserts the disposition
+#: §5.3 requires -- including, for the two rows that carry conditions, that
+#: the condition-violating variant comes back as a difference.
+MASK_PROBE_CLASSES = ("set_level_diff", "vendor_only_fill", "open_only_fill",
+                      "net_route", "io_default_unused_pins")
+
+
+def _probe_cells(tile, typ="LUT", z=0, attrs=()):
+    cell = equiv.Cell(tile[1], tile[0], z, typ)
+    return equiv.cells_by_tile(equiv.Netlist(cells={cell: frozenset(attrs)}))
+
+
+def io_probe_site(db):
+    """A real IO tile with both a defaulted and a `DRIVE`/`PULLMODE` fuse."""
+    for row in range(db.rows):
+        for col in range(db.cols):
+            ttyp = db.grid[row][col]
+            owned = equiv.fuse_groups(db, ttyp).get("longval:IOBA") or set()
+            if not owned:
+                continue
+            hot = owned & equiv.iob_nondefault_coords(db, ttyp)
+            plain = owned - hot
+            if plain and hot:
+                return (row, col), sorted(plain)[0], sorted(hot)[0]
+    raise SelftestError(
+        "no IO tile on this device carries both a defaulted and a "
+        "DRIVE/PULLMODE IOBA fuse, so spec-harness.md 5.3 row 6's two "
+        "conditions cannot be probed")
+
+
+def pip_probe_site(db):
+    """A real routing fuse and the global wire the pip it belongs to drives."""
+    for row in range(db.rows):
+        for col in range(db.cols):
+            owners = equiv.pip_owners(db, db.grid[row][col])
+            for coord in sorted(owners):
+                for dest in sorted(owners[coord]):
+                    try:
+                        wire = equiv.db_wire2global(db, row, col, dest)
+                    except Exception:
+                        continue
+                    return (row, col), coord, wire
+    raise SelftestError(
+        "no pip fuse on this device resolves to a global wire, so "
+        "spec-harness.md 5.3 row 5's endpoint condition cannot be probed")
+
+
+def _routed_netlist(tile, wire, port):
+    cell = equiv.Cell(tile[1], tile[0], 0, "LUT")
+    netlist = equiv.Netlist(cells={cell: frozenset()})
+    netlist.nets = {wire: frozenset([(cell, port)])}
+    netlist.wire_net = {wire: wire}
+    return netlist
+
+
+def probe_mask_classes(db=None, device=equiv.DEVICE, mask=None,
+                       level="E0", shape_class=None):
+    """Flip one bit inside each masked class and assert it is reported.
+
+    "Reported" is per class what §5.3 says it is: a masked class must come
+    back **named, with its mask entry and its bit count** (never silently
+    dropped), and the two rows that carry conditions must additionally send
+    the condition-violating variant to `unexplained_bits`.  Returns the
+    report; raises `SelftestError` on the first class that does not.
+    """
+    db = db if db is not None else equiv.load_db(device)
+    mask = mask if mask is not None else equiv.load_mask(None)
+    io_tile, io_default, io_drive = io_probe_site(db)
+    pip_tile, pip_coord, pip_wire = pip_probe_site(db)
+    fill_tile = (1, 1)
+
+    def classify(tile, cells_v, cells_o, coords=(), **kw):
+        return equiv.classify_residual(
+            {tile: max(len(coords), 1)}, cells_v, cells_o,
+            outside_every_tile=0, outside={},
+            tile_coords={tile: set(coords)} if coords else {},
+            db=db, mask=mask, level=level, shape_class=shape_class, **kw)
+
+    def named(res, key, category):
+        for row in res[key]:
+            if row["category"] == category:
+                return row
+        return None
+
+    routed = _routed_netlist(pip_tile, pip_wire, "F")
+    probes = [
+        ("set_level_diff", "explained", None,
+         classify(fill_tile, _probe_cells(fill_tile, "LUT"),
+                  _probe_cells(fill_tile, "DFF"))),
+        ("vendor_only_fill", "explained", "unused_tile_fill",
+         classify(fill_tile, _probe_cells(fill_tile), {})),
+        ("open_only_fill", "unexplained_bits", None,
+         classify(fill_tile, {}, _probe_cells(fill_tile))),
+        ("net_route", "explained", "net_route",
+         classify(pip_tile, {}, {}, coords=[pip_coord], nl_v=routed,
+                  nl_o=_routed_netlist(pip_tile, pip_wire, "F"))),
+        ("io_default_unused_pins", "explained", "io_default_unused_pins",
+         classify(io_tile, {}, {}, coords=[io_default])),
+    ]
+    #: The condition-violating variant of each conditioned row: §5.3 row 5's
+    #: net whose endpoints changed, row 6's used pin, and row 6's
+    #: non-defaulted value.  Each must be a difference, not a don't-care.
+    negatives = [
+        ("net_route_endpoint_diff",
+         classify(pip_tile, {}, {}, coords=[pip_coord], nl_v=routed,
+                  nl_o=_routed_netlist(pip_tile, pip_wire, "Q"))),
+        ("io_used_pin_config",
+         classify(io_tile, _probe_cells(io_tile, "IOB"),
+                  _probe_cells(io_tile, "IOB"), coords=[io_default])),
+        ("io_nondefault_config",
+         classify(io_tile, {}, {}, coords=[io_drive])),
+    ]
+
+    report = {"classes": [], "negatives": [], "mask_sha256": mask.sha256,
+              "io_tile": f"({io_tile[1]},{io_tile[0]})",
+              "pip_tile": f"({pip_tile[1]},{pip_tile[0]})"}
+    for category, key, entry, res in probes:
+        row = named(res, key, category)
+        if row is None or not row.get("bits"):
+            raise SelftestError(
+                f"MASKPROBE FAILED: one fuse flipped inside {category} is not "
+                f"reported in `{key}` -- the checker drops it silently "
+                f"(mask {mask.sha256[:8]}, spec-harness.md 5.3)")
+        if entry and row.get("mask_entry") != entry:
+            raise SelftestError(
+                f"MASKPROBE FAILED: {category} came back with mask entry "
+                f"{row.get('mask_entry')!r}, not {entry!r} "
+                "(spec-harness.md 5.3)")
+        report["classes"].append({"category": category, "bits": row["bits"],
+                                  "mask_entry": row.get("mask_entry"),
+                                  "reported_in": key})
+    for category, res in negatives:
+        row = named(res, "unexplained_bits", category)
+        if row is None or not row.get("bits"):
+            raise SelftestError(
+                f"MASKPROBE FAILED: {category} is masked away -- a mask entry "
+                "is being applied outside the conditions its spec-harness.md "
+                "5.3 row states, which is the PR #423 defect class")
+        report["negatives"].append({"category": category, "bits": row["bits"]})
+    return report
+
+
+# --------------------------------------------------------------------------
+# 4. CLI
 # --------------------------------------------------------------------------
 def build_parser():
     """Return this module's argparse parser.
@@ -295,6 +448,9 @@ def build_parser():
                         help="S5: flip one fuse and assert the checker reports it.")
     parser.add_argument("--unpacker-completeness", action="store_true",
                         help="S6b: assert the unpacker has no blind spot here.")
+    parser.add_argument("--probe-mask-classes", action="store_true",
+                        help="Flip one bit inside each masked class and assert "
+                             "each is reported (spec-harness.md 5.3).")
     parser.add_argument("--device", default=equiv.DEVICE)
     parser.add_argument("--mask", default=None,
                         help="Mask file; the checked-in dontcare.mask by default.")
@@ -305,9 +461,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if not (args.inject_one_fuse or args.unpacker_completeness):
-        print("selftest: pass --inject-one-fuse and/or --unpacker-completeness",
-              file=sys.stderr)
+    if not (args.inject_one_fuse or args.unpacker_completeness
+            or args.probe_mask_classes):
+        print("selftest: pass --inject-one-fuse, --unpacker-completeness "
+              "and/or --probe-mask-classes", file=sys.stderr)
         return 2
 
     db = None
@@ -329,6 +486,16 @@ def main(argv=None):
             inject_one_fuse(args.design_dir, open_fs=args.open_fs,
                             device=args.device, db=db, mask_path=args.mask)
             print(SELFTEST_OK)
+        except SelftestError as err:
+            print(str(err), file=sys.stderr)
+            status = 1
+    if args.probe_mask_classes:
+        try:
+            if db is None:
+                db = equiv.load_db(args.device)
+            probe_mask_classes(db=db, device=args.device,
+                               mask=equiv.load_mask(args.mask))
+            print(MASK_PROBE_OK)
         except SelftestError as err:
             print(str(err), file=sys.stderr)
             status = 1

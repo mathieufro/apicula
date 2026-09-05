@@ -286,6 +286,7 @@ HEAD_GATES = (
     ("selftest --inject-one-fuse", _selftest_gate("--inject-one-fuse")),
     ("selftest --unpacker-completeness",
      _selftest_gate("--unpacker-completeness")),
+    ("selftest --probe-mask-classes", _selftest_gate("--probe-mask-classes")),
     ("gw_sh pre-flight", _preflight_gate()),
 )
 

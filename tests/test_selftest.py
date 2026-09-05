@@ -166,3 +166,51 @@ def test_unattributed_tiles_counts_only_undecoded_tiles():
     }
     orphans = selftest.unattributed_tiles(tiles, netlist)
     assert orphans == [{"tile": "(7,7)", "bits": 3}]
+
+
+# --------------------------------------------------------------------------
+# Every masked class, probed (gestalt G3/G5)
+# --------------------------------------------------------------------------
+def test_mask_probe_reports_every_masked_class(smoke_db, capsys):
+    """One bit flipped inside each of the five classes comes back named.
+
+    `--inject-one-fuse` picks a LUT flag in a modelled tile, so it proves the
+    checker sees a fuse there and nothing about the mask. This probe walks the
+    real chipdb's own fuse tables for each class §5.3 can put a bit in.
+    """
+    report = selftest.probe_mask_classes(db=smoke_db)
+    assert [c["category"] for c in report["classes"]] == \
+        list(selftest.MASK_PROBE_CLASSES)
+    assert all(c["bits"] for c in report["classes"])
+    assert [n["category"] for n in report["negatives"]] == \
+        ["net_route_endpoint_diff", "io_used_pin_config", "io_nondefault_config"]
+
+    status = selftest.main(["--design-dir", ".", "--probe-mask-classes"])
+    assert capsys.readouterr().out == selftest.MASK_PROBE_OK + "\n"
+    assert status == 0
+
+
+def test_mask_probe_detects_a_mask_applied_without_its_conditions(smoke_db,
+                                                                  monkeypatch):
+    """Red control: drop §5.3's conditions and the probe must fail.
+
+    This is the pre-fix checker exactly -- a fuse-group name decided the
+    category on its own -- and it is the state in which a differing IO fuse on
+    a used pin and a flipped routing bit were both silently absorbed.
+    """
+    monkeypatch.setattr(
+        equiv, "refine_group_category",
+        lambda category, name, coord, db, ttyp, **kw: category)
+    with pytest.raises(selftest.SelftestError) as err:
+        selftest.probe_mask_classes(db=smoke_db)
+    assert "MASKPROBE FAILED" in str(err.value)
+
+
+def test_mask_probe_detects_open_only_fill_being_masked(smoke_db, monkeypatch):
+    """Red control: re-map `open_only_fill` to the fill entry and it fails."""
+    widened = dict(equiv.ACCOUNTED_CATEGORIES)
+    widened["open_only_fill"] = "unused_tile_fill"
+    monkeypatch.setattr(equiv, "ACCOUNTED_CATEGORIES", widened)
+    with pytest.raises(selftest.SelftestError) as err:
+        selftest.probe_mask_classes(db=smoke_db)
+    assert "open_only_fill" in str(err.value)
