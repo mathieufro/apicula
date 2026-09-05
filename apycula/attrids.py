@@ -1425,6 +1425,17 @@ pll_attrids = {
         'A_CLKFB_SEL':            209,
         'A_GMC_SEL':              212,
         'A_VR_EN':                213,
+
+        # P1.T22, MEASURED on GW5AST-138C, batch p1-pll-attrmap, site PLL_L[0]:
+        # a one-parameter oracle sweep of the vendor `PLL` primitive.  Setting
+        # DYN_IDIV_SEL="TRUE" moves 235 bits inside the site's three tiles and
+        # every moved bit lies in shortval[35] rows keyed by (attr 125, val 50);
+        # DYN_ODIV0_SEL="TRUE" moves one bit, keyed by (attr 132, val 50).
+        # pll_attrvals['TRUE'] == 50, so the attribute is the boolean itself.
+        # Both ids were in this device's .fse table with no name before this.
+        # See $OTC/evidence/plla/attrmap-138c.{md,json}.
+        'A_DYN_IDIV_SEL':         125,
+        'A_DYN_ODIV0_SEL':        132,
     }
 pll_attrvals = {
         'UNKNOWN':          0,

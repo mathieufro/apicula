@@ -443,3 +443,106 @@ def test_pll_rpll_generator_path_unchanged():
     from apycula import gowin_pll
     pfd, clkout, vco = gowin_pll.rpll_freqs(27.0, 0, 3, 16)
     assert (pfd, clkout, vco) == (27.0, 108.0, 1728.0)
+
+
+# ---------------------------------------------------------------- P1.T22
+
+#: The commit `P1.T22` appended to. Its `pll_attrids` block is the baseline
+#: every pre-existing entry must still match, byte for byte.
+ATTRIDS_BASE_COMMIT = '401f6dc'
+
+#: `$OTC/evidence/plla/attrids-138c.tsv`, `P1.T17` census + `P1.T22` sections.
+ATTRIDS_TSV = Path(OTC) / 'evidence' / 'plla' / 'attrids-138c.tsv'
+
+
+def _parse_pll_attrids(source):
+    """`{name: id}` from a `apycula/attrids.py` source string."""
+    import ast
+    tree = ast.parse(source)
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == 'pll_attrids'):
+            return ast.literal_eval(node.value)
+    raise AssertionError('pll_attrids not found')
+
+
+def _tsv_sections():
+    """`attrids-138c.tsv` split into its blank-line-separated blocks."""
+    if not ATTRIDS_TSV.is_file():
+        pytest.skip(f'{ATTRIDS_TSV} absent')
+    blocks = []
+    for chunk in ATTRIDS_TSV.read_text().split('\n\n'):
+        rows = [l for l in chunk.splitlines()
+                if l.strip() and not l.startswith('#')]
+        if rows:
+            blocks.append([r.split('\t') for r in rows])
+    return blocks
+
+
+def test_pll_attrids_138c_reconciled():
+    """`P1.T22`: no `.fse` id is silently nameless, and nothing was renamed."""
+    from apycula import attrids
+
+    # (a) The three counts are present in the artefact, as integers.
+    counts = {}
+    unnamed_rows = {}
+    for block in _tsv_sections():
+        head = block[0]
+        if head[:2] == ['metric', 'value']:
+            counts = {r[0]: int(r[1]) for r in block[1:]}
+        elif head[0] == 'attr_id' and 'reason' in head:
+            idx = head.index('reason')
+            unnamed_rows = {int(r[0]): r[idx] for r in block[1:]}
+    for key in ('in_both', 'fse_id_with_no_name', 'name_with_no_fse_id'):
+        assert key in counts and isinstance(counts[key], int), (
+            f'attrids-138c.tsv carries no integer {key}')
+
+    # (b) Every `.fse` id with no name is accounted for, with a reason.
+    n_unnamed = counts['fse_id_with_no_name']
+    if n_unnamed:
+        assert len(unnamed_rows) == n_unnamed, (
+            f'{n_unnamed} nameless ids counted but {len(unnamed_rows)} listed')
+        for attr_id, reason in unnamed_rows.items():
+            assert reason.strip(), f'attr id {attr_id} listed with no reason'
+        named = set(attrids.pll_attrids.values())
+        assert not (set(unnamed_rows) & named), (
+            'an id listed as nameless now has a name; refresh the artefact')
+
+    # (c) The two MEASURED appends are present and are the only new ids.
+    assert attrids.pll_attrids['A_DYN_IDIV_SEL'] == 125
+    assert attrids.pll_attrids['A_DYN_ODIV0_SEL'] == 132
+
+    # (d) No pre-existing entry was renamed, renumbered or removed.
+    import subprocess
+    repo = Path(__file__).resolve().parents[1]
+    try:
+        base_src = subprocess.run(
+            ['git', 'show', f'{ATTRIDS_BASE_COMMIT}:apycula/attrids.py'],
+            cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=60, check=True).stdout.decode()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pytest.skip(f'commit {ATTRIDS_BASE_COMMIT} not reachable here')
+    base = _parse_pll_attrids(base_src)
+    now = attrids.pll_attrids
+    modified = {k: (v, now.get(k)) for k, v in base.items() if now.get(k) != v}
+    assert modified == {}, f'pre-existing pll_attrids entries changed: {modified}'
+    assert set(now) - set(base) == {'A_DYN_IDIV_SEL', 'A_DYN_ODIV0_SEL'}
+
+
+def test_pll_attrmap_138c_artefact_is_complete():
+    """Every non-baseline oracle point of `p1-pll-attrmap` is attributed."""
+    import json
+    path = Path(OTC) / 'evidence' / 'plla' / 'attrmap-138c.json'
+    if not path.is_file():
+        pytest.skip(f'{path} absent')
+    data = json.loads(path.read_text())
+    assert data['batch_id'] == 'p1-pll-attrmap'
+    assert data['site'] == 'PLL_L[0]'
+    assert len(data['runs']) == 12
+    for run in data['runs']:
+        if run['point'] == 'p00_baseline':
+            assert run['moved_bits'] == 0, 'the baseline moved against itself'
+            continue
+        assert run['moved_bits'] > 0, f"{run['point']} moved no bit at all"
+        assert run['attrvals'], f"{run['point']} resolved to no shortval row"
