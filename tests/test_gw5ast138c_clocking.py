@@ -291,3 +291,99 @@ def test_hclk_pips_carry_fuses_138c(gowinhome):
         for f in srcs.values():
             if f:
                 assert all(isinstance(b, tuple) and len(b) == 2 for b in f)
+
+
+# ---------------------------------------------------------------- P1.T11
+#
+# Structural proof that the built 138C chipdb yields placeable CLKDIV and
+# CLKDIV2 bels through the real nextpnr. The blueprint's "Done when" also asks
+# for a routed .fs; that half is NOT met and is not pretended here -- full PnR
+# exits 125 on "Failed to find a route for arc N of net div_clk" because
+# `clknames_5ast138c` defines none of the 16 `{T,B,R,L}BDHCLK{0..3}` names, so
+# `gw5_make_hclk_to_clk_gates` never fires and the CLKDIV output has no path to
+# a global clock spine. Measured, with the run logs, in
+# `$OTC/evidence/hclk/clkdiv-138c.md`. These tests therefore assert exactly the
+# placement, via `--no-route`, and will start failing the day routing is fixed
+# only if the placement itself regresses.
+
+_DATASTORE = Path('/Users/alex/fine-line-data/open-toolchain-gw5ast')
+_NEXTPNR = _DATASTORE / 'toolchains/nextpnr/bin/nextpnr-himbaechel'
+_CHIPDB = _DATASTORE / 'chipdb/std/chipdb-GW5AST-138C.bin'
+_YOSYS = Path('/opt/homebrew/bin/yosys')
+
+
+def _place_only(tmp_path, design, bel_attr=None):
+    """yosys + `nextpnr-himbaechel --no-route`; returns the placed cells."""
+    import json
+    import shutil
+    import subprocess
+    for tool in (_NEXTPNR, _CHIPDB, _YOSYS):
+        if not tool.exists():
+            pytest.skip(f'{tool} absent')
+    src = Path(__file__).resolve().parents[1] / 'examples' / 'gw5a' / design
+    text = src.read_text()
+    if bel_attr:
+        text = text.replace('\tCLKDIV div2 (',
+                            f'\t(* BEL = "{bel_attr}" *)\n\tCLKDIV div2 (')
+    (tmp_path / 'top.v').write_text(text)
+    shutil.copy(src.parent / 'tangmega138k.cst', tmp_path / 'top.cst')
+    subprocess.run(
+        [str(_YOSYS), '-p',
+         'read_verilog top.v; synth_gowin -family gw5a -setundef -json top.json'],
+        cwd=tmp_path, check=True, capture_output=True)
+    proc = subprocess.run(
+        [str(_NEXTPNR), '--device', 'GW5AST-LV138PG484AC1/I0',
+         '--chipdb', str(_CHIPDB), '--vopt', 'cst=top.cst', '--json', 'top.json',
+         '--write', 'top_pnr_placed.json', '--top', 'top', '--no-route',
+         '--timing-allow-fail'],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    design_json = json.loads((tmp_path / 'top_pnr_placed.json').read_text())
+    cells = {}
+    for module in design_json['modules'].values():
+        for name, cell in module['cells'].items():
+            cells[name] = (cell['type'], cell['attributes'].get('NEXTPNR_BEL'))
+    return cells, proc.stderr
+
+
+_BEL_RE = re.compile(r'^X(\d+)Y(\d+)/(CLKDIV2?)_([0-3])$')
+
+
+def _block_of(bel):
+    m = _BEL_RE.match(bel)
+    assert m, f'bel {bel!r} is not X<n>Y<n>/CLKDIV[2]_<0-3>'
+    col, row = int(m.group(1)), int(m.group(2))
+    locs = chipdb._gw5a_hclk_locs['GW5AST-138C']
+    for idx, loc in locs.items():
+        if loc == (row, col):
+            return idx
+    raise AssertionError(f'bel {bel} is at ({row},{col}), not an HCLK block')
+
+
+@pytest.mark.heavy  # runs the real yosys + nextpnr against the installed chipdb
+def test_nextpnr_places_clkdiv_138c(tmp_path):
+    cells, _ = _place_only(tmp_path, 'clkdiv_chain-tangmega138k.v')
+    divs = [(n, b) for n, (t, b) in cells.items() if t == 'CLKDIV']
+    assert len(divs) == 1, divs
+    assert _block_of(divs[0][1]) in range(6)
+
+
+@pytest.mark.heavy
+def test_nextpnr_places_clkdiv_138c_in_block_5(tmp_path):
+    """A CLKDIV constrained to block 5 lands there -- blocks 4 and 5 are real."""
+    row, col = chipdb._gw5a_hclk_locs['GW5AST-138C'][5]
+    cells, _ = _place_only(tmp_path, 'clkdiv_chain-tangmega138k.v',
+                           bel_attr=f'X{col}Y{row}/CLKDIV_2')
+    divs = [(n, b) for n, (t, b) in cells.items() if t == 'CLKDIV']
+    assert len(divs) == 1, divs
+    assert _block_of(divs[0][1]) == 5
+
+
+@pytest.mark.heavy
+def test_nextpnr_places_clkdiv2_138c(tmp_path):
+    cells, _ = _place_only(tmp_path, 'clkdiv2_chain-tangmega138k.v')
+    div2 = [(n, b) for n, (t, b) in cells.items() if t == 'CLKDIV2']
+    divs = [(n, b) for n, (t, b) in cells.items() if t == 'CLKDIV']
+    assert len(div2) == 1 and len(divs) == 1, (div2, divs)
+    assert _block_of(div2[0][1]) in range(6)
+    assert _block_of(divs[0][1]) in range(6)
