@@ -4238,6 +4238,10 @@ def set_chip_flags(dev, device):
         dev.chip_flags.append("NEED_BSRAM_RESET_FIX")
         dev.chip_flags.append("NEED_CFGPINS_INVERSION")
         dev.chip_flags.append("HAS_5A_DSP")
+        # The 138C HCLK network is the GW5A one (six measured blocks, see
+        # _gw5a_hclk_locs), so nextpnr must take the GW5A HCLK path:
+        # CHIP_HAS_5A_HCLK = 0x10000 (gowin_arch_gen.py:39), GowinUtils::has_5A_HCLK().
+        dev.chip_flags.append("HAS_5A_HCLK")
 
     if device in {'GW5A-25A'}:
         dev.dcs_prefix = "CLKIN"

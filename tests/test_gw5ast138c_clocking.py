@@ -172,3 +172,60 @@ def test_hclk_138c_takes_gw5a_branch(gowinhome, monkeypatch):
     assert calls == {'pin': 1, 'gates': 1, 'pips': 1}
     # `_hclk_to_fclk` is not on the GW5A path and this task adds no key to it
     assert 'GW5AST-138C' not in chipdb._hclk_to_fclk
+
+
+# ---------------------------------------------------------------- P1.T09
+
+# The pre-change flag list for GW5AST-138C (chipdb.set_chip_flags), recorded
+# before this task appended HAS_5A_HCLK. The task must grow it by exactly one.
+_FLAGS_138C_BASELINE = ['HAS_SP32', 'HAS_PINCFG', 'HAS_DFF67', 'HAS_CIN_MUX',
+                        'NEED_BSRAM_RESET_FIX', 'NEED_CFGPINS_INVERSION',
+                        'HAS_5A_DSP']
+
+
+def _chip_flags(device):
+    dev = chipdb.Device()
+    chipdb.set_chip_flags(dev, device)
+    return dev.chip_flags
+
+
+def test_chip_flags_138c_has_5a_hclk():
+    flags = _chip_flags('GW5AST-138C')
+    assert 'HAS_5A_HCLK' in flags
+    # 138C is in the HAS_PLL_HCLK exclusion set
+    assert 'HAS_PLL_HCLK' not in flags
+    # grew by exactly one against the recorded pre-change baseline
+    assert flags == _FLAGS_138C_BASELINE + ['HAS_5A_HCLK']
+    # neighbouring devices untouched
+    assert 'HAS_5A_HCLK' in _chip_flags('GW5A-25A')
+    assert 'HAS_5A_HCLK' not in _chip_flags('GW5AT-60B')
+
+
+def test_chip_flags_138c_maps_to_nextpnr_bit():
+    """The flag crosses to nextpnr as CHIP_HAS_5A_HCLK = 0x10000.
+
+    Read the bit out of the generator itself rather than restating it, so a
+    rename upstream fails here instead of silently dropping the flag.
+    """
+    gen = None
+    for root in (Path(__file__).resolve().parents[2],
+                 Path('/Users/alex/fine-line/.atelier/worktrees/'
+                      '2026-09-03-open-toolchain-gw5ast-7e84')):
+        cand = root / 'nextpnr' / 'himbaechel' / 'uarch' / 'gowin' / 'gowin_arch_gen.py'
+        if cand.is_file():
+            gen = cand
+            break
+    if gen is None:
+        pytest.skip('nextpnr checkout absent')
+    src = gen.read_text()
+    m = re.search(r'^CHIP_HAS_5A_HCLK\s*=\s*(0x[0-9a-fA-F]+|\d+)', src, re.M)
+    assert m, 'CHIP_HAS_5A_HCLK not defined in gowin_arch_gen.py'
+    assert int(m.group(1), 0) == 0x10000
+    # and the generator must set that bit from the chipdb flag name
+    flags = _chip_flags('GW5AST-138C')
+    computed = 0
+    for name, value in re.findall(r'^CHIP_(\w+)\s*=\s*(0x[0-9a-fA-F]+|\d+)',
+                                  src, re.M):
+        if name in flags:
+            computed |= int(value, 0)
+    assert computed & 0x10000 != 0
