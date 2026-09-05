@@ -6729,6 +6729,13 @@ class GW5AST_138C(GW5A):
             if self.chipdb.get_ttyp(x, y) in self.clock_bridge_ttypes:
                 self.clock_bridge_xy.add((x, y))
 
+    def reject_iologic_unsupported(self):
+        """ D39 state (1): named refusal for any IOLOGIC cell on GW5AST-138C.
+        No IOLOGIC bel exists for this device until Phase 3 lands the HCLK
+        row and deletes the fse_iologic guard (chipdb.py) that this refusal
+        mirrors. """
+        raise Exception("IOLOGIC on GW5AST-138C requires HCLK: no IOLOGIC bel exists for this device yet")
+
     #==============================
     #========== Pips
     #==============================
