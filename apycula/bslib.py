@@ -89,14 +89,13 @@ def read_bitstream(fname):
                 if not preamble and ba[0] != 0xd2: # SPI address
                     #print("spi address", ba)
                     crcdat.extend(ba)
-                # Header/footer command words are 8 bytes.  Without the
-                # length guard a *wide* data line whose first byte happens to
-                # be 0x3b (frame count) or 0x06 (device id) is read as a
-                # command: on a 5A bitstream carrying BSRAM initialisation
-                # slots that mis-set the frame count and pulled 507 slot lines
-                # into the fuse bitmap, or aborted the read with "Unsupported
-                # device" (measured on examples/gw5a uart-message-tangmega138k,
-                # 2026-09-04).
+                # Each command word has a fixed line length: 4 bytes for
+                # the frame count, 8 for the device id.  Without the length
+                # guard a *wide* data line whose first byte happens to be 0x3b
+                # or 0x06 is read as a command: on a 5A bitstream carrying
+                # BSRAM initialisation slots that mis-set the frame count and
+                # pulled 507 slot lines into the fuse bitmap, or aborted the
+                # read with "Unsupported device".
                 if not preamble and len(ba) == 4 and ba[0] == 0x3b: # frame count
                     frames = int.from_bytes(ba[2:], 'big')
                     #print(f"frames:{frames}");

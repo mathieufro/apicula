@@ -13,13 +13,12 @@ class FseVersionError(ValueError):
 class FseShapeError(ValueError):
     """A `.fse` table shape did not match the selected shape descriptor.
 
-    Raised instead of the historical opaque ``ValueError: Unknown type -0x1``
-    so the message names the detected IDE version, the shape set in use, the
+    The message names the detected IDE version, the shape set in use, the
     table that desynced and the expected-vs-found row width.
     """
 
 
-# Per-IDE-version table shape descriptors (D16/EC1). Keyed by a *shape-set
+# Per-IDE-version table shape descriptors. Keyed by a *shape-set
 # name*, never by a version string, so a new IDE release that keeps the same
 # shapes reuses an existing set instead of cloning it.
 #
@@ -28,7 +27,7 @@ class FseShapeError(ValueError):
 #
 # `v1_9_11plus` keeps every flat width of `v1_9_10`; the 1.9.11+ difference is
 # not a flat width at all but a per-subtype one, recorded in
-# `TABLE_SUBTYPE_SHAPES` below (P0.T12).
+# `TABLE_SUBTYPE_SHAPES` below.
 _SHAPES_V1_9_10 = {
     "fuse": 150,
     "fuse_5series": 512,
@@ -46,13 +45,13 @@ _SHAPES_V1_9_10 = {
 }
 
 # `v1_9_12plus` is Gowin IDE 1.9.12.03. It keeps every width of `v1_9_11plus`
-# except `drpfuse` (type 0x8b), whose row grew from 10 to 30 u16 (P0.T13b).
+# except `drpfuse` (type 0x8b), whose row grew from 10 to 30 u16.
 # The drift is per *IDE version*, not per device or per subtype: the only two
 # devices that ship a `drpfuse` table at all -- GW5A-25A (tile 150, table idx
 # 2, 1053 rows, offset 0x707160) and GW5AT-60B (tile 150, idx 2, 2323 rows,
 # offset 0x866228) -- both read at 10 on 1.9.11.03 and at 30 on 1.9.12.03, and
-# both `.fse` files then parse to EOF. GW5AST-138C ships no `drpfuse` table in
-# either edition, which is why the 138C build never saw this.
+# both `.fse` files then parse to EOF. GW5AST-138C ships no `drpfuse` table at
+# all, so its width is unobservable there.
 _SHAPES_V1_9_12 = dict(_SHAPES_V1_9_10, drpfuse=30)
 
 TABLE_SHAPES: dict[str, dict[str, int]] = {
@@ -76,17 +75,16 @@ def device_series(device: str) -> str:
 
 
 # Per-shape-set, per-series, per-table-*subtype* row widths, consulted before
-# the flat width above (P0.T12, rescoped by P0.T13b). A `.fse` row width is not
+# the flat width above. A `.fse` row width is not
 # always a property of the table kind alone: from Gowin IDE 1.9.11 the longfuse
 # subtypes 0x35/0x36 carry 14 u16 per row **on 5-series devices**, while every
 # other longfuse subtype (0x12, 0x13, 0x3a) -- and every longfuse subtype at
 # all on pre-5-series devices from the same install -- still carries 17.
 # Measured on `GW5AST-138C.fse`, `GW5A-25A.fse` and `GW5AT-60B.fse` (14) and on
-# `GW1N-9C.fse`, `GW1NZ-1.fse`, `GW2A-18C.fse` (17) from both installed
-# editions; all twelve files then parse to EOF.
-# P0.T12 keyed this on the IDE version alone, which
-# made every pre-5-series `.fse` desync at its first 0x35 table on a 1.9.11+
-# install; the series key is the missing dimension.
+# `GW1N-9C.fse`, `GW1NZ-1.fse`, `GW2A-18C.fse` (17) on IDE 1.9.11.03 and
+# 1.9.12.03; all twelve files then parse to EOF. Keying this on the IDE
+# version alone desyncs every pre-5-series `.fse` at its first 0x35 table on
+# a 1.9.11+ install -- the series is the second dimension.
 # A subtype absent here falls back to `TABLE_SHAPES[shape_set][table]`, so
 # `v1_9_10` (empty) parses exactly as it did before.
 TABLE_SUBTYPE_SHAPES: dict[str, dict[str, dict[str, dict[int, int]]]] = {

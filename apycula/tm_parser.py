@@ -281,7 +281,7 @@ def parse_chunk(chunk):
 
 # Per-family speed-grade aliases: a chunk that is published under more than one
 # grade name.  GW1N/GW2A have no entries; the GW5A entry
-# {"ES": ["C1/I0", "A0"]} was removed by S17a -- see `_gw5a_chunk_order` and
+# {"ES": ["C1/I0", "A0"]} was removed -- see `_gw5a_chunk_order` and
 # `C1_I0_FROM_C2_I1` below, and `doc/timing-c1i0.md`.
 _aliases = {}
 

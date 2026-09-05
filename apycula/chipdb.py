@@ -278,12 +278,10 @@ def canonicalize(value):
     A msgpack `set` is written as an array -- and a `dict` as a map -- in
     *iteration* order, and CPython iterates a set of strings, or a dict that
     was filled by iterating such a set, in an order that depends on
-    `PYTHONHASHSEED`. That made `chipdb_builder` emit a different byte stream -- and so a different sha256 -- on every run of the same
-    (device, install), even though the content was identical (P0.T13b (c);
-    two builds under a fixed seed already matched byte for byte, which is what
-    identified the cause). Sorting is purely an ordering change: a msgpack
-    array decodes back into the declared `Set[...]` field either way, so the
-    loaded `Device` is unchanged.
+    `PYTHONHASHSEED`. That made `chipdb_builder` emit a different byte stream
+    -- and so a different sha256 -- on every run of the same (device,
+    install), even though the content was identical; two builds under a fixed
+    seed already matched byte for byte.
 
     Mutates `value` in place where it can (the database is written once, at
     the end of a build, and not used afterwards) and returns the replacement.
@@ -2195,7 +2193,7 @@ def fse_create_hclk_nodes(dev, device, fse, dat: Datfile):
 # field of an absent port with -1. `fse_create_adc` used to test only the row
 # and column, so a row like [92, 124, -1] -- present in the ADC output table of
 # every GW5A-25A `.dat` shipped by IDE 1.9.11.03 and 1.9.12.03 -- reached
-# `wirenames[-1]` and died with a bare `KeyError: -1` (P0.T13b).
+# `wirenames[-1]` and died with a bare `KeyError: -1`.
 def _port_row_present(entry):
     return len(entry) >= 3 and -1 not in (entry[0], entry[1], entry[2])
 
@@ -2203,12 +2201,11 @@ def _port_row_present(entry):
 def _adc_description_present(dat):
     """True when the device data describes the ADC at all.
 
-    The GW5A-25A `.dat` of both installed editions (Education 1.9.11.03 and
-    Standard 1.9.12.03) carries `Adc25kIns` filled entirely with -1: the ADC
-    input block is simply not described in these IDE versions, so there is no
-    ADC to build. Measured on both installs, not assumed: `Adc25kOuts` in the
-    same files is populated, so this is an absent description and not a
-    mis-read offset.
+The GW5A-25A `.dat` shipped by IDE 1.9.11.03 and 1.9.12.03 carries
+    `Adc25kIns` filled entirely with -1: the ADC input block is simply not
+    described in these IDE versions, so there is no ADC to build. Measured,
+    not assumed: `Adc25kOuts` in the same files is populated, so this is an
+    absent description and not a mis-read offset.
     """
     stuff = getattr(dat, 'gw5aStuff', None) or {}
     ins = stuff.get('Adc25kIns') or []

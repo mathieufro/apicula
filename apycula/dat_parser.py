@@ -3,17 +3,17 @@ import os
 from pathlib import Path
 from dataclasses import dataclass
 
-from apycula.fse_parser import FseVersionError, detect_ide_version
+from apycula.fse_parser import (FseVersionError, _version_tuple,
+                               detect_ide_version)
 
 
 class DatLayoutError(ValueError):
     """A `.dat` header did not match the selected layout descriptor.
 
-    Raised instead of letting a misread `partType` silently skip
-    `read_5Astuff()` (which surfaced far away as
-    ``AttributeError: 'Datfile' object has no attribute 'gw5aStuff'``), so the
-    message names the detected IDE version, the layout set in use, the offset
-    read and what was found there.
+    A misread `partType` otherwise silently skips `read_5Astuff()` and
+    surfaces far away as ``AttributeError: 'Datfile' object has no attribute
+    'gw5aStuff'``, so the message names the detected IDE version, the layout
+    set in use, the offset read and what was found there.
     """
 
 
@@ -33,8 +33,8 @@ DAT_HEADER_ANCHOR = 0x07b4a4
 # front of `partType` and lost the pad word behind it:
 #     [new u16 x3][partType u16][<5-series table block> ...]
 # so `partType` sits 6 bytes later while the table block starts only 4 bytes
-# later -- which is exactly the +4 total size delta measured on every `.dat`
-# shipped in both editions. Reading `partType` at the old anchor yields 0xffff
+# later -- which is exactly the +4 total size delta of every 1.9.12.03 `.dat`
+# measured. Reading `partType` at the old anchor yields 0xffff
 # on GW5A* (no `gw5aStuff`) and, worse, a *plausible* wrong value on some
 # GW1N* parts, so the offset must be selected, not guessed.
 DAT_HEADER_SHAPES: dict[str, dict[str, int]] = {
@@ -44,23 +44,10 @@ DAT_HEADER_SHAPES: dict[str, dict[str, int]] = {
 
 DEFAULT_DAT_SHAPE_SET = "v1_9_11minus"
 
-# The `partType` values the parser dispatches on. A file whose selected offset
-# holds anything else is positively contradicting the layout.
-KNOWN_PART_TYPES = frozenset({0, 1, 2, 4, 10})
-
 # Offset of the TopHiq/TopViq/BotHiq/BotViq quad inside the 5-series table
 # block; used to confirm the block start against the grid the same file
 # already yielded.
 RS_TABLE_IQ_OFFSET = 0x24be0
-
-
-def _version_tuple(ide_version: str) -> tuple[int, ...]:
-    parts = []
-    for field in (ide_version or "").split("."):
-        if not field.isdigit():
-            break
-        parts.append(int(field))
-    return tuple(parts)
 
 
 def select_dat_header(ide_version: str) -> tuple[str, dict[str, int]]:
@@ -75,8 +62,8 @@ def select_dat_header(ide_version: str) -> tuple[str, dict[str, int]]:
 def _active_dat_header() -> tuple[str, str, dict[str, int]]:
     """(ide_version, layout set name, descriptor) for the current environment.
 
-    Version detection is best-effort exactly as in `fse_parser._active_shapes`:
-    a missing or unreadable install degrades to the historical layout and
+    Version detection is best-effort, as in `fse_parser._active_shapes`: a
+    missing or unreadable install degrades to the historical layout and
     reports ``unknown`` in any diagnostic.
     """
     try:
@@ -181,8 +168,8 @@ class Datfile:
         The offset is chosen by IDE version, not guessed, so this is a
         confirmation and not a search. It stays deliberately narrow: upstream
         tolerated a `partType` it has no branch for (GW1NS-4C declares 0x20)
-        and that tolerance is preserved. What is *not* tolerated is the T13
-        failure -- the selected offset yielding a value the parser cannot
+        and that tolerance is preserved. What is *not* tolerated is the
+        selected offset yielding a value the parser cannot
         dispatch on while another known layout reads a 5-series type there,
         because that silently skips `read_5Astuff()` and only surfaces much
         later as ``AttributeError: ... has no attribute 'gw5aStuff'``.
@@ -448,8 +435,8 @@ class Datfile:
     # bel its `UNK*_VCC` / `SSPI` input wires (`chipdb.fse_create_pincfg`).
     # Its delta from the 5-series table anchor drifted between IDE releases:
     # `0x27254` is the historical upstream value (Gowin IDE 1.9.10.03, the
-    # release upstream apycula pins), and every 1.9.11.03 / 1.9.12.03 `.dat`
-    # measured on this box holds the table 0xb8 further on, at `0x2730c`.
+    # release upstream apycula pins); every 1.9.11.03 / 1.9.12.03 `.dat`
+    # measured holds the table 0xb8 further on, at `0x2730c`.
     # Reading the stale delta returns an all-0xffff grid, which is *silently*
     # legal (0xffff is the "port absent" marker), so `fse_create_pincfg` emits
     # an empty `ins` map, apicula still sets `HAS_PINCFG`, and

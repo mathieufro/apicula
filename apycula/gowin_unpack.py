@@ -275,12 +275,11 @@ def lvds_out_is_aliased(db, ttyp, table_name):
 # differential inferences parse_tile_() draws from an IOB's attribute set: both
 # the LVDS_OUT marker and the "a B bel with IO_TYPE and no DRIVE is the negative
 # half of an ELVDS pair" rule turn a plain single-ended input into a
-# differential buffer and drop the paired bel from the netlist.  Measured on the
-# smoke design: every used GW5AST-138C input decodes with IO_TYPE, OPENDRAIN,
-# PADDI and LVDS_OUT and without DRIVE, so both rules fire on every one of them
-# -- while the packer's own GW5A defaults (gowin_pack.py default_ibuf_attrs) say
-# LVDS_OUT=OFF.  Both are therefore disabled together on such a table, and the
-# GW5A IOB attribute space is calibrated by the IO/IOLOGIC phase.
+# differential buffer and drop the paired bel from the netlist.  Measured:
+# every used GW5AST-138C input decodes with IO_TYPE, OPENDRAIN, PADDI and
+# LVDS_OUT and without DRIVE, so both rules fire on every one of them -- while
+# the packer's own GW5A defaults (gowin_pack.py default_ibuf_attrs) say
+# LVDS_OUT=OFF.  Both are therefore disabled together on such a table.
 def differential_decode_is_reliable(db, ttyp, table_name):
     return not lvds_out_is_aliased(db, ttyp, table_name)
 
