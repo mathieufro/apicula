@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from . import evidence
+from . import evidence, paths
 from .evidence import git_sha, sha256
 
 DEVICE = "GW5AST-138C"
@@ -53,7 +53,7 @@ ARTIFACT_CLASSES = ("fs", "tr", "sdf", "vo")
 #: GowinSynthesis netlist, collected separately from `run/impl/gwsynthesis/`.
 SYNTH_CLASS = "vg"
 
-DATASTORE = "/Users/alex/fine-line-data/open-toolchain-gw5ast"
+DATASTORE = paths.datastore()
 SMOKE_DIR = os.path.join(DATASTORE, "oracle-smoke")
 
 DEFAULT_TIMEOUT_S = 600
@@ -207,13 +207,20 @@ def selected_gowinhome():
     return None
 
 
-#: Installs known to this box, tried last so a stale `gowinhome.selected` (the
-#: Education tree was removed from the Desktop on 2026-09-04) does not strand
-#: a run that has a usable install sitting right there.
-KNOWN_INSTALLS = (
+#: Installs tried last, so a stale `gowinhome.selected` does not strand a run
+#: that has a usable install sitting right there.  `$GOWIN_INSTALLS` is a
+#: `:`-separated list for a box whose install is somewhere else; the built-in
+#: is the macOS package's own location, which is not user-specific.
+KNOWN_INSTALLS_ENV = "GOWIN_INSTALLS"
+DEFAULT_INSTALLS = (
     "/Applications/GowinIDE.app/Contents/Resources/Gowin_EDA",
-    "/Users/alex/Desktop/GowinIDE.app/Contents/Resources/Gowin_EDA",
 )
+
+
+def known_installs():
+    named = os.environ.get(KNOWN_INSTALLS_ENV)
+    return tuple(p for p in named.split(os.pathsep) if p) if named \
+        else DEFAULT_INSTALLS
 
 
 def resolve_gowinhome(gowinhome=None):
@@ -228,7 +235,7 @@ def resolve_gowinhome(gowinhome=None):
             if not os.path.isdir(named):
                 raise OracleError(f"GOWINHOME {named!r} is not a directory")
             return named
-    for candidate in (selected_gowinhome(),) + KNOWN_INSTALLS:
+    for candidate in (selected_gowinhome(),) + known_installs():
         if candidate and os.path.isdir(candidate):
             return candidate
     raise OracleError(
@@ -269,9 +276,13 @@ def ide_version(gowinhome):
 
 
 def is_education(gowinhome):
-    return "Education" in gowinhome or gowinhome.startswith(
-        "/Users/alex/Desktop/GowinIDE.app"
-    )
+    """Education editions name themselves, in the tree and in the release note.
+
+    The install path itself is never consulted: it is whatever the box's
+    packager chose, and on this box the Education tree no longer exists at all
+    (`C9`) -- only its archived device files do.
+    """
+    return "Education" in gowinhome or "Education" in ide_version(gowinhome)
 
 
 def check_install(gowinhome, timeout=PREFLIGHT_TIMEOUT_S):

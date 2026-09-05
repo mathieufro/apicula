@@ -45,6 +45,7 @@ import subprocess
 import sys
 import time
 
+from . import evidence, paths
 from .evidence import git_sha, sha256
 
 DEVICE = "GW5AST-138C"
@@ -54,7 +55,7 @@ FAMILY = "gw5a"
 #: The one chipdb name (F47). There is no per-family `chipdb-gw5a.bin`.
 CHIPDB_BASENAME = f"chipdb-{DEVICE}.bin"
 
-DATASTORE = "/Users/alex/fine-line-data/open-toolchain-gw5ast"
+DATASTORE = paths.datastore()
 #: The harness-only explicit `--chipdb` pin recorded by `P0.T16b`.
 DEFAULT_CHIPDB = os.path.join(DATASTORE, "chipdb", "std", CHIPDB_BASENAME)
 DEFAULT_NEXTPNR = os.path.join(DATASTORE, "toolchains", "nextpnr", "bin",
@@ -437,8 +438,11 @@ def main(argv=None):
         print(f"STEP {step['step']} returncode={step['returncode']} "
               f"wall_clock_s={step['wall_clock_s']} log={step['log_path']}")
     for entry in result["fmax"]:
+        # `D91`: the number is real, the model behind it is not verified --
+        # the line says so where it is read, not only in the phase report.
         print(f"FMAX clock={entry['clock']} mhz={entry['mhz']} "
-              f"verdict={entry['verdict']} target_mhz={entry['target_mhz']}")
+              f"verdict={entry['verdict']} target_mhz={entry['target_mhz']} "
+              f"{evidence.TIMING_MODEL_TOKEN}")
     if result["fs_path"]:
         print(f"BITSTREAM {result['fs_path']} {result['fs_bytes']} "
               f"{sha256(result['fs_path'])}")

@@ -21,7 +21,9 @@ import subprocess
 
 import pytest
 
-DATASTORE = "/Users/alex/fine-line-data/open-toolchain-gw5ast"
+from fuzz.gw5ast138c.harness import paths
+
+DATASTORE = paths.datastore()
 SCRATCH_ROOT = os.path.join(DATASTORE, "gate-blocks")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

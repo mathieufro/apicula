@@ -17,11 +17,12 @@ from pathlib import Path
 import pytest
 
 from apycula import dat_parser, fse_parser
+from fuzz.gw5ast138c.harness import paths
 
 
 STANDARD_HOME = '/Applications/GowinIDE.app/Contents/Resources/Gowin_EDA'
-ARCHIVED_EDU_TREE = ('/Users/alex/fine-line-data/open-toolchain-gw5ast/'
-                     'ide-share-device/edu-1.9.11.03')
+ARCHIVED_EDU_TREE = os.path.join(
+    paths.datastore(), 'ide-share-device', 'edu-1.9.11.03')
 
 # name -> (device-file root, forced GOWIN_IDE_VERSION or None to detect)
 SOURCES = {

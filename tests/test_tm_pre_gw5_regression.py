@@ -11,17 +11,28 @@ rather than against golden numbers pinned in this file: it proves equality
 against the real reference implementation for every group, path and corner of
 the file, not just the handful of values a golden would list.
 """
+import glob
 import importlib.util
 import os
 
 import pytest
 
 from apycula import tm_parser
+from fuzz.gw5ast138c.harness import paths
 
-UPSTREAM_TM_PARSER = (
-    '/Users/alex/fine-line/vendor/venv-upstream/lib/python3.14/'
-    'site-packages/apycula/tm_parser.py'
-)
+def _upstream_tm_parser_path():
+    """`apycula==0.33`'s `tm_parser.py` inside `venv-upstream`, or None.
+
+    The venv's `python3.N` directory name is not part of the claim, so it is
+    globbed rather than written down (`S26` is about the baseline package, not
+    about this box's interpreter).
+    """
+    venv = paths.upstream_venv()
+    if not venv:
+        return None
+    hits = sorted(glob.glob(os.path.join(
+        venv, 'lib', 'python*', 'site-packages', 'apycula', 'tm_parser.py')))
+    return hits[0] if hits else None
 
 PRE_GW5_DEVICES = ['GW1N-9C', 'GW2A-18C']
 
@@ -33,11 +44,12 @@ def upstream_tm_parser():
     It imports only `os`/`sys`/`struct`, so it loads standalone without that
     venv being on `sys.path`. Skips (never fails) when the venv is absent.
     """
-    if not os.path.isfile(UPSTREAM_TM_PARSER):
+    upstream = _upstream_tm_parser_path()
+    if not upstream or not os.path.isfile(upstream):
         pytest.skip(f'upstream apycula==0.33 not installed at '
-                    f'{UPSTREAM_TM_PARSER} (D56 baseline venv)')
+                    f'{upstream} (D56 baseline venv)')
     spec = importlib.util.spec_from_file_location(
-        'upstream_tm_parser', UPSTREAM_TM_PARSER)
+        'upstream_tm_parser', upstream)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

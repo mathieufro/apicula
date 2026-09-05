@@ -11,10 +11,19 @@ GATE_SCOPE ?= fast
 
 # `open-toolchain` submodule (C10/D80): evidence, DEL-e tools and manifests
 # live here, checked out as a sibling of this apicula checkout.
-OTC ?= /Users/alex/fine-line/.atelier/worktrees/2026-09-03-open-toolchain-gw5ast-7e84/open-toolchain
+# Every root below is derived from where THIS makefile is, so the gate runs
+# from any checkout on any box; each is still overridable from the command
+# line or the environment (`make gate OTC=... PYTHON=...`).
+APICULA_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+WORKTREE_DIR := $(patsubst %/,%,$(dir $(APICULA_DIR)))
+PIPELINE_SLUG ?= 2026-09-03-open-toolchain-gw5ast-7e84
+
+OTC ?= $(WORKTREE_DIR)/open-toolchain
 # Pipeline docs dir: documents only (spec-primitives.md), never code/evidence.
-PIPE_DOCS ?= /Users/alex/fine-line/.atelier/worktrees/2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/2026-09-03-open-toolchain-gw5ast-7e84
-PYTHON ?= /Users/alex/fine-line/vendor/venv/bin/python
+PIPE_DOCS ?= $(WORKTREE_DIR)/.atelier/pipelines/$(PIPELINE_SLUG)
+# The umbrella's editable-install venv: three levels above the worktree.
+FL_ROOT ?= $(abspath $(WORKTREE_DIR)/../../..)
+PYTHON ?= $(FL_ROOT)/vendor/venv/bin/python
 
 .PHONY: gate _gate-fast _gate-full _gate-all _gate-bogus
 

@@ -12,7 +12,12 @@ import subprocess
 
 import pytest
 
-WORKTREE = "/Users/alex/fine-line/.atelier/worktrees/2026-09-03-open-toolchain-gw5ast-7e84"
+from fuzz.gw5ast138c.harness import paths
+
+#: The umbrella worktree this apicula checkout sits in: its parent directory.
+#: `S23b` is about the three checkouts being hooked, and which box they are on
+#: is not part of the claim.
+WORKTREE = os.path.dirname(paths.repo_root())
 REPOS = {
     "apicula": os.path.join(WORKTREE, "apicula"),
     "nextpnr": os.path.join(WORKTREE, "nextpnr"),

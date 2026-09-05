@@ -133,9 +133,9 @@ def test_line_delta_splits_command_words_from_config_frames(tmp_path):
 def test_bslib_reads_a_bitstream_carrying_bsram_slots():
     """A 62-byte slot line is never read as a device id or a frame count."""
     from apycula.bslib import read_bitstream
+    from fuzz.gw5ast138c.harness import equiv
 
-    fs = ("/Users/alex/fine-line-data/open-toolchain-gw5ast/calibration/"
-          "uart-message/top.fs")
+    fs = os.path.join(equiv.DATASTORE, "calibration", "uart-message", "top.fs")
     if not os.path.isfile(fs):
         pytest.skip(f"no BSRAM-slot bitstream at {fs}")
     bitmap, _hdr, ftr, _slots = read_bitstream(fs)

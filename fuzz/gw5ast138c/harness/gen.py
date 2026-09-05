@@ -28,10 +28,11 @@ import os
 import sys
 from pathlib import Path
 
+from . import paths
 from ..shapes import DDR_BANKS, DEFAULT_IO_TYPE, DEFAULT_PULL_STRENGTH
 
-#: Default root of the (git-ignored) data store; overridable for tests.
-DATASTORE_DEFAULT = "/Users/alex/fine-line-data/open-toolchain-gw5ast"
+#: Default root of the (git-ignored) data store; `$DATASTORE` overrides it.
+DATASTORE_DEFAULT = paths.datastore()
 
 
 class ShapeSpecError(Exception):

@@ -13,7 +13,7 @@ import shutil
 
 import pytest
 
-from fuzz.gw5ast138c.harness import evidence
+from fuzz.gw5ast138c.harness import evidence, paths
 
 
 def _selected_path():
@@ -69,10 +69,8 @@ def device_file(gowinhome):
 # nothing under `IDE/` other than `share/device` was archived, and
 # `detect_ide_version` already documents the env override as the mechanism for
 # "odd layouts").
-ARCHIVED_EDU_DEVICE_TREE = (
-    '/Users/alex/fine-line-data/open-toolchain-gw5ast/'
-    'ide-share-device/edu-1.9.11.03'
-)
+ARCHIVED_EDU_DEVICE_TREE = os.path.join(
+    paths.datastore(), 'ide-share-device', 'edu-1.9.11.03')
 ARCHIVED_EDU_VERSION = '1.9.11.03'
 
 

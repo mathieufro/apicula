@@ -32,7 +32,7 @@ import os
 import pytest
 
 from apycula import gowin_unpack as gu
-from fuzz.gw5ast138c.harness import equiv
+from fuzz.gw5ast138c.harness import equiv, paths
 
 
 SMOKE = os.path.join(equiv.DATASTORE, "oracle-smoke")
@@ -133,12 +133,12 @@ def test_smoke_decode_check_c1_ok():
 # --------------------------------------------------------------------------
 import glob  # noqa: E402  (kept beside the test that needs it)
 
-_UPSTREAM = ("/Users/alex/fine-line/vendor/venv-upstream/lib/python*/"
-             "site-packages/apycula/{dev}.msgpack.xz")
-
-
 def _upstream_chipdb(dev):
-    hits = glob.glob(_UPSTREAM.format(dev=dev))
+    venv = paths.upstream_venv()
+    hits = glob.glob(os.path.join(
+        venv, "lib", "python*", "site-packages",
+        f"{dev}.msgpack.xz").replace("site-packages/", "site-packages/apycula/")
+    ) if venv else []
     if not hits:
         pytest.skip(f"no {dev} chipdb in vendor/venv-upstream (D56 baseline)")
     from apycula.chipdb import load_chipdb
