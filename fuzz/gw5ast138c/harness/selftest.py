@@ -279,18 +279,20 @@ def unpacker_completeness(design_dir, open_fs=None, pnr_json=None,
 # 3. Probing every masked class (`S5`/`S6b` generalised, gestalt G3/G5)
 # --------------------------------------------------------------------------
 #: Exact stdout of a passing `--probe-mask-classes`.
-MASK_PROBE_OK = "MASKPROBE ok: 5 classes probed, 5 reported"
+MASK_PROBE_OK = "MASKPROBE ok: 6 classes probed, 6 reported"
 
-#: The five residual classes a differing *tile* bit can land in under
+#: The residual classes a differing *tile* bit can land in under
 #: `spec-harness.md` §5.3.  `--inject-one-fuse` deliberately picks "a clear
 #: single-bit LUT flag inside a tile the unpacker already decodes a cell
 #: from", so it proves the checker sees a fuse in a **modelled** tile and
-#: proves nothing about these five.  This probe flips one bit inside each of
+#: proves nothing about these.  This probe flips one bit inside each of
 #: them, on the real chipdb's own fuse tables, and asserts the disposition
 #: §5.3 requires -- including, for the two rows that carry conditions, that
-#: the condition-violating variant comes back as a difference.
+#: the condition-violating variant comes back as a difference, and (`D92`)
+#: that the SAME net routed over a different wire is still a route.
 MASK_PROBE_CLASSES = ("set_level_diff", "vendor_only_fill", "open_only_fill",
-                      "net_route", "io_default_unused_pins")
+                      "net_route", "net_route_rerouted",
+                      "io_default_unused_pins")
 
 
 def _probe_cells(tile, typ="LUT", z=0, attrs=()):
@@ -371,18 +373,27 @@ def probe_mask_classes(db=None, device=equiv.DEVICE, mask=None,
         return None
 
     routed = _routed_netlist(pip_tile, pip_wire, "F")
+    #: `D92`'s positive: the SAME net -- same canonical endpoint set -- routed
+    #: over a different wire, which is what two independent routers actually
+    #: produce.  Round 1's per-fuse reading called this a difference.
+    rerouted = _routed_netlist(pip_tile, pip_wire + "#rerouted", "F")
     probes = [
-        ("set_level_diff", "explained", None,
+        ("set_level_diff", "explained", None, "set_level_diff",
          classify(fill_tile, _probe_cells(fill_tile, "LUT"),
                   _probe_cells(fill_tile, "DFF"))),
         ("vendor_only_fill", "explained", "unused_tile_fill",
+         "vendor_only_fill",
          classify(fill_tile, _probe_cells(fill_tile), {})),
-        ("open_only_fill", "unexplained_bits", None,
+        ("open_only_fill", "unexplained_bits", None, "open_only_fill",
          classify(fill_tile, {}, _probe_cells(fill_tile))),
-        ("net_route", "explained", "net_route",
+        ("net_route", "explained", "net_route", "net_route",
          classify(pip_tile, {}, {}, coords=[pip_coord], nl_v=routed,
                   nl_o=_routed_netlist(pip_tile, pip_wire, "F"))),
+        ("net_route_rerouted", "explained", "net_route", "net_route",
+         classify(pip_tile, {}, {}, coords=[pip_coord], nl_v=routed,
+                  nl_o=rerouted)),
         ("io_default_unused_pins", "explained", "io_default_unused_pins",
+         "io_default_unused_pins",
          classify(io_tile, {}, {}, coords=[io_default])),
     ]
     #: The condition-violating variant of each conditioned row: §5.3 row 5's
@@ -402,19 +413,19 @@ def probe_mask_classes(db=None, device=equiv.DEVICE, mask=None,
     report = {"classes": [], "negatives": [], "mask_sha256": mask.sha256,
               "io_tile": f"({io_tile[1]},{io_tile[0]})",
               "pip_tile": f"({pip_tile[1]},{pip_tile[0]})"}
-    for category, key, entry, res in probes:
+    for label, key, entry, category, res in probes:
         row = named(res, key, category)
         if row is None or not row.get("bits"):
             raise SelftestError(
-                f"MASKPROBE FAILED: one fuse flipped inside {category} is not "
+                f"MASKPROBE FAILED: one fuse flipped inside {label} is not "
                 f"reported in `{key}` -- the checker drops it silently "
                 f"(mask {mask.sha256[:8]}, spec-harness.md 5.3)")
         if entry and row.get("mask_entry") != entry:
             raise SelftestError(
-                f"MASKPROBE FAILED: {category} came back with mask entry "
+                f"MASKPROBE FAILED: {label} came back with mask entry "
                 f"{row.get('mask_entry')!r}, not {entry!r} "
                 "(spec-harness.md 5.3)")
-        report["classes"].append({"category": category, "bits": row["bits"],
+        report["classes"].append({"category": label, "bits": row["bits"],
                                   "mask_entry": row.get("mask_entry"),
                                   "reported_in": key})
     for category, res in negatives:

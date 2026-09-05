@@ -275,3 +275,81 @@ def test_net_route_masked_only_when_endpoint_sets_match(monkeypatch):
     assert [r["category"] for r in bad["unexplained_bits"]] == \
         ["net_route_endpoint_diff"]
     assert bad["explained"] == []
+
+
+def rerouted_netlist(wire):
+    """The SAME net -- same endpoints -- reached over a different wire.
+
+    `D92`: two independently written routers do not pick the same pips for the
+    same endpoint pair, so the open side's copy of a net lives on other wires.
+    Its *identity* (§5.1 point 3, the sorted endpoint set) is unchanged.
+    """
+    cell = Cell(IOB_TILE[1], IOB_TILE[0], 0, "IOB")
+    nl = Netlist(cells={cell: frozenset()})
+    nl.nets = {wire: frozenset([(cell, "I")])}
+    nl.wire_net = {wire: wire}
+    return nl
+
+
+def test_net_route_masked_when_the_same_net_is_routed_differently(monkeypatch):
+    """`D92`: masking is judged per NET, not per fuse.
+
+    Round 1 of the G3 fix asked whether *the same wire* carried the same net
+    on both sides.  That can never hold for two independent routes of one net,
+    so it flagged 3,871,673 bits on the E2E baseline.  `D92` judges the net:
+    the fuse's net has the identical canonical endpoint set on the other side
+    -- reached over a different wire -- so it is the physical route of a
+    matched net and §5.3 row 5 masks it.
+    """
+    monkeypatch.setattr(equiv, "db_wire2global",
+                        lambda db, row, col, wire: wire)
+    db = stub_db(pips={"A0": {"E111": [(9, 17)]}})
+
+    res = _classify(db, [(9, 17)], {}, {},
+                    nl_v=rerouted_netlist("A0"), nl_o=rerouted_netlist("B0"))
+
+    assert res["unexplained_bits"] == []
+    entry, = [r for r in res["explained"] if r["category"] == "net_route"]
+    assert entry["mask_entry"] == "net_route"
+
+
+def test_net_route_is_a_statistic_in_calibration_mode(monkeypatch):
+    """`D92`: whole-design calibration keeps routing a statistic (`D32`).
+
+    The endpoint-changing bit of the G3 regression, re-run with
+    `calibration=True`: `S6` is a calibration criterion and routing is never a
+    verdict term there, so the bit is recorded under `net_route` rather than
+    made unexplained.  What must still surface is the `conns` term of the set
+    comparison, which `D92` leaves untouched.
+    """
+    monkeypatch.setattr(equiv, "db_wire2global",
+                        lambda db, row, col, wire: wire)
+    db = stub_db(pips={"A0": {"E111": [(9, 17)]}})
+
+    res = _classify(db, [(9, 17)], {}, {}, calibration=True,
+                    nl_v=route_netlist(), nl_o=route_netlist(port="O"))
+
+    assert res["unexplained_bits"] == []
+    entry, = [r for r in res["explained"] if r["category"] == "net_route"]
+    assert entry["mask_entry"] == "net_route"
+
+    # ... and the endpoint change is still a `conns` DIFF at the set level,
+    # which is the verdict term D92 requires to stay live in calibration.
+    result = equiv.compare_e0(connected_netlist("I"), connected_netlist("O"))
+    assert result.verdict == "DIFF"
+    assert result.diff_count["conns"] > 0
+
+
+def connected_netlist(port):
+    """`route_netlist`, plus the `conns` map the E0 set comparison reads.
+
+    The endpoint set of net `A0` is `{(cell, port)}`, so changing the port
+    changes the net's identity and the `(cell, port, net_id)` conns triple
+    with it.
+    """
+    cell = Cell(IOB_TILE[1], IOB_TILE[0], 0, "IOB")
+    nl = Netlist(cells={cell: frozenset()},
+                 conns={cell: {port: "A0"}})
+    nl.nets = {"A0": frozenset([(cell, port)])}
+    nl.wire_net = {"A0": "A0"}
+    return nl

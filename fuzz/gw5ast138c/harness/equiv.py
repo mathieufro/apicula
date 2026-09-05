@@ -800,11 +800,13 @@ RESIDUAL_CATEGORIES = {
         "defaulted value. A difference in the default itself is never masked "
         "(the PR #423 bank/drive-strength class)"),
     "net_route_endpoint_diff": (
-        "differing pip/alonenode fuses driving a wire whose net does NOT have "
-        "the same endpoint set on both sides: spec-harness.md 5.3 row 5 masks "
-        "'the physical route of a net whose endpoint set matches', so a "
-        "routing bit that changes what a net connects -- or that serves a net "
-        "one side does not have at all -- is a difference, not a route"),
+        "differing pip/alonenode fuses belonging to a net whose canonical "
+        "endpoint set does NOT exist on the other side: spec-harness.md 5.3 "
+        "row 5 masks 'the physical route of a net whose endpoint set "
+        "matches', judged per NET and not per fuse (D92), so a routing bit "
+        "that leaves a net the other side has no endpoint-identical net for "
+        "is a difference, not a route. Two different routes of the SAME "
+        "endpoint set are a route and are masked"),
     "io_default_unused_pins": (
         "IOBA/IOBB longval fuses in IO tiles neither design instantiates: "
         "gowin_pack.get_unused_io_fuses() (gowin_pack.py:1684-1716) writes the "
@@ -1028,19 +1030,36 @@ def _build_pip_owners(db, ttyp):
 
 
 class NetEndpointIndex:
-    """§5.3 row 5's condition, made answerable for a single routing fuse.
+    """§5.3 row 5's condition, decided at NETLIST level (`D92`).
 
     The row masks *"the physical route of a net whose endpoint set matches"*.
-    So a differing routing fuse is a don't-care only when the net it drives
-    exists with the **same endpoint set** on both sides; if the flipped bit
-    changes what the net connects -- or serves a net one side does not have at
-    all -- it is a difference, not a route.
+    `D92` fixes the level at which that sentence is read: **per net, not per
+    fuse**.  A routing fuse belongs to a net; that net's pip fuses are the
+    masked don't-care iff the net's *canonical endpoint set* is present on
+    **both** sides -- i.e. some net on the other side connects exactly the
+    same `(cell, port)` endpoints.  Two routers picking different pips for the
+    same endpoints is then a route (masked); a flipped bit that leaves a net
+    with endpoints the other side has no net for is a difference, and the E0
+    connectivity set reports it as a `conns` `DIFF`.
+
+    The round-1 reading -- requiring *the same wire* to sit on the same net on
+    both sides -- is strictly per-fuse and cannot be satisfied by two
+    independent routes of the same net, which is why it flagged 3,871,673 bits
+    on the E2E baseline (`gestalt-p0` G3 round 1, `D92`).
+
+    In `--calibration` (whole-design) mode routing is a recorded statistic and
+    never a verdict term (`D32`, `S6`), so `calibration=True` masks every pip
+    fuse as `net_route`; a routing bit that changes a net's endpoint set still
+    surfaces there through the `conns` set comparison, which is the term
+    `D92` requires to stay live.
     """
 
-    def __init__(self, db, nl_v, nl_o):
+    def __init__(self, db, nl_v, nl_o, calibration=False):
         self.db = db
         self.sides = (nl_v, nl_o)
+        self.calibration = calibration
         self._ids = ({}, {})
+        self._all_ids = [None, None]
         self._global = {}
 
     def _net_id(self, side, root):
@@ -1049,6 +1068,18 @@ class NetEndpointIndex:
             endpoints = self.sides[side].nets.get(root)
             cache[root] = net_id(endpoints) if endpoints else None
         return cache[root]
+
+    def endpoint_sets(self, side):
+        """Every net identity on one side -- the set membership `D92` tests."""
+        if self._all_ids[side] is None:
+            self._all_ids[side] = {
+                net_id(eps) for eps in self.sides[side].nets.values() if eps}
+        return self._all_ids[side]
+
+    def net_of(self, side, wire):
+        """The identity of the net this wire belongs to on `side`, or `None`."""
+        root = self.sides[side].wire_net.get(wire)
+        return None if root is None else self._net_id(side, root)
 
     def _wire(self, row, col, dest):
         key = (row, col, dest)
@@ -1059,22 +1090,49 @@ class NetEndpointIndex:
                 self._global[key] = None
         return self._global[key]
 
-    def matches(self, tile, coord, ttyp):
+    def nets_of_fuse(self, tile, coord, ttyp):
+        """`(vendor_net_ids, open_net_ids)` for the nets one pip fuse serves.
+
+        A fuse coordinate can be shared by several pip destinations, so both
+        sides are sets; an empty pair means the fuse belongs to no net either
+        unpacker built.
+        """
+        left, right = set(), set()
         if tile is None:
-            return False
+            return left, right
         dests = pip_owners(self.db, ttyp).get(coord)
         if not dests:
-            return False
+            return left, right
         row, col = tile
         for dest in dests:
             wire = self._wire(row, col, dest)
             if wire is None:
                 continue
-            left = self._net_id(0, self.sides[0].wire_net.get(wire))
-            right = self._net_id(1, self.sides[1].wire_net.get(wire))
-            if left is not None and left == right:
-                return True
-        return False
+            for side, out in ((0, left), (1, right)):
+                ident = self.net_of(side, wire)
+                if ident is not None:
+                    out.add(ident)
+        return left, right
+
+    def matches(self, tile, coord, ttyp):
+        """`D92`: does every net this fuse serves match on both sides?
+
+        `True` -> the fuse is the route of a matched net (mask row 5 applies).
+        `False` -> it serves a net one side does not have, so it is a `DIFF`.
+        A fuse belonging to no net on either side has no netlist-level
+        meaning; it cannot change any net's endpoints, and `D92` judges at
+        netlist level, so it is a route.
+        """
+        if self.calibration:
+            return True
+        left, right = self.nets_of_fuse(tile, coord, ttyp)
+        if not left and not right:
+            return True
+        if left - self.endpoint_sets(1):
+            return False
+        if right - self.endpoint_sets(0):
+            return False
+        return True
 
 
 def refine_group_category(category, name, coord, db, ttyp, tile=None,
@@ -1083,8 +1141,9 @@ def refine_group_category(category, name, coord, db, ttyp, tile=None,
 
     `io_default_unused_pins` (row 6) requires the pin to be used by neither
     design **and** both sides to carry a defaulted value; `net_route` (row 5)
-    requires the net's endpoint set to match.  A bit that fails either
-    condition gets its own category, and those categories are not in
+    requires -- per `D92`, at NETLIST level -- the endpoint set of the net the
+    fuse belongs to to exist on both sides.  A bit that fails either condition
+    gets its own category, and those categories are not in
     `ACCOUNTED_CATEGORIES`, so they land in `unexplained_bits` -- a `DIFF`.
     """
     if category == "io_default_unused_pins":
@@ -1230,7 +1289,8 @@ def tile_bit_delta(bitmap_v, bitmap_o, db):
 
 def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
                       outside=None, mask=None, level="E0", shape_class=None,
-                      tile_coords=None, db=None, nl_v=None, nl_o=None):
+                      tile_coords=None, db=None, nl_v=None, nl_o=None,
+                      calibration=False):
     """Split every differing bit into "accounted for" and `unexplained_bits`.
 
     §5.1b, literally: *"every bit either unpacker accounted for is subtracted;
@@ -1262,7 +1322,7 @@ def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
             bucket["tiles"].append(f"({tile[1]},{tile[0]})")
 
     tile_coords = tile_coords or {}
-    nets = (NetEndpointIndex(db, nl_v, nl_o)
+    nets = (NetEndpointIndex(db, nl_v, nl_o, calibration=calibration)
             if db is not None and nl_v is not None and nl_o is not None
             else None)
     for tile, bits in sorted(tile_delta.items()):
@@ -1401,7 +1461,7 @@ def _category_of(tile, cells_v, cells_o):
 
 
 def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
-             level="E0", shape_class=None, device=DEVICE):
+             level="E0", shape_class=None, device=DEVICE, calibration=False):
     """§5.1b's mandatory raw residual, computed on the two real `.fs`.
 
     Returns `raw_bit_delta()`'s enumeration plus the `unexplained_bits` list
@@ -1451,7 +1511,7 @@ def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
         outside=out["outside_bitmap"], mask=mask, level=level,
         shape_class=shape_class,
         tile_coords=tile_coord_delta(bmv, bmo, db), db=db,
-        nl_v=nl_v, nl_o=nl_o))
+        nl_v=nl_v, nl_o=nl_o, calibration=calibration))
     return out
 
 
@@ -2368,7 +2428,8 @@ def compare_design(design_dir, shape=None, level="E0", mask_path=None,
     nl_o = unpack_netlist(open_, device=device, db=db)
     shape_class = getattr(spec, "shape_class", None)
     res = residual(vendor, open_, db=db, nl_v=nl_v, nl_o=nl_o, mask=mask,
-                   level=level, shape_class=shape_class, device=device)
+                   level=level, shape_class=shape_class, device=device,
+                   calibration=calibration)
     result = compare_e0(nl_v, nl_o, scope=scope, mask=mask, residual=res)
     result.level = level
 
