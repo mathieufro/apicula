@@ -2312,21 +2312,41 @@ def fse_create_adc(dev, device, fse, dat):
 #    it having no DRP path at all -- so the lookup below skips absent rows
 #    instead of reaching `wirenames[-1]` and dying with a bare `KeyError`.
 #
+# The vendor cell type on this device is `PLL`, not `PLLA`: an actual `PLLA`
+# instantiation is refused with "ERROR (RP0008) : There is no PLLA resource in
+# current device" (P1.T19, run pll-trace-pilot-clocking_pll_trace-0000), and
+# UG306-1.0.1E Table 5-11 lists GW5A-25 as the only PLLA part. `PLL`
+# (prim_sim.v:13333) has no MDIO/DRP ports and adds the dynamic-divider ports
+# ENCLKn/FBDSEL/IDSEL/MDSEL/ODSELn/DTn, which is exactly the shape of this
+# device's `.dat`. The 23 inputs and 8 outputs built below are the subset of
+# `PLL`'s ports that `_plla_inputs`/`_plla_outputs` happen to index; the
+# dynamic-divider ports occupy the other ~108 populated `PllIn` rows at
+# indices apicula has no table for, and are a recorded gap, not a silent one.
+#
 # The anchor is the lowest-column tile of each three-tile run. Rows 27 and 81
 # start one column further in than rows 45 and 63 because column 0 of those
 # rows is taken by an HCLK block (`P1.T04`); the asymmetry is measured.
 _gw5a_pll_slots = {
     'GW5A-25A': {(27, 0, 6, 'PllLB'), (27, 91, 2, 'PllRB'), (0, 0, 5, 'PllLT'), (0, 91, 3, 'PllRT'), (0, 45, 4, 'old_style'), (36, 45, 8, 'old_style')},
     'GW5AST-138C': {
-        # left, top to bottom
-        ( 27,   1,  0, 'old_style'), ( 45,   0,  2, 'old_style'),
-        ( 63,   0,  4, 'old_style'), ( 81,   1,  6, 'old_style'),
-        # right, top to bottom
-        ( 27, 177,  1, 'old_style'), ( 45, 178,  3, 'old_style'),
-        ( 63, 178,  5, 'old_style'), ( 81, 177,  7, 'old_style'),
-        # bottom, left to right
-        (108,  28,  8, 'old_style'), (108,  32,  9, 'old_style'),
-        (108, 146, 10, 'old_style'), (108, 150, 11, 'old_style'),
+        # slot_idx is the VENDOR SITE INDEX, traced one site per oracle run in
+        # P1.T19: a single hard PLL constrained with INS_LOC "dut_pll"
+        # PLL_<side>[<n>], whose .fs then carries fuses in exactly one of the
+        # twelve three-tile groups and none in the other eleven. The mapping
+        # below is that bijection, measured, not the row-major order P1.T17
+        # had to assume ($OTC/evidence/plla/sites-138c.md, section 8).
+        ( 27,   1,  0, 'old_style'),   # PLL_L[0]
+        ( 45,   0,  1, 'old_style'),   # PLL_L[1]
+        ( 63,   0,  2, 'old_style'),   # PLL_L[2]
+        ( 81,   1,  3, 'old_style'),   # PLL_L[3]
+        ( 27, 177,  4, 'old_style'),   # PLL_R[0]
+        ( 45, 178,  5, 'old_style'),   # PLL_R[1]
+        ( 63, 178,  6, 'old_style'),   # PLL_R[2]
+        ( 81, 177,  7, 'old_style'),   # PLL_R[3]
+        (108,  28,  8, 'old_style'),   # PLL_B[0]
+        (108,  32,  9, 'old_style'),   # PLL_B[1]
+        (108, 146, 10, 'old_style'),   # PLL_B[2]
+        (108, 150, 11, 'old_style'),   # PLL_B[3]
     },
 }
 

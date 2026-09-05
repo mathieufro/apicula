@@ -163,6 +163,121 @@ def test_plla_138c_has_no_drp_ports(gowinhome):
         assert not (drp_out & set(pll['outputs'])), f'DRP outputs at {rc}'
 
 
+# ---------------------------------------------------------------- P1.T19
+
+#: `P1.T19`, MEASURED: one oracle run per site, a single hard `PLL` pinned by
+#: `INS_LOC "dut_pll" PLL_<side>[<n>]`, whose `.fs` lights up exactly one of
+#: the twelve three-tile groups. `slot_idx` is the vendor site index.
+TRACED_SITES_138C = {
+    'PLL_L[0]': (27, 1, 0), 'PLL_L[1]': (45, 0, 1),
+    'PLL_L[2]': (63, 0, 2), 'PLL_L[3]': (81, 1, 3),
+    'PLL_R[0]': (27, 177, 4), 'PLL_R[1]': (45, 178, 5),
+    'PLL_R[2]': (63, 178, 6), 'PLL_R[3]': (81, 177, 7),
+    'PLL_B[0]': (108, 28, 8), 'PLL_B[1]': (108, 32, 9),
+    'PLL_B[2]': (108, 146, 10), 'PLL_B[3]': (108, 150, 11),
+}
+
+#: The `PLL`/`PLLA` ports `_plla_inputs`/`_plla_outputs` index and the 138C
+#: `.dat` populates: 35 - 12 MDIO inputs, 16 - 8 MDRDO outputs, plus the
+#: manually created `CLKFBOUT`.
+TRACED_PORT_COUNTS_138C = (23, 9)
+
+
+def _md_source_column():
+    """`source` values of the 12 rows of `sites-138c.md` section 3."""
+    row_re = re.compile(
+        r'^\|\s*(\d+)\s*\|\s*([LRB])\s*\|\s*([^|]+?)\s*\|\s*\((\d+),\s*(\d+)\)\s*\|'
+        r'\s*([^|]+?)\s*\|\s*(\w+)\s*\|')
+    if not SITES_MD.is_file():
+        pytest.skip(f'{SITES_MD} absent (set $OTC)')
+    out = []
+    with SITES_MD.open(encoding='utf-8') as fh:
+        for line in fh:
+            m = row_re.match(line)
+            if m:
+                out.append((int(m.group(1)), int(m.group(4)), int(m.group(5)),
+                            m.group(7)))
+    return out
+
+
+def test_plla_all_sites_resolved():
+    rows = _md_source_column()
+    assert len(rows) == PLL_COUNT_138C, (
+        f'sites-138c.md has {len(rows)} rows, expected {PLL_COUNT_138C}')
+    unknown = [r for r in rows if r[3] == 'unknown']
+    assert not unknown, f'unresolved PLL sites remain: {unknown}'
+    traced = [r for r in rows if r[3] == 'traced']
+    assert len(traced) == PLL_COUNT_138C, (
+        'P1.T19 traces all 12 sites (the .dat names none); '
+        f'{len(traced)} rows carry source == "traced"')
+    assert {(r[1], r[2]) for r in rows} == SITE_ANCHORS_138C
+
+
+def test_plla_slot_idx_is_the_traced_vendor_site_index():
+    """`slot_idx` must be the site the vendor placed there, not a guess.
+
+    P1.T17 could only assume a row-major numbering; P1.T19 measured the
+    bijection one oracle run at a time. If the two ever disagree again, this
+    fails rather than silently mislabelling a bel.
+    """
+    table = chipdb._gw5a_pll_slots['GW5AST-138C']
+    got = {(row, col): slot for row, col, slot, _t in table}
+    want = {(r, c): s for r, c, s in TRACED_SITES_138C.values()}
+    assert got == want
+    assert sorted(got.values()) == list(range(PLL_COUNT_138C))
+    assert {t for _r, _c, _s, t in table} == {'old_style'}, (
+        'the 138C .dat names no site, so every entry is old_style')
+
+
+@pytest.mark.heavy
+def test_plla_traced_wires_in_wirenames(gowinhome):
+    """Every wire the 138C PLL portmaps name resolves in a 138C name table."""
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    known = set(wnames.wirenames_5ast138c.values())
+    known |= set(wnames.clknames_5ast138c.values())
+    known |= set(wnames.wirenames.values())
+    unresolved = []
+    for (row, col), pll in _pll_entries(dev).items():
+        for nam, wire in pll['inputs'].items():
+            # aliases are synthesised names of the form PLLA<port><wire>
+            base = wire[len(f'PLLA{nam}'):] if wire.startswith(f'PLLA{nam}') else wire
+            if base not in known:
+                unresolved.append((row, col, nam, wire))
+    assert not unresolved, f'{len(unresolved)} unresolved wire names: {unresolved[:8]}'
+
+
+@pytest.mark.heavy
+def test_plla_traced_port_counts_are_the_shared_pll_plla_subset(gowinhome):
+    """The port gap is pinned as a number, not left implicit.
+
+    The 138C cell type is `PLL`, not `PLLA` (`sites-138c.md` section 8.2), and
+    `_plla_inputs`/`_plla_outputs` index only the ports the two primitives
+    share. `PLL`'s dynamic-divider ports -- ENCLKn, FBDSEL, IDSEL, MDSEL,
+    ODSELn, DTn -- sit at `PllIn` indices apicula has no table for. This test
+    states the size of that gap so growing the tables is a visible change.
+    """
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    want_in, want_out = TRACED_PORT_COUNTS_138C
+    for rc, pll in _pll_entries(dev).items():
+        assert len(pll['inputs']) == want_in, (
+            f'{rc}: {len(pll["inputs"])} inputs, expected {want_in}')
+        assert len(pll['outputs']) == want_out, (
+            f'{rc}: {len(pll["outputs"])} outputs, expected {want_out}')
+
+
+def test_plla_trace_shape_sweeps_the_twelve_sites():
+    """The `P1.T19` shape is the reproduction path, so it is guarded too."""
+    from fuzz.gw5ast138c.harness import gen
+    spec = gen.load_shape('clocking_pll_trace')
+    assert spec.primitive == 'PLL', (
+        'a PLLA instantiation on this device is refused with '
+        'RP0008 "There is no PLLA resource in current device"')
+    assert list(spec.sweep_values) == list(TRACED_SITES_138C)
+    # the INS_LOC line must actually follow the sweep, not pin one site
+    for site in TRACED_SITES_138C:
+        assert f'INS_LOC "dut_pll" {site};' in gen.render_cst(spec, site)
+
+
 # ---------------------------------------------------------------- P1.T20
 
 
