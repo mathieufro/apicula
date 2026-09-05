@@ -37,3 +37,85 @@ def test_gw5a_hclk_locs_138c_six_blocks():
     a25 = chipdb._gw5a_hclk_locs['GW5A-25A']
     assert len(a25) == 4
     assert a25[0] == (0, 64)
+
+
+# --------------------------------------------------- shared build fixture
+
+_BUILT = {}
+
+
+def _build(device, gowinhome):
+    """`chipdb.from_fse` for `device`, cached for the whole test session."""
+    if device in _BUILT:
+        return _BUILT[device]
+    from pathlib import Path as _P
+    from apycula import fse_parser, dat_parser
+    from apycula.chipdb_builder import DEVICE_PARAMS
+    # the .fse parser reads GOWINHOME from the environment for its version
+    # probe; the `gowinhome` fixture is the authority on which install that is
+    os.environ.setdefault('GOWINHOME', gowinhome)
+    vendor = DEVICE_PARAMS[device]['device']
+    base = f'{gowinhome}/IDE/share/device/{vendor}/{vendor}'
+    if not os.path.isfile(base + '.fse'):
+        pytest.skip(f'{base}.fse absent')
+    with open(base + '.fse', 'rb') as fh:
+        fse = fse_parser.read_fse(fh, device)
+    dat = dat_parser.Datfile(_P(base + '.dat'))
+    if vendor in {'GW5AT-60B', 'GW5AST-138C'}:
+        dat.patch_grid_bram_138()
+    dev = chipdb.from_fse(device, fse, dat)
+    # chipdb_builder.main() calls this right after from_fse (:451); the HCLK
+    # bels are built there, not inside from_fse.
+    chipdb.add_hclk_bels(dat, dev, device)
+    _BUILT[device] = (dev, dat)
+    return _BUILT[device]
+
+
+# ---------------------------------------------------------------- P1.T07
+
+def test_gw5_add_hclk_bels_138c_block_and_wire_counts(gowinhome):
+    dev, dat = _build('GW5AST-138C', gowinhome)
+    # P1.T07 owns the builder, P1.T08 owns routing 138C into it; drive it
+    # directly so this test states T07's contract on its own. The call is
+    # idempotent, so it stays correct once T08 has landed.
+    chipdb.gw5_add_hclk_bels(dat, dev, 'GW5AST-138C')
+    assert len(dev.hclk_div2) == 6
+    for hclk_idx, slots in dev.hclk_div2.items():
+        assert hclk_idx in range(6)
+        assert len(slots) == 4, f'block {hclk_idx}: {len(slots)} CLKDIV2 slots'
+    assert sum(len(s) for s in dev.hclk_div2.values()) == 24
+
+    halves = {}
+    n_clkdiv = 0
+    for (row, col), func in dev.extra_func.items():
+        if 'clkdiv' not in func:
+            continue
+        idx = func['clkdiv']['hclk_idx']
+        assert idx in range(6)
+        assert func['clkdiv2']['hclk_idx'] == idx
+        n_clkdiv += len(func['clkdiv']['bels'])
+        assert func['clkdiv']['half'] == func['clkdiv2']['half']
+        halves[idx] = func['clkdiv']['half']
+    assert n_clkdiv == 24
+    assert set(halves.values()) == {'top', 'bottom'}
+    # MEASURED partition (topology-138c.md §1): blocks 0,1 sit at row 27 (top
+    # half of a 109-row die), the other four at rows 81/108. The blueprint's
+    # assumed 3-top/3-bottom split is REFUTED.
+    assert sorted(halves) == [0, 1, 2, 3, 4, 5]
+    assert [halves[i] for i in range(6)] == [
+        'top', 'top', 'bottom', 'bottom', 'bottom', 'bottom']
+
+
+def test_gw5_add_hclk_bels_25a_unchanged(gowinhome):
+    dev, _dat = _build('GW5A-25A', gowinhome)
+    assert len(dev.hclk_div2) == 4
+    assert sum(len(s) for s in dev.hclk_div2.values()) == 16
+    for (row, col), func in dev.extra_func.items():
+        if 'clkdiv2' not in func:
+            continue
+        i = func['clkdiv2']['hclk_idx']
+        assert i in range(4)
+        # the 25A control wires are the in-tree literals
+        assert func['clkdiv2']['bels'][0]['inputs']['RESETN'] == 'B2'
+        assert func['clkdiv']['bels'][0]['inputs']['RESETN'] == 'C4'
+        assert func['clkdiv']['bels'][0]['inputs']['CALIB'] == 'B6'

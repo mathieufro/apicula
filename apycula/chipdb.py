@@ -1556,7 +1556,36 @@ def gw5_make_hclk_to_clk_gates(dev, device, fse, dat: Datfile):
 _gw5a_hclk_locs = { 'GW5A-25A':    { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)},
                     'GW5AST-138C': { 0: (27, 0), 1: (27, 181), 2: (81, 0),
                                      3: (81, 181), 4: (108, 64), 5: (108, 117)} }
+# CLKDIV/CLKDIV2 control-pin wires, per device and per wire index within the
+# block.  These are ordinary fabric wires of the HCLK cell, not table-48 HCLK
+# wires, so they cannot be read out of the .fse; the 25A values are the ones
+# the maintainer traced.
+# GW5AST-138C: ASSUMED equal to the 25A.  P1.T04 measured the block topology
+# but not the control-pin trace and no oracle budget was allocated for one;
+# all twelve wire names do exist in wirenames_5ast138c.  Recorded as ASSUMED
+# in $OTC/evidence/hclk/topology-138c.md -- a shape run that exercises
+# CLKDIV.CALIB / RESETN is what would promote it to MEASURED.
+_gw5a_hclk_ctrl_wires = {
+    'GW5A-25A':    {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
+                    'clkdiv_resetn':  ['C4', 'C5', 'C6', 'C7'],
+                    'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
+    'GW5AST-138C': {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
+                    'clkdiv_resetn':  ['C4', 'C5', 'C6', 'C7'],
+                    'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
+}
+
+# Which die half a block sits in.  Derived from the block's own row against
+# the grid the .fse describes, so it needs no per-device literal: the 138C's
+# six blocks come out 2 top / 4 bottom (rows 27, 27, 81, 81, 108, 108 of 109),
+# which is the MEASURED partition -- the 3/3 split assumed by the roadmap is
+# refuted ($OTC/evidence/hclk/topology-138c.md section 6).
+def gw5_hclk_half(dev, row):
+    return 'top' if row * 2 < dev.rows - 1 else 'bottom'
+
 def gw5_add_hclk_bels(dat, dev, device):
+    ctrl = _gw5a_hclk_ctrl_wires[device]
+    # The number of blocks is whatever the device's measured table holds --
+    # four on the 25A, six on the 138C.  Each block still has four wires.
     for hclk_idx, hclk_loc in _gw5a_hclk_locs[device].items():
         row, col = hclk_loc
         extra = dev.extra_func.setdefault((row, col), {})
@@ -1564,6 +1593,8 @@ def gw5_add_hclk_bels(dat, dev, device):
         extra_clkdiv = extra.setdefault('clkdiv', {})
         extra_clkdiv2['hclk_idx'] = hclk_idx
         extra_clkdiv['hclk_idx'] = hclk_idx
+        extra_clkdiv2['half'] = gw5_hclk_half(dev, row)
+        extra_clkdiv['half'] = extra_clkdiv2['half']
         for i in range(4):
             # CLKDIV2
             dev.hclk_div2.setdefault(hclk_idx, set()).add((row, col, i))
@@ -1572,7 +1603,7 @@ def gw5_add_hclk_bels(dat, dev, device):
             # mechanism for pre-5A chips in nextpnr will not be triggered
             #dev[row, col].bels[f'CLKDIV2{i}'] = Bel()
             portmap = clkdiv2.setdefault('inputs', {})
-            portmap['RESETN'] = f'B{i + 2}'  # GW5A-25A 0-B2, 1-B3, 2-B4, 3-B5
+            portmap['RESETN'] = ctrl['clkdiv2_resetn'][i]
             portmap['HCLKIN'] = f'CLKDIV2_HCLKIN{hclk_idx}{i}'
             if i % 2 == 0:
                 src = f'HCLK_BUF_BO{hclk_idx}{i}'
@@ -1592,8 +1623,8 @@ def gw5_add_hclk_bels(dat, dev, device):
             clkdiv = extra_clkdiv.setdefault('bels', {}).setdefault(i, {})
             portmap = clkdiv.setdefault('inputs', {})
             portmap['HCLKIN'] = f'CLKDIV_I{hclk_idx}{i}'
-            portmap['RESETN'] = f'C{i + 4}'  # GW5A-25A 0-C4, 1-C5, 2-C6, 3-C7
-            portmap['CALIB']  = ['B6', 'B7', 'C0', 'C1'][i]  # GW5A-25A
+            portmap['RESETN'] = ctrl['clkdiv_resetn'][i]
+            portmap['CALIB']  = ctrl['clkdiv_calib'][i]
             make_hclk_pip(dev, hclk_idx, row, col, f'HCLK_MUX_ALPHA{hclk_idx}{i}', portmap['HCLKIN'])
 
             portmap = clkdiv.setdefault('outputs', {})
