@@ -50,7 +50,9 @@ import sys
 from dataclasses import dataclass, field
 
 DEVICE = "GW5AST-138C"
-DATASTORE = "/Users/alex/fine-line-data/open-toolchain-gw5ast"
+from . import paths
+
+DATASTORE = paths.datastore()
 
 #: Where each side's bitstream lives inside a design directory.  The vendor
 #: path is `gw_sh`'s own (`create_project -name run` chdirs into `run/`,
@@ -100,6 +102,11 @@ class Netlist:
     #: `(row, col) -> {dest_global: src_global}`, kept because `E2`'s pip-set
     #: identity (`P0.T26`) needs a net's pips, not just their count.
     raw_pips: dict = field(default_factory=dict)
+    #: `global_wire -> net_label`, the union-find map `_build_nets` already
+    #: computes.  Kept because §5.3 row 5 masks a routing fuse only when the
+    #: net it serves has the same endpoint set on both sides, and answering
+    #: that for one fuse means going wire -> net, not just net -> wires.
+    wire_net: dict = field(default_factory=dict)
     source: str = ""
 
 
@@ -579,6 +586,7 @@ def _build_nets(netlist, db, raw_pips):
             port_wire[(cell, port)] = root
 
     netlist.nets = {root: frozenset(eps) for root, eps in endpoints.items()}
+    netlist.wire_net = {wire: uf.find(wire) for wire in list(uf)}
     for (cell, port), root in port_wire.items():
         netlist.conns.setdefault(cell, {})[port] = root
 
@@ -742,10 +750,12 @@ def _line_delta(vendor_fs, open_fs, limit=32):
 # --------------------------------------------------------------------------
 # 6b. `residual()` and `decode_check()` (`D35`, `D34`, `P0.T25`)
 # --------------------------------------------------------------------------
-#: Categories a differing frame bit can land in.  The first three are
+#: Categories a differing frame bit can land in.  Which of them are
 #: **subtracted** by §5.1b ("every bit either unpacker accounted for is
-#: subtracted"); the last three are not, and are what `unexplained_bits`
-#: enumerates.
+#: subtracted") is stated once, by `ACCOUNTED_CATEGORIES` below -- every other
+#: category here is what `unexplained_bits` enumerates.  `open_only_fill`,
+#: `io_used_pin_config`, `io_nondefault_config` and `net_route_endpoint_diff`
+#: are deliberately *not* accounted: each is the case its §5.3 row excludes.
 RESIDUAL_CATEGORIES = {
     "set_level_diff": (
         "both unpackers produced cells in this tile and their cell/attr sets "
@@ -756,8 +766,11 @@ RESIDUAL_CATEGORIES = {
         "unused-tile fill, not configuration of any instantiated cell "
         "(spec-harness.md 5.3 row 3, mask entry unused_tile_fill)"),
     "open_only_fill": (
-        "the open side unpacks cells here and the vendor unpacks none: the "
-        "mirror image of unused-tile fill, same mask entry"),
+        "the open side unpacks cells here and the vendor unpacks none: this "
+        "is the CONFIGURATION OF AN INSTANTIATED CELL -- the open flow placed "
+        "something the vendor did not -- which is the case spec-harness.md "
+        "5.3 row 3 explicitly excludes ('not configuration of any "
+        "instantiated cell'). It is NOT unused-tile fill and is never masked"),
     "unmodelled_fuse": (
         "BOTH unpackers produced the SAME cells and attributes in this tile "
         "and the raw bits still differ: a fuse apicula does not model at all, "
@@ -774,6 +787,24 @@ RESIDUAL_CATEGORIES = {
         "whose cell sets match: this is the physical route of a net whose "
         "endpoints match, which is never a verdict term at E0 or E1 "
         "(D32, spec-harness.md 5.3 row 5, mask entry net_route)"),
+    "io_used_pin_config": (
+        "IOBA/IOBB longval fuses of an IOB site at least one side DID "
+        "instantiate: spec-harness.md 5.3 row 6 masks the IO default only on "
+        "'pins used by neither design', so a difference here is a difference "
+        "in the configuration of a used pin and is NEVER masked -- this is "
+        "the PR #423 overheating defect class the row names by hand"),
+    "io_nondefault_config": (
+        "IOBA/IOBB longval fuses reachable by a DRIVE or PULLMODE attribute "
+        "value: spec-harness.md 5.3 row 6 masks the IO default 'only when "
+        "both sides carry a defaulted value', and these bits are not a "
+        "defaulted value. A difference in the default itself is never masked "
+        "(the PR #423 bank/drive-strength class)"),
+    "net_route_endpoint_diff": (
+        "differing pip/alonenode fuses driving a wire whose net does NOT have "
+        "the same endpoint set on both sides: spec-harness.md 5.3 row 5 masks "
+        "'the physical route of a net whose endpoint set matches', so a "
+        "routing bit that changes what a net connects -- or that serves a net "
+        "one side does not have at all -- is a difference, not a route"),
     "io_default_unused_pins": (
         "IOBA/IOBB longval fuses in IO tiles neither design instantiates: "
         "gowin_pack.get_unused_io_fuses() (gowin_pack.py:1684-1716) writes the "
@@ -842,6 +873,19 @@ FUSE_GROUP_PREFIX_CATEGORY = (
 _FUSE_GROUPS = {}
 
 
+#: `{(id(db), ttyp): (db, value)}` -- the db is kept beside its cached value
+#: so a freed db whose `id()` is reused by a later one cannot serve stale
+#: tables (which is exactly what a short-lived hand-built grid does).
+def _ttyp_cached(store, db, ttyp, build):
+    key = (id(db), ttyp)
+    cached = store.get(key)
+    if cached is not None and cached[0] is db:
+        return cached[1]
+    value = build()
+    store[key] = (db, value)
+    return value
+
+
 def _fuse_coords(obj, out):
     """Every `(row, col)` fuse coordinate reachable inside a chipdb table."""
     if isinstance(obj, dict):
@@ -864,10 +908,11 @@ def fuse_groups(db, ttyp):
     it, which is what 5.1b's "every bit either unpacker accounted for" turns
     on.
     """
-    key = (id(db), ttyp)
-    cached = _FUSE_GROUPS.get(key)
-    if cached is not None:
-        return cached
+    return _ttyp_cached(_FUSE_GROUPS, db, ttyp,
+                        lambda: _build_fuse_groups(db, ttyp))
+
+
+def _build_fuse_groups(db, ttyp):
     tile = db.tiles[ttyp]
     groups = {}
     pips = set()
@@ -883,18 +928,176 @@ def fuse_groups(db, ttyp):
             coords = set()
             _fuse_coords(sub, coords)
             groups[f"{table}:{name}"] = coords
-    _FUSE_GROUPS[key] = groups
     return groups
 
 
 def group_category(name):
-    """The residual category a fuse-group name maps to, or `None`."""
+    """The residual category a fuse-group name maps to, or `None`.
+
+    This is the *group* half of the answer only.  Two of the categories it
+    can return are mask entries whose §5.3 row carries **conditions** --
+    `io_default_unused_pins` (row 6) and `net_route` (row 5) -- and the
+    conditions are applied afterwards by `refine_group_category()`.  A group
+    name alone never decides that a bit is masked.
+    """
     if name in FUSE_GROUP_CATEGORY:
         return FUSE_GROUP_CATEGORY[name]
     for prefix, category in FUSE_GROUP_PREFIX_CATEGORY:
         if name.startswith(prefix):
             return category
     return None
+
+
+#: The `z` index of the IOB bel each IOB `longval` table configures: `IOBA` is
+#: the tile's IOB at `z=0`, `IOBB` the one at `z=1`.  §5.3 row 6 masks only
+#: pins *used by neither design*, and "used" is exactly "either side unpacked
+#: a cell at that `z` in that tile".
+IOB_GROUP_Z = {"longval:IOBA": 0, "longval:IOBB": 1}
+
+#: IOB attributes a *defaulted* value never sets.  §5.3 row 6 masks the IO
+#: default only when both sides carry a defaulted value, "because a difference
+#: in the default itself is exactly the PR #423 overheating defect class" --
+#: and §5.1d's measurement of the class names the two attributes that make it
+#: that class: `get_unused_io_attrvals()` "adds no DRIVE and no PULLMODE".
+PR423_IOB_ATTRS = ("DRIVE", "PULLMODE")
+
+_IOB_NONDEFAULT = {}
+
+
+def iob_nondefault_coords(db, ttyp):
+    """Fuse coords a `DRIVE`/`PULLMODE` value can set in this tile type.
+
+    `db.longval[ttyp]['IOBA'|'IOBB']` is keyed by `logicinfo` attribute-value
+    ids (`chipdb.get_table_fuses`), so `db.rev_logicinfo['IOB']` names the
+    attribute behind each id.  The union of the fuses of every key that
+    mentions `DRIVE` or `PULLMODE` is the set of bits a difference in which
+    cannot be "both sides carry a defaulted value".  A coord shared with a
+    default-only key is included, which errs towards *reporting* -- the safe
+    direction for the PR #423 class.
+    """
+    return _ttyp_cached(_IOB_NONDEFAULT, db, ttyp,
+                        lambda: _build_iob_nondefault_coords(db, ttyp))
+
+
+def _build_iob_nondefault_coords(db, ttyp):
+    from apycula import attrids
+
+    banned_attrs = {attrids.iob_attrids[name] for name in PR423_IOB_ATTRS
+                    if name in attrids.iob_attrids}
+    # `Device.rev_logicinfo(name)` builds the reverse table on demand.
+    rev = db.rev_logicinfo("IOB") if hasattr(db, "rev_logicinfo") else {}
+    banned_vals = {val for val, pair in (rev or {}).items()
+                   if isinstance(pair, (tuple, list)) and pair
+                   and pair[0] in banned_attrs}
+    coords = set()
+    for table_name in ("IOBA", "IOBB"):
+        table = ((getattr(db, "longval", None) or {})
+                 .get(ttyp, {}) or {}).get(table_name)
+        if not table:
+            continue
+        for attrvals, fuses in table.items():
+            if any(abs(a) in banned_vals for a in attrvals if a):
+                _fuse_coords(fuses, coords)
+    return coords
+
+
+_PIP_OWNERS = {}
+
+
+def pip_owners(db, ttyp):
+    """`{(row, col) fuse coord: frozenset(destination wire names)}`.
+
+    The inverse of the tile's pip / clock-pip / alonenode tables: given one
+    differing routing fuse, which wire does it drive?  That wire is what turns
+    a fuse into the net §5.3 row 5 asks about.
+    """
+    return _ttyp_cached(_PIP_OWNERS, db, ttyp,
+                        lambda: _build_pip_owners(db, ttyp))
+
+
+def _build_pip_owners(db, ttyp):
+    tile = db.tiles[ttyp]
+    out = collections.defaultdict(set)
+    for table in ("pips", "clock_pips", "alonenode", "alonenode_6"):
+        for dest, sub in (getattr(tile, table, None) or {}).items():
+            found = set()
+            _fuse_coords(sub, found)
+            for coord in found:
+                out[coord].add(dest)
+    return {coord: frozenset(dests) for coord, dests in out.items()}
+
+
+class NetEndpointIndex:
+    """§5.3 row 5's condition, made answerable for a single routing fuse.
+
+    The row masks *"the physical route of a net whose endpoint set matches"*.
+    So a differing routing fuse is a don't-care only when the net it drives
+    exists with the **same endpoint set** on both sides; if the flipped bit
+    changes what the net connects -- or serves a net one side does not have at
+    all -- it is a difference, not a route.
+    """
+
+    def __init__(self, db, nl_v, nl_o):
+        self.db = db
+        self.sides = (nl_v, nl_o)
+        self._ids = ({}, {})
+        self._global = {}
+
+    def _net_id(self, side, root):
+        cache = self._ids[side]
+        if root not in cache:
+            endpoints = self.sides[side].nets.get(root)
+            cache[root] = net_id(endpoints) if endpoints else None
+        return cache[root]
+
+    def _wire(self, row, col, dest):
+        key = (row, col, dest)
+        if key not in self._global:
+            try:
+                self._global[key] = db_wire2global(self.db, row, col, dest)
+            except Exception:
+                self._global[key] = None
+        return self._global[key]
+
+    def matches(self, tile, coord, ttyp):
+        if tile is None:
+            return False
+        dests = pip_owners(self.db, ttyp).get(coord)
+        if not dests:
+            return False
+        row, col = tile
+        for dest in dests:
+            wire = self._wire(row, col, dest)
+            if wire is None:
+                continue
+            left = self._net_id(0, self.sides[0].wire_net.get(wire))
+            right = self._net_id(1, self.sides[1].wire_net.get(wire))
+            if left is not None and left == right:
+                return True
+        return False
+
+
+def refine_group_category(category, name, coord, db, ttyp, tile=None,
+                          used_z=frozenset(), nets=None):
+    """Apply the §5.3 conditions the fuse-group name cannot express.
+
+    `io_default_unused_pins` (row 6) requires the pin to be used by neither
+    design **and** both sides to carry a defaulted value; `net_route` (row 5)
+    requires the net's endpoint set to match.  A bit that fails either
+    condition gets its own category, and those categories are not in
+    `ACCOUNTED_CATEGORIES`, so they land in `unexplained_bits` -- a `DIFF`.
+    """
+    if category == "io_default_unused_pins":
+        z = IOB_GROUP_Z.get(name)
+        if z is None or z in used_z:
+            return "io_used_pin_config"
+        if coord in iob_nondefault_coords(db, ttyp):
+            return "io_nondefault_config"
+        return category
+    if category == "net_route" and nets is not None:
+        if not nets.matches(tile, coord, ttyp):
+            return "net_route_endpoint_diff"
+    return category
 
 
 #: Columns either side of `db.center_col` that carry the central clock spine
@@ -920,13 +1123,15 @@ def in_configuration_band(db, tile):
     return center is not None and abs(col - center) <= CLOCK_SPINE_HALF_WIDTH
 
 
-def split_tile_bits(coords, db, ttyp, tile=None):
+def split_tile_bits(coords, db, ttyp, tile=None, used_z=frozenset(),
+                    nets=None):
     """`({category: bits}, leftover)` for one tile's differing bit coords.
 
-    Bits owned by a chipdb fuse group are attributed to that group's category;
-    a bit no group owns falls through to `leftover` for the cell-set
-    classifier to place, unless the tile is in the configuration band, where
-    it is a named device-config gap.
+    Bits owned by a chipdb fuse group are attributed to that group's category
+    **after** `refine_group_category()` has applied the §5.3 conditions that
+    the group name alone cannot express; a bit no group owns falls through to
+    `leftover` for the cell-set classifier to place, unless the tile is in the
+    configuration band, where it is a named device-config gap.
     """
     if db is None or not coords:
         return {}, len(coords) if coords else 0
@@ -943,6 +1148,9 @@ def split_tile_bits(coords, db, ttyp, tile=None):
             if coord in owned:
                 category = group_category(name)
                 if category is not None:
+                    category = refine_group_category(
+                        category, name, coord, db, ttyp, tile=tile,
+                        used_z=used_z, nets=nets)
                     break
         if category is None:
             if config_band:
@@ -1022,7 +1230,7 @@ def tile_bit_delta(bitmap_v, bitmap_o, db):
 
 def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
                       outside=None, mask=None, level="E0", shape_class=None,
-                      tile_coords=None, db=None):
+                      tile_coords=None, db=None, nl_v=None, nl_o=None):
     """Split every differing bit into "accounted for" and `unexplained_bits`.
 
     §5.1b, literally: *"every bit either unpacker accounted for is subtracted;
@@ -1054,10 +1262,16 @@ def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
             bucket["tiles"].append(f"({tile[1]},{tile[0]})")
 
     tile_coords = tile_coords or {}
+    nets = (NetEndpointIndex(db, nl_v, nl_o)
+            if db is not None and nl_v is not None and nl_o is not None
+            else None)
     for tile, bits in sorted(tile_delta.items()):
+        used_z = {entry[0] for entry in cells_v.get(tile, ())}
+        used_z |= {entry[0] for entry in cells_o.get(tile, ())}
         grouped, leftover = split_tile_bits(
             tile_coords.get(tile), db,
-            db.grid[tile[0]][tile[1]] if db is not None else None, tile=tile)
+            db.grid[tile[0]][tile[1]] if db is not None else None, tile=tile,
+            used_z=used_z, nets=nets)
         for cat, n in grouped.items():
             _hit(cat, tile, n)
         if not grouped:
@@ -1152,7 +1366,6 @@ def classify_residual(tile_delta, cells_v, cells_o, outside_every_tile=0,
 ACCOUNTED_CATEGORIES = {
     "set_level_diff": None,
     "vendor_only_fill": "unused_tile_fill",
-    "open_only_fill": "unused_tile_fill",
     "net_route": "net_route",
     "io_default_unused_pins": "io_default_unused_pins",
 }
@@ -1237,7 +1450,8 @@ def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
         outside_every_tile=total - in_tiles + out["bitmap_row_delta"],
         outside=out["outside_bitmap"], mask=mask, level=level,
         shape_class=shape_class,
-        tile_coords=tile_coord_delta(bmv, bmo, db), db=db))
+        tile_coords=tile_coord_delta(bmv, bmo, db), db=db,
+        nl_v=nl_v, nl_o=nl_o))
     return out
 
 
