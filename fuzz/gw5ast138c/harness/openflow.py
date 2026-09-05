@@ -37,7 +37,6 @@ Binding behaviours implemented here:
   instantiate. Nothing here compensates for that.
 """
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -45,6 +44,8 @@ import shutil
 import subprocess
 import sys
 import time
+
+from .evidence import git_sha, sha256
 
 DEVICE = "GW5AST-138C"
 PART = "GW5AST-LV138PG484AC1/I0"
@@ -228,24 +229,6 @@ def timing_allow_fail_needed(log_text):
     return any(entry["verdict"] == "FAIL" for entry in parse_fmax(log_text))
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _git_sha(repo):
-    try:
-        out = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
-                             stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, timeout=20)
-        return out.stdout.decode().strip() or None
-    except Exception:
-        return None
-
-
 def _apicula_repo():
     return os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__)))))
@@ -278,8 +261,8 @@ def provenance(yosys, nextpnr, chipdb, nextpnr_log=""):
     """The five-field provenance dict of `spec.md` §7.1."""
     return {
         "yosys_version": yosys_version(yosys),
-        "apicula_sha": _git_sha(_apicula_repo()),
-        "nextpnr_sha": _git_sha(_nextpnr_repo(nextpnr)),
+        "apicula_sha": git_sha(_apicula_repo()),
+        "nextpnr_sha": git_sha(_nextpnr_repo(nextpnr)),
         "chipdb_sha256": sha256(chipdb),
         "timing_allow_fail_needed": timing_allow_fail_needed(nextpnr_log),
     }

@@ -26,8 +26,10 @@ tree is `--evidence-root` or `$OTC_EVIDENCE` or `$OTC/evidence` (`$OTC` is the
 the same flags.  The roll-up flag is spelled `--rollup` at every site.
 """
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
 
 # --------------------------------------------------------------------------
@@ -118,18 +120,23 @@ def otc_root():
     return candidate if os.path.isdir(candidate) else None
 
 
-def pipeline_dir():
-    """The pipeline docs directory (documents only, `C10`) -- read-only,
-    never where evidence is written."""
-    for pipe in (
-            "/Users/alex/fine-line/.atelier/pipelines/"
-            "2026-09-03-open-toolchain-gw5ast-7e84",
-            "/Users/alex/fine-line/.atelier/worktrees/"
-            "2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/"
-            "2026-09-03-open-toolchain-gw5ast-7e84"):
-        if os.path.isdir(pipe):
-            return pipe
-    return None
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def git_sha(repo):
+    """`HEAD` of the checkout at `repo`, or None if it is not readable."""
+    try:
+        return subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20,
+        ).stdout.decode().strip() or None
+    except Exception:
+        return None
 
 
 def evidence_root(root=None):

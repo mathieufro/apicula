@@ -22,7 +22,6 @@ Binding behaviours implemented here:
 """
 import argparse
 import glob
-import hashlib
 import json
 import os
 import re
@@ -34,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import evidence
+from .evidence import git_sha, sha256
 
 DEVICE = "GW5AST-138C"
 PART = "GW5AST-LV138PG484AC1/I0"
@@ -351,14 +351,6 @@ def collect_artifacts(design_dir, require=True):
     return out
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 # --------------------------------------------------------------------------
 # 4. The `.cst` default assertion (F21, F73, `D20a`-`D20c`)
 # --------------------------------------------------------------------------
@@ -518,16 +510,6 @@ def run_oracle(design_dir, gowinhome=None, timeout=DEFAULT_TIMEOUT_S,
 # 6. Evidence row
 # --------------------------------------------------------------------------
 
-def _git_sha(repo):
-    try:
-        return subprocess.run(
-            ["git", "-C", repo, "rev-parse", "HEAD"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20,
-        ).stdout.decode().strip() or None
-    except Exception:
-        return None
-
-
 def evidence_row(result, run_id, primitive="DFF", shape="smoke",
                  standard_preflight=None):
     home = result["gowinhome"]
@@ -558,7 +540,7 @@ def evidence_row(result, run_id, primitive="DFF", shape="smoke",
         "device_version": DEVICE_VERSION,
         "ide_version": f"{version} {edition}",
         "edu-provisional": edition == "Education",
-        "apicula_sha": _git_sha(repo),
+        "apicula_sha": git_sha(repo),
         "level": "E0",
         "verdict": "ok" if pf.ok else "aborted",
         "preflight": {

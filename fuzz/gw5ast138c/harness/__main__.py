@@ -63,10 +63,6 @@ BATCH_WALL_CLOCK_S = 10 * 3600
 #: (`spec-harness.md` §8 resumability, §6 verdict vocabulary).
 TERMINAL_VERDICTS = ("ok", "diff", "aborted", "refused")
 
-COMPLETE_RE = re.compile(
-    r"^BATCH_COMPLETE (\S+) runs=(\d+) ok=(\d+) diff=(\d+) aborted=(\d+)$")
-
-
 class BatchError(Exception):
     """A batch could not be set up or run."""
 

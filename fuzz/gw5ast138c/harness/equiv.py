@@ -97,7 +97,6 @@ class Netlist:
     conns: dict = field(default_factory=dict)   # Cell -> {port: net_label}
     nets: dict = field(default_factory=dict)    # net_label -> frozenset((Cell, port))
     pip_count: int = 0
-    tile_bits: dict = field(default_factory=dict)  # (x, y) -> frozenset((r, c))
     #: `(row, col) -> {dest_global: src_global}`, kept because `E2`'s pip-set
     #: identity (`P0.T26`) needs a net's pips, not just their count.
     raw_pips: dict = field(default_factory=dict)
