@@ -76,6 +76,7 @@ def _build(device, gowinhome):
 
 # ---------------------------------------------------------------- P1.T07
 
+@pytest.mark.heavy  # parses a real multi-MB vendor .fse via _build(); slow, not toolchain, but budget-binding
 def test_gw5_add_hclk_bels_138c_block_and_wire_counts(gowinhome):
     dev, dat = _build('GW5AST-138C', gowinhome)
     # P1.T07 owns the builder, P1.T08 owns routing 138C into it; drive it
@@ -110,6 +111,7 @@ def test_gw5_add_hclk_bels_138c_block_and_wire_counts(gowinhome):
         'top', 'top', 'bottom', 'bottom', 'bottom', 'bottom']
 
 
+@pytest.mark.heavy  # parses a real multi-MB vendor .fse via _build(); slow, not toolchain, but budget-binding
 def test_gw5_add_hclk_bels_25a_unchanged(gowinhome):
     dev, _dat = _build('GW5A-25A', gowinhome)
     assert len(dev.hclk_div2) == 4
@@ -127,6 +129,7 @@ def test_gw5_add_hclk_bels_25a_unchanged(gowinhome):
 
 # ---------------------------------------------------------------- P1.T08
 
+@pytest.mark.heavy  # parses a real multi-MB vendor .fse via _build(); slow, not toolchain, but budget-binding
 def test_hclk_nodes_138c_not_pre5a_path(gowinhome):
     dev, _dat = _build('GW5AST-138C', gowinhome)
     hclk_nodes = {n for n in dev.nodes if n.startswith('HCLK')}
@@ -144,6 +147,7 @@ def test_hclk_nodes_138c_not_pre5a_path(gowinhome):
             assert not any(pre5a.search(s) for s in srcs)
 
 
+@pytest.mark.heavy  # forces a real .fse re-parse via _build(); slow, not toolchain, but budget-binding
 def test_hclk_138c_takes_gw5a_branch(gowinhome, monkeypatch):
     calls = {'pin': 0, 'gates': 0, 'pips': 0}
     for name, key in (('gw5_make_pin_to_hclk', 'pin'),
