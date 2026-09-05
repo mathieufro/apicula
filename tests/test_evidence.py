@@ -104,6 +104,35 @@ def test_evidence_refused_records_error_text(tmp_path):
         evidence.validate_row(_row(verdict="refused", notes=""))
 
 
+def test_evidence_pruned_row_admissible():
+    """`D99`: a row whose artefacts were pruned from the datastore carries
+    `artefact_pruned: true` plus `sha256:<hex>` (or `sha256:unknown`) in place
+    of a live path, and the schema accepts it -- it is not an unknown field
+    and not a schema violation.
+    """
+    row = _row(artefact_pruned=True,
+               oracle_log="sha256:" + "a" * 64,
+               open_log=["sha256:" + "b" * 64, "sha256:unknown"],
+               vendor_fs=[{"path": "sha256:" + "c" * 64, "bytes": 123,
+                          "sha256": "c" * 64}])
+    assert evidence.validate_row(row) is row
+    assert row["artefact_pruned"] is True
+    assert "artefact_pruned" not in evidence.REQUIRED_FIELDS
+    assert "artefact_pruned" in evidence.OPTIONAL_FIELDS
+    # The pruned-marker pattern accepts a real hash and the "unknown" literal,
+    # and rejects anything else (a live path, a malformed hash).
+    assert evidence.PRUNED_ARTIFACT_RE.match("sha256:" + "0" * 64)
+    assert evidence.PRUNED_ARTIFACT_RE.match("sha256:unknown")
+    assert not evidence.PRUNED_ARTIFACT_RE.match("/some/live/path/run.fs")
+    assert not evidence.PRUNED_ARTIFACT_RE.match("sha256:tooshort")
+    # A non-bool artefact_pruned is rejected.
+    with pytest.raises(evidence.EvidenceSchemaError):
+        evidence.validate_row(_row(artefact_pruned="true"))
+    # A row with neither artefact_pruned nor any extra field is unaffected --
+    # the optional field is additive, never required.
+    assert set(_row().keys()) == set(evidence.REQUIRED_FIELDS)
+
+
 def test_evidence_append_only(tmp_path):
     root = str(tmp_path)
     rows = [_row(run_id=f"harness-selftest-A-000{n}") for n in (1, 2, 3)]

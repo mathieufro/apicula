@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -69,6 +70,23 @@ REQUIRED_FIELDS: tuple = (
     "wall_clock_s",      # {oracle: s, open: s}
     "notes",             # required when level == E0
 )
+
+#: Fields a row may carry in addition to `REQUIRED_FIELDS`, never required.
+#: `artefact_pruned` (`D99`): the row's artefact fields (`ARTIFACT_FIELDS`-
+#: shaped, in `check_evidence.py`) point at a datastore path that was pruned
+#: after the row was recorded; each pruned entry's `path` is rewritten to
+#: `sha256:<hex>` (or `sha256:unknown` when no sha256 was ever recorded for
+#: that artefact) instead of a live filesystem path. A committed row must
+#: never point at a live path a later prune deletes without also being
+#: rewritten this way (`D99`: "never delete artefacts a committed row still
+#: points at without rewriting the row").
+OPTIONAL_FIELDS: tuple = (
+    "artefact_pruned",
+)
+
+#: `sha256:<64 lowercase hex>` or the literal `sha256:unknown` when the hash
+#: was never recorded before the artefact was pruned (`D99`).
+PRUNED_ARTIFACT_RE = re.compile(r"^sha256:([0-9a-f]{64}|unknown)$")
 
 LEVELS = ("E0", "E1", "E2")
 VERDICTS = ("ok", "diff", "aborted", "refused")
@@ -217,7 +235,7 @@ def new_row(**fields):
     is exactly the 29 names or it is not a row.
     """
     fields = _with_timing_model(fields)
-    unknown = sorted(set(fields) - set(REQUIRED_FIELDS))
+    unknown = sorted(set(fields) - set(REQUIRED_FIELDS) - set(OPTIONAL_FIELDS))
     if unknown:
         raise EvidenceSchemaError(
             f"not evidence-row fields: {', '.join(unknown)}")
@@ -295,10 +313,14 @@ def validate_row(row):
     if missing:
         raise EvidenceSchemaError(
             f"evidence row missing required field(s): {', '.join(missing)}")
-    unknown = sorted(set(row) - set(REQUIRED_FIELDS))
+    unknown = sorted(set(row) - set(REQUIRED_FIELDS) - set(OPTIONAL_FIELDS))
     if unknown:
         raise EvidenceSchemaError(
             f"evidence row has non-schema field(s): {', '.join(unknown)}")
+
+    if "artefact_pruned" in row and not isinstance(row["artefact_pruned"], bool):
+        raise EvidenceSchemaError(
+            f"artefact_pruned must be a bool, got {row['artefact_pruned']!r}")
 
     if not str(row["run_id"] or "").strip():
         raise EvidenceSchemaError("run_id is required and must be non-empty")
