@@ -1547,7 +1547,15 @@ def gw5_make_hclk_to_clk_gates(dev, device, fse, dat: Datfile):
 # The GW5A series has a different CLKDIV/CLKDIV2 configuration—each of the four
 # wires in a single HCLK block has its own dedicated CLKDIV/CLKDIV2. The inputs
 # for CLKDIV2 are HCLK_BUF_BO.
-_gw5a_hclk_locs = { 'GW5A-25A': { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)} }
+# GW5AST-138C: six blocks, MEASURED (two independent instruments -- the .fse
+# table-48 classifier and a vendor presence diff) and recorded in
+# $OTC/evidence/hclk/topology-138c.md (P1.T04).  Indices are the measured
+# (row, col) sort order; the five inter-HCLK *bridge* cells that also carry
+# table 48 -- (63,0) (63,181) (108,0) (108,118) (108,181) -- are deliberately
+# NOT here: they hold no CLKDIV/CLKDIV2.
+_gw5a_hclk_locs = { 'GW5A-25A':    { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)},
+                    'GW5AST-138C': { 0: (27, 0), 1: (27, 181), 2: (81, 0),
+                                     3: (81, 181), 4: (108, 64), 5: (108, 117)} }
 def gw5_add_hclk_bels(dat, dev, device):
     for hclk_idx, hclk_loc in _gw5a_hclk_locs[device].items():
         row, col = hclk_loc
