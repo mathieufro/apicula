@@ -387,3 +387,186 @@ def test_nextpnr_places_clkdiv2_138c(tmp_path):
     assert len(div2) == 1 and len(divs) == 1, (div2, divs)
     assert _block_of(div2[0][1]) in range(6)
     assert _block_of(divs[0][1]) in range(6)
+
+
+# --------------------------------------------------------------- P1.T08c
+#
+# `gowin_unpack` decodes the HCLK-block cells of the 138C. Before this task
+# unpacking the vendor CLKDIV bitstream yielded 138,600 cells of four types
+# (DFF/IOB/LUT/BANK) and no CLKDIV at any tile ($OTC/evidence/hclk/clkdiv-138c.md
+# section 4), which made an HCLK-scoped E0 vacuous. Everything asserted here is
+# driven by the SAME chipdb data `gowin_pack` writes through -- the `HCLK`
+# shortval table (`get_CLKDIV_fuses` -> `chipdb.get_hclk_fuses`) and
+# `dev.hclk_pips` -- never by a literal fuse coordinate.
+
+#: The P1.T11 vendor oracle run: a single `CLKDIV` with `DIV_MODE = "2"`.
+#: sha256 of record 3d36f0aa63b6f2b48fabe9b3ac153bfffe15ab012b158022836ea7ab32b5ac5a
+_VENDOR_CLKDIV_FS = (_DATASTORE /
+                     'batch/p1t11/clkdiv/run/impl/pnr/run.fs')
+
+
+def _unpack_hclk_tiles(dev, fs_path, device='GW5AST-138C'):
+    """`gowin_unpack.parse_tile_` over the six measured HCLK block cells."""
+    from apycula import gowin_unpack as gu
+    from apycula.bslib import read_bitstream
+    bits, _hdr, _ftr, _slots = read_bitstream(str(fs_path))
+    bm = chipdb.tile_bitmap(dev, bits)
+    old_device = gu._device
+    gu._device = device
+    try:
+        out = {}
+        for rc in sorted(chipdb._gw5a_hclk_locs[device].values()):
+            tile = bm.get(rc)
+            assert tile is not None, f'no tile bitmap at {rc}'
+            bels, _pips, _cpips = gu.parse_tile_(dev, rc[0], rc[1], tile, bm,
+                                                 noiostd=False)
+            out[rc] = bels
+    finally:
+        gu._device = old_device
+    return out
+
+
+@pytest.mark.heavy  # needs the real vendor .fse (via _build) and the P1.T11 vendor .fs
+def test_unpack_decodes_clkdiv_138c(gowinhome):
+    """The vendor CLKDIV bitstream decodes to a CLKDIV cell with DIV_MODE.
+
+    The vendor placed its single `CLKDIV` in HCLK block 5, at the measured
+    block cell (108, 117) -- so exactly one of the six blocks must carry a
+    CLKDIV bel, and it must carry the design's `DIV_MODE = "2"`.
+    """
+    if not _VENDOR_CLKDIV_FS.is_file():
+        pytest.skip(f'{_VENDOR_CLKDIV_FS} absent')
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    per_tile = _unpack_hclk_tiles(dev, _VENDOR_CLKDIV_FS)
+
+    with_clkdiv = {rc: bels for rc, bels in per_tile.items()
+                   if any(n.startswith('CLKDIV_') for n in bels)}
+    assert list(with_clkdiv) == [(108, 117)], with_clkdiv
+
+    bels = per_tile[(108, 117)]
+    assert 'CLKDIV_0' in bels, sorted(bels)
+    assert 'DIV_MODE="2"' in bels['CLKDIV_0'], bels['CLKDIV_0']
+    # the bel index is the chipdb's own CLKDIV slot, not an invention
+    assert '0' in {str(k) for k in dev.extra_func[(108, 117)]['clkdiv']['bels']}
+    # the block's own configured state is recovered too, on the HCLK bel
+    assert 'HCLK5' in bels, sorted(bels)
+    assert bels['HCLK5'], 'HCLK block cell decoded with no state'
+    # and the five unconfigured blocks stay empty of CLKDIV/CLKDIV2
+    for rc, other in per_tile.items():
+        if rc == (108, 117):
+            continue
+        assert not [n for n in other if n.startswith('CLKDIV')], (rc, other)
+
+
+@pytest.mark.heavy  # needs the real vendor .fse (via _build)
+def test_unpack_hclk_completeness_138c(gowinhome):
+    """`S6b`: every HCLK fuse is decoded or listed as known-undecoded."""
+    from apycula import gowin_unpack as gu
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    rep = gu.hclk_decode_completeness(dev, 'GW5AST-138C')
+    assert rep['blocks'] == 6
+    assert rep['total'] == rep['decoded'] + rep['undecoded']
+    assert rep['undecoded'] == 0, rep
+    # nothing is quietly dropped: every entry not carried by a named CLKDIV
+    # attribute is still recovered onto the HCLK block cell
+    assert rep['clkdiv_div_entries'] == 36 * 6
+    assert rep['pip_fuses'] == 151 * 6
+    # the known-undecoded list is explicit and reasoned
+    assert set(rep['known_undecoded']) == {'CLKDIV2', 'block_default_bits'}
+    for reason in rep['known_undecoded'].values():
+        assert reason and isinstance(reason, str)
+
+
+def test_unpack_hclk_decode_is_device_gated():
+    """The new decoder is strictly 138C-gated: pre-5A devices cannot reach it.
+
+    This is the regression proof for `GW1N-9C` and `GW2A-18C`, for which no
+    example bitstream is checked in: `parse_hclk_block` is the only entry
+    point the change adds to `parse_tile_`, and it returns an empty bel set
+    for any device not in `_hclk_block_devices`.
+    """
+    from apycula import gowin_unpack as gu
+    assert 'GW5AST-138C' in gu._hclk_block_devices
+    for absent in ('GW1N-9C', 'GW1N-9', 'GW2A-18C', 'GW2A-18', 'GW1N-1',
+                   'GW1NZ-1', 'GW1N-4', 'GW1NS-4', 'GW5A-25A', 'GW5AT-60B'):
+        assert absent not in gu._hclk_block_devices
+
+    class _Dev:
+        def __getitem__(self, rc):
+            raise AssertionError('device-gated path touched the chipdb')
+        extra_func = property(lambda self: (_ for _ in ()).throw(
+            AssertionError('device-gated path touched extra_func')))
+
+    old = gu._device
+    try:
+        for absent in ('GW1N-9C', 'GW2A-18C'):
+            gu._device = absent
+            assert gu.parse_hclk_block(_Dev(), 0, 0, None) == {}
+    finally:
+        gu._device = old
+
+
+# ---------------------------------------------------------------- P1.T08c
+# HCLK -> global-clock backbone.  See `chipdb._gw5a_hclk_to_clk` for the
+# measurement these three tests encode and `$OTC/evidence/hclk/backbone-138c.md`
+# for the vendor runs behind it.
+
+def test_hclk5_backbone_map_138c_is_the_measured_staircase():
+    """Block 5's four CLKDIV outputs, as MEASURED on four vendor bitstreams.
+
+    Adding CLKDIVs one at a time lit block-5 wire indices 0,1,2,3 in the
+    (108,117) table-48 fuses and, in lockstep, clock wires 109, 110, 224, 225
+    at the central clock mux (54,88).  Blocks 0-4 are deliberately absent:
+    the vendor placed every design in block 5 and nothing measured the rest.
+    """
+    m = chipdb._gw5a_hclk_to_clk['GW5AST-138C']
+    assert set(m) == {5}, 'only block 5 is measured; do not guess the others'
+    assert m[5] == {0: 109, 1: 110, 2: 224, 3: 225}
+    # the two bands are disjoint and neither is the 25A's 169..184
+    assert set(m[5].values()).isdisjoint(range(169, 185))
+    # the 25A must not acquire an entry by accident
+    assert 'GW5A-25A' not in chipdb._gw5a_hclk_to_clk
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "MEASURED REFUTATION (P1.T08c): the GW5AST-138C has no sixteen-wire "
+    "{T,B,R,L}BDHCLK band.  Its six HCLK blocks expose 4 backbone wires each "
+    "and block 5's four -- the only ones measured -- are clock wires "
+    "109, 110, 224, 225, drawn from two disjoint bands, not one contiguous "
+    "sixteen.  Naming sixteen wires here would be an invention.  Promoting "
+    "this to a pass needs the other five blocks isolated on the vendor, which "
+    "needs a CLKDIV placement handle the oracle does not expose."))
+def test_clknames_138c_has_16_bdhclk():
+    names = {f'{side}BDHCLK{i}' for side in 'TBRL' for i in range(4)}
+    have = names & set(wnames.clknames_5ast138c.values())
+    assert have == names, f'missing {sorted(names - have)}'
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "MEASURED REFUTATION (P1.T08c): gw5_make_hclk_to_clk_gates cannot fire on "
+    "the GW5AST-138C.  It builds each gate pip from a table-48 row whose source "
+    "is in {25,27,28,29} and whose destination is a clock wire; no cell of this "
+    "device has such a row (the 25A has exactly four, ttyp 410/393/187/257).  "
+    "The HCLK-block -> clock-mux hop is fuseless here, so the primitive the "
+    "138C needs is a node, not a gate pip, and the selecting pips live in "
+    "table 38, which fse_clock_pips_138 does not read."))
+@pytest.mark.heavy  # parses the real vendor .fse
+def test_hclk_to_clk_gates_fire_138c(gowinhome):
+    from apycula import fse_parser
+    names = {f'{side}BDHCLK{i}' for side in 'TBRL' for i in range(4)}
+    assert names <= set(wnames.clknames_5ast138c.values())
+    base = f'{gowinhome}/IDE/share/device/GW5AST-138C/GW5AST-138C.fse'
+    if not os.path.isfile(base):
+        pytest.skip('GW5AST-138C.fse absent')
+    with open(base, 'rb') as fh:
+        fse = fse_parser.read_fse(fh, 'GW5AST-138C')
+    wnames.select_wires('GW5AST-138C')
+    gate_rows = 0
+    for ttyp, tile in fse.items():
+        if not isinstance(tile, dict) or 'wire' not in tile:
+            continue
+        for srcid, destid, *_ in tile['wire'].get(48, []):
+            if abs(srcid) in {25, 27, 28, 29} and \
+                    wnames.clknames.get(destid, '') in names:
+                gate_rows += 1
+    assert gate_rows >= 16, f'only {gate_rows} gate rows in the .fse'

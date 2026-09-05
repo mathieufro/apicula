@@ -1525,6 +1525,46 @@ def gw5_make_pin_to_hclk(dev, device):
     """
 
 
+# HCLK -> global-clock backbone wires, MEASURED per (device, hclk block, wire).
+#
+# On the GW5A-25A the backbone is the sixteen {T,B,R,L}BDHCLK{0..3} wires named
+# in clknames_5a25a, and four dedicated *gate cells* (ttyp 410/393/187/257, at
+# (0,59) (36,46) (27,91) (10,0)) carry the HCLK_TO_GCLK -> BDHCLK fuses in their
+# own table 48.  gw5_make_hclk_to_clk_gates below is written to that shape.
+#
+# The GW5AST-138C is NOT that shape.  Measured on this box (P1.T08c), from the
+# shipped .fse and from four vendor bitstreams:
+#
+#   1. No cell of the 138C has a table-48 row whose source is in {25,27,28,29}
+#      (HCLK_TO_GCLK0..3) and whose destination is a clock-network wire.  The
+#      only such rows are the six HCLK block cells' own {25,27,28,29} -> {34..37},
+#      which the 25A block cells have too.  There is no gate cell on this device
+#      and the HCLK-block -> clock-mux hop carries no fuse at all.
+#   2. The device therefore has no sixteen-wire BDHCLK band to name.  A block's
+#      four CLKDIV outputs surface on the central clock mux as four clock wires
+#      drawn from TWO separate bands, not one contiguous sixteen.
+#   3. The clock-mux pips that select them live in table 38 (cells (54,88) and
+#      (54,93)), which fse_clock_pips_138 does not read -- it reads only 90/91 --
+#      and in the 164..236 span that the same function discards as "longwires".
+#
+# The staircase that measured block 5, one vendor run per step (designs
+# $DATASTORE/batch/p1t08c/n{1..4}, oracle = Gowin 1.9.12.03 Standard).  Column 2
+# is the block cell's own lit table-48 wire index at (108,117) (dest 34+i <= 30+i),
+# column 3 the clock wire the centre cell (54,88) then selects onto a SPINE:
+#
+#   N=1  wires {0}        clk {109}                  (P1.T11 run.fs 3d36f0aa)
+#   N=2  wires {0,1}      clk {109,110}              (run.fs 91252ceb)
+#   N=3  wires {0,1,2}    clk {109,110,224}          (run.fs 370de8c9)
+#   N=4  wires {0,1,2,3}  clk {109,110,224,225}      (run.fs e1d97917)
+#
+# Blocks 0-4 are NOT measured: the vendor placed every one of these designs in
+# block 5 and it cannot be told to use another block, so isolating the other
+# twenty wires needs a placement handle this task did not have.  They are absent
+# from the table rather than guessed.
+_gw5a_hclk_to_clk = {
+    'GW5AST-138C': { 5: {0: 109, 1: 110, 2: 224, 3: 225} },
+}
+
 # HCLK to global clock network gates
 # The wire numbers in the tables are the same for all four HCLKs, and we can
 # basically make them unique by automatically generating the wire name based on
