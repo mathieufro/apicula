@@ -66,6 +66,9 @@ def test_fse_drpfuse_mismatch_raises_named_error(monkeypatch):
         assert needle in message, message
 
 
+# Parses a full real vendor .fse device file to EOF each case (~3.6s) --
+# heavy per C12/D94 (a real vendor archive read, same spirit as a real .fs).
+@pytest.mark.heavy
 @pytest.mark.parametrize('device', ['GW5A-25A', 'GW5AT-60B'])
 def test_fse_drpfuse_devices_parse_to_eof(device, device_file, gowinhome,
                                           monkeypatch):

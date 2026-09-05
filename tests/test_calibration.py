@@ -130,6 +130,7 @@ def test_line_delta_splits_command_words_from_config_frames(tmp_path):
     assert split["config_frame_lines"] == 3
 
 
+@pytest.mark.heavy  # reads a real vendor .fs bitstream from disk
 def test_bslib_reads_a_bitstream_carrying_bsram_slots():
     """A 62-byte slot line is never read as a device id or a frame count."""
     from apycula.bslib import read_bitstream

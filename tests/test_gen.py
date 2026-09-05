@@ -33,6 +33,7 @@ def _yosys_reads(path):
     return True
 
 
+@pytest.mark.heavy  # invokes the real yosys binary via _yosys_reads
 def test_gen_emits_three_files(tmp_path):
     written = gen.run(smoke.SPEC, tmp_path)
     names = sorted(p.name for p in tmp_path.iterdir())
@@ -157,6 +158,7 @@ def test_gen_rejects_config_pin(tmp_path):
         assert gen.config_role_of_loc(pin.loc) is None, port
 
 
+@pytest.mark.heavy  # invokes the real yosys binary via _yosys_reads
 def test_gen_regenerated_oracle_smoke_passes_cst_assertion(tmp_path):
     reference = gen.run(smoke.SPEC, tmp_path)
     errors = gen.assert_cst_defaults(smoke.SPEC)

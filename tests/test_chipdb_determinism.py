@@ -66,6 +66,7 @@ def _build(gowinhome, out, seed):
             hashlib.sha256(raw).hexdigest())
 
 
+@pytest.mark.heavy  # shells out to chipdb_builder, which invokes real gw_sh
 def test_chipdb_build_is_deterministic(gowinhome, tmp_path):
     """Two builds of the same device differ in nothing, not even the seed."""
     first = _build(gowinhome, tmp_path / 'a.msgpack.xz', '1')
@@ -73,6 +74,7 @@ def test_chipdb_build_is_deterministic(gowinhome, tmp_path):
     assert first == second, (first, second)
 
 
+@pytest.mark.heavy  # shells out to chipdb_builder, which invokes real gw_sh
 def test_chipdb_build_round_trips(gowinhome, tmp_path):
     """The canonicalised database still loads, with the same content."""
     out = tmp_path / 'c.msgpack.xz'

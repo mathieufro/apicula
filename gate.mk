@@ -1,9 +1,10 @@
-# The local blocking gate's single entry point (C8, D77, P0.T42).
-#
-# `pre-commit`, `pre-push` and a human/agent typing `make gate` all invoke
-# this same target -- there is exactly one definition of "green". Included
-# from the root Makefile (see the ifeq guard there for why this lives in a
-# separate file, F87).
+# The local gate's single entry point (C12, D94, D95; supersedes
+# C8/D75-D78's blocking pre-commit shape). `.githooks/pre-push` is the only
+# hook: task-branch pushes get no gate; a push to main/dev/integration/epic
+# spawns this gate detached at GATE_SCOPE=branch. A human/agent typing
+# `make gate` invokes this same target -- there is exactly one definition of
+# "green". Included from the root Makefile (see the ifeq guard there for why
+# this lives in a separate file, F87).
 
 include gate.env
 
@@ -25,38 +26,38 @@ PIPE_DOCS ?= $(WORKTREE_DIR)/.atelier/pipelines/$(PIPELINE_SLUG)
 FL_ROOT ?= $(abspath $(WORKTREE_DIR)/../../..)
 PYTHON ?= $(FL_ROOT)/vendor/venv/bin/python
 
-.PHONY: gate _gate-fast _gate-full _gate-all _gate-bogus
+.PHONY: gate _gate-fast _gate-branch _gate-full
 
 gate:
 	@case "$(GATE_SCOPE)" in \
-	  fast) $(MAKE) --no-print-directory _gate-fast ;; \
-	  full) $(MAKE) --no-print-directory _gate-full ;; \
-	  all)  $(MAKE) --no-print-directory _gate-all ;; \
-	  *) echo "GATE $(GATE_SCOPE): unknown GATE_SCOPE (legal: fast full all)"; exit 1 ;; \
+	  fast)   $(MAKE) --no-print-directory _gate-fast ;; \
+	  branch) $(MAKE) --no-print-directory _gate-branch ;; \
+	  full)   $(MAKE) --no-print-directory _gate-full ;; \
+	  *) echo "GATE $(GATE_SCOPE): unknown GATE_SCOPE (legal: fast branch full)"; exit 1 ;; \
 	esac
 
-# fast: unit tests (heavy/bitstream tests deselected), parser/error tests,
-# check_evidence.py, check_criteria.py --phase 0. Builds no bitstream.
-# Budget: ~90 s (design), 180 s hard cap (test_gate_fast_budget).
+# fast: unit tests ONLY -- every test that shells out to gw_sh, yosys,
+# nextpnr or gowin_pack, or reads a real .fs bitstream, is marked `heavy`
+# and deselected here (C12/D94: target < 30 s, measured in
+# test_gate_fast_budget). Builds no bitstream, touches no evidence.
 _gate-fast:
 	@echo "GATE fast: pytest -m 'not heavy and not gate_proof'"
 	@$(PYTHON) -m pytest tests -q -m "not heavy and not gate_proof" || { echo "GATE fast: pytest FAILED"; exit 1; }
-	@echo "GATE fast: check_evidence.py"
-	@$(PYTHON) $(OTC)/tools/check_evidence.py $(PIPE_DOCS)/spec-primitives.md $(OTC)/evidence || { echo "GATE fast: check_evidence.py FAILED"; exit 1; }
-	@echo "GATE fast: check_criteria.py --phase 0"
-	@$(PYTHON) $(OTC)/tools/check_criteria.py $(PIPE_DOCS)/spec-primitives.md $(OTC)/evidence --phase 0 || { echo "GATE fast: check_criteria.py FAILED"; exit 1; }
-	@echo "GATE fast: ok, 3 checks"
+	@echo "GATE fast: ok, 1 check"
 
-# full: fast, plus the heavy tests (unpack + cell-presence, smoke self-tests,
-# c2 round-trip, calibration -- the golden-netlist equivalence diffs for the
-# examples the branch touches).
-_gate-full: _gate-fast
+# branch: fast, plus evidence/criteria tools -- apicula owns none of those
+# (open-toolchain and the umbrella do, against the shared evidence store);
+# alias for fast (D94: "branch = fast + evidence/criteria tools
+# (open-toolchain/umbrella)"). This is the scope the detached pre-push gate
+# runs on main/dev/integration/epic pushes.
+_gate-branch: _gate-fast
+	@echo "GATE branch: no evidence/criteria tools owned by apicula -- ok, 1 check"
+
+# full: everything, including the heavy tests (unpack + cell-presence, smoke
+# self-tests, c2 round-trip, calibration -- the golden-netlist equivalence
+# diffs for the examples the branch touches). Orchestrator-only, run in the
+# foreground at phase close / pre-merge, never from a hook (C12).
+_gate-full: _gate-branch
 	@echo "GATE full: pytest -m 'heavy and not gate_proof'"
 	@$(PYTHON) -m pytest tests -q -m "heavy and not gate_proof" || { echo "GATE full: pytest heavy FAILED"; exit 1; }
-	@echo "GATE full: ok, 4 checks"
-
-# all: the whole suite -- the exact scope the CI mirror's body invokes
-# (D78). Phase 0 has one example (the smoke pair); later phases append
-# per-example checks here without adding a second entry point.
-_gate-all: _gate-full
-	@echo "GATE all: ok, 4 checks"
+	@echo "GATE full: ok, 2 checks"

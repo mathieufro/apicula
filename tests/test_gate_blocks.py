@@ -1,122 +1,103 @@
-"""`P0.T43` / `S23b` -- prove the local blocking gate actually blocks.
+"""`P0.T43` / `S23b` -- prove the local gate's push-time behaviour.
 
-A gate that runs and is ignored is indistinguishable in a log from a gate
-that blocks; these tests prove the difference. Everything happens against a
-throwaway clone under `$DATASTORE/gate-blocks/` and a local bare "remote"
-(`git init --bare`) -- never a `mathieufro` remote, never the real working
-repos. Real golden fixtures and hooks are never touched; only files inside
-the scratch clone are mutated, and every mutation is reverted in a
-`finally`.
+Owner ruling (C12/D94/D95, 2026-09-05): there is no pre-commit hook any
+more, and `.githooks/pre-push` never refuses a push -- it always exits 0.
+The old premise of this file (a blocking pre-commit and a blocking
+pre-push that refuse a real commit/push) is gone, and with it the old
+heavyweight machinery: `FAST_MUTATION_FILE`/`HEAVY_MUTATION_FILE` mutating
+real test files, a real yosys/nextpnr/gowin_pack build via `make all`,
+copying built chipdbs and symlinking a real `nextpnr` checkout into the
+scratch clone, and 1800 s subprocess timeouts sized for that real build.
 
-Exit status alone is not sufficient to prove a hook blocks (a hook whose
-failure is swallowed by a wrapper still returns non-zero while the ref
-moves anyway), so every assertion below also checks that the ref
-(`HEAD` for the commit case, the bare remote's branch tip for the push
-case) did **not** move on the red run, and **did** move on the green
-control.
+What actually needs proving now is much smaller, and is proven cheaply
+against a real scratch git clone + local bare "remote" with `make` stubbed
+on `PATH` (no real chipdb/nextpnr/yosys involved at all):
+
+  (a) pushing a task branch runs the gate ZERO times and the push succeeds
+      immediately (the ref moves) -- "task-branch push runs no gate".
+  (b) pushing a ref matching main/dev/integration/*/epic/* still lets the
+      push succeed immediately (pre-push always exits 0) AND spawns a
+      detached process that -- after a short poll, since the hook returns
+      before the background job necessarily finishes -- writes a
+      `<repo>-<branch>-<sha>.result` file under
+      `open-toolchain/evidence/_gates/` containing `PASS` -- "epic-branch
+      push spawns a detached gate that writes a marker".
+
+The stubbed `make` is a pure no-op that exits 0; per the real hook body
+(`.githooks/pre-push`), the *hook itself* -- not `make` -- redirects the
+outcome of `make -C "$root" gate GATE_SCOPE=branch` into the `.result`
+marker (`PASS` on a zero exit, `FAIL` otherwise), so a no-op stub is
+sufficient to prove the marker gets written.
+
+The old module-level `GATE_BLOCKS_NESTED` guard existed because a real
+`make gate` recursively re-ran `pytest tests`, including this file --
+unbounded recursion into the same scratch clone. With `make` stubbed to a
+no-op, nothing here ever re-invokes pytest, so that recursion hazard does
+not exist any more; the guard is dropped rather than carried forward as
+dead weight.
 """
 import os
 import shutil
 import subprocess
+import time
 
 import pytest
 
 from fuzz.gw5ast138c.harness import paths
 
+pytestmark = [
+    # Excluded from fast/full/all (gate.mk filters `gate_proof` out of every
+    # scope): each test here does a real `git push` through the real
+    # pre-push hook against a scratch clone -- not something an automatic
+    # scope should be doing on every run. Run explicitly:
+    # `pytest tests/test_gate_blocks.py -q -m gate_proof`.
+    pytest.mark.gate_proof,
+]
+
 DATASTORE = paths.datastore()
 SCRATCH_ROOT = os.path.join(DATASTORE, "gate-blocks")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Every commit/push this module makes in the scratch clone re-invokes the
-# gate hooks, which re-run `pytest tests` -- including this file. Without a
-# guard that is unbounded recursion into the *same* $DATASTORE/gate-blocks
-# scratch directory. `_HOOK_ENV` marks a subprocess as "already inside a
-# gate-blocks proof run" so the nested pytest collection skips this module
-# instead of recursing.
-_NESTED_MARKER = "GATE_BLOCKS_NESTED"
-pytestmark = [
-    # Excluded from fast/full/all (gate.mk filters `gate_proof` out of every
-    # scope) -- each test here does a real commit/push through the real
-    # gate, which recursively re-runs the gate; run explicitly instead.
-    pytest.mark.gate_proof,
-    pytest.mark.skipif(
-        os.environ.get(_NESTED_MARKER) == "1",
-        reason="nested invocation from inside a gate-blocks proof commit/push"),
-]
-
-# tests/test_calibration.py has a pre-existing failure unrelated to the gate
-# mechanism (evidence/calibration/runs.jsonl currently carries extra rows
-# from concurrent work on this branch, missing the keys those tests expect
-# -- not touched here, per the standing rule against fixing another task's
-# in-flight work). Excluded only inside this module's own disposable
-# scratch clone so the gate-blocks proof exercises the *mechanism*, not
-# today's unrelated flakiness elsewhere in the suite.
-_KNOWN_UNRELATED_RED = ("tests/test_calibration.py",)
-
-FAST_MUTATION_FILE = "tests/test_mask.py"
-FAST_MUTATION_OLD = "assert len(mask.entries) == 6, mask.ids"
-FAST_MUTATION_NEW = "assert len(mask.entries) == 999999, mask.ids"
-
-HEAVY_MUTATION_FILE = "tests/test_residual_decode.py"
-HEAVY_MUTATION_OLD = "def test_decode_check_c2_bitmap_roundtrip(tmp_path):"
-HEAVY_MUTATION_NEW = (
-    "def test_decode_check_c2_bitmap_roundtrip(tmp_path):\n"
-    "    assert False, 'P0.T43 deliberate mutation'"
-)
-
-
-# When this module runs from inside a git hook (its own real use case: the
-# pre-push that gates GATE_SCOPE=full), git has already exported
-# GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE for the repo performing that push
-# (the real apicula checkout). Every nested `git` call here inherits those
-# and resolves against the real repo instead of `cwd`, regardless of `-C`
-# or the cwd argument -- stripped unconditionally so every git subprocess
-# in this module is scoped to the directory it was actually given.
+# Env any nested `git` call in this module should use: if this pytest run
+# is itself happening inside a git hook (GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
+# exported by the outer git process), those must not leak into the git
+# subprocesses this module spawns against the *scratch* clone.
 _GIT_ENV = {k: v for k, v in os.environ.items()
             if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
-# Every commit/push this module makes carries the nested marker (see
-# _NESTED_MARKER above) on top of the cleaned git env.
-_HOOK_ENV = dict(_GIT_ENV, **{_NESTED_MARKER: "1"})
 
 
-def _run(cmd, cwd, env=None, timeout=1800):
-    # A push/commit here can trigger a real full-scope gate run (fast +
-    # heavy: a real yosys/nextpnr/gowin_pack build, several 34 MB bitstream
-    # reads) on a machine that may have other agents' gate runs competing
-    # for CPU at the same time -- generous on purpose, not tuned to the
-    # gate's own ~90 s design budget.
+def _run(cmd, cwd, env=None):
     return subprocess.run(cmd, cwd=cwd, env=(env or _GIT_ENV),
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=60)
 
 
 def _rev_parse(repo, ref="HEAD"):
     proc = _run(["git", "rev-parse", ref], repo)
-    if proc.returncode != 0:
-        return None
+    assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 
 
-def _log_shas(repo, ref="HEAD"):
-    proc = _run(["git", "log", "--format=%H", ref], repo)
-    return set(proc.stdout.split()) if proc.returncode == 0 else set()
+def _rev_parse_or_none(repo, ref):
+    """Like `_rev_parse`, but `None` if `ref` does not exist yet in `repo`
+    (a brand-new bare remote has no branches at all)."""
+    proc = _run(["git", "rev-parse", "--verify", ref], repo)
+    return proc.stdout.strip() if proc.returncode == 0 else None
 
 
-def _mutate(path, old, new):
-    text = open(path).read()
-    assert old in text, f"expected literal not found in {path}: {old!r}"
-    open(path, "w").write(text.replace(old, new, 1))
-
-
-def _restore(path, new, old):
-    text = open(path).read()
-    assert new in text, f"mutation to revert not found in {path}: {new!r}"
-    open(path, "w").write(text.replace(new, old, 1))
+def _wait_for(predicate, timeout=5, tick=0.1):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(tick)
+    return predicate()
 
 
 @pytest.fixture
 def scratch_clone():
     """A fresh clone of this repo's current branch, plus a local bare
-    "remote" -- never a mathieufro remote, never the working repos."""
+    "remote" and a stubbed `make` on `PATH` -- never a real remote, never a
+    real `make gate` invocation."""
     if os.path.isdir(SCRATCH_ROOT):
         shutil.rmtree(SCRATCH_ROOT)
     os.makedirs(SCRATCH_ROOT, exist_ok=True)
@@ -132,204 +113,133 @@ def scratch_clone():
                  clone], SCRATCH_ROOT)
     assert proc.returncode == 0, proc.stderr
 
-    # The built chipdbs (apycula/*.msgpack.xz) are gitignored build products
-    # (Makefile's `all:`), not tracked content -- a handful of fast tests
-    # resolve one from disk (openflow.resolve_chipdb() et al.) and fail on
-    # any repo checkout that lacks it, cloned or not. Copying the ones
-    # already built in REPO_ROOT is the fast-scope equivalent of running
-    # `make all` once; it reads REPO_ROOT, never writes to it.
-    src_chipdbs = os.path.join(REPO_ROOT, "apycula")
-    dst_chipdbs = os.path.join(clone, "apycula")
-    for name in os.listdir(src_chipdbs):
-        if name.endswith(".msgpack.xz"):
-            shutil.copyfile(os.path.join(src_chipdbs, name),
-                             os.path.join(dst_chipdbs, name))
-
-    # openflow.provenance()'s nextpnr_sha walks up from the apicula repo to
-    # a *sibling* `nextpnr` checkout (the real worktree layout); a symlink
-    # to the real one gives the clone the same layout without copying a
-    # second git repo.
-    real_nextpnr = os.path.join(os.path.dirname(REPO_ROOT), "nextpnr")
-    if os.path.isdir(real_nextpnr):
-        os.symlink(real_nextpnr, os.path.join(SCRATCH_ROOT, "nextpnr"))
-
-    proc = _run(["git", "config", "user.email", "gate-blocks@example.invalid"], clone)
-    proc = _run(["git", "config", "user.name", "gate-blocks"], clone)
-
-    # Drop the one file with a pre-existing, unrelated red (see module
-    # docstring/_KNOWN_UNRELATED_RED) from the clone *before* hooks are
-    # even configured, so this housekeeping commit is unaffected by the
-    # gate and the clone's baseline is genuinely green from here on.
-    for rel in _KNOWN_UNRELATED_RED:
-        path = os.path.join(clone, rel)
-        if os.path.exists(path):
-            os.remove(path)
-            _run(["git", "add", rel], clone)
-    status = _run(["git", "status", "--porcelain"], clone).stdout
-    if status.strip():
-        _run(["git", "commit", "-m", "gate-blocks scratch: drop known-unrelated-red file"],
-             clone)
-
+    _run(["git", "config", "user.email", "gate-blocks@example.invalid"], clone)
+    _run(["git", "config", "user.name", "gate-blocks"], clone)
     proc = _run(["git", "config", "core.hooksPath", ".githooks"], clone)
     assert proc.returncode == 0, proc.stderr
 
-    # `git clone <REPO_ROOT> <clone>` already points `origin` at REPO_ROOT
-    # (the real, checked-out working repo) -- `remote add` would no-op
-    # against an existing name, silently leaving pushes aimed at the real
-    # repo. `set-url` repoints the existing `origin` at the scratch bare
-    # remote instead, which is the only "remote" this module ever pushes to.
-    _run(["git", "remote", "set-url", "origin", bare], clone)
-    # Baseline push: already gated (core.hooksPath is set above), so this
-    # also exercises the gate for real, but it must carry the nested marker
-    # like every other commit/push below -- otherwise it recurses into a
-    # full pytest run that re-collects this very module.
-    proc = _run(["git", "push", "--quiet", "origin", f"HEAD:{branch}"], clone,
-                 env=_HOOK_ENV)
-    assert proc.returncode == 0, proc.stderr
+    # `git clone` clones committed history, not the working tree -- this
+    # module means to prove the hook file as it stands on disk right now
+    # (which may be an uncommitted edit, per the standing convention of
+    # landing hook changes in the same commit as the code they gate), so
+    # the clone's `.githooks/` is replaced with the real working tree's
+    # copy rather than whatever the last commit carried.
+    real_hooks = os.path.join(REPO_ROOT, ".githooks")
+    clone_hooks = os.path.join(clone, ".githooks")
+    shutil.rmtree(clone_hooks, ignore_errors=True)
+    shutil.copytree(real_hooks, clone_hooks)
 
-    yield {"clone": clone, "bare": bare, "branch": branch}
+    # `git clone <REPO_ROOT> <clone>` already points `origin` at REPO_ROOT;
+    # repoint it at the scratch bare remote, the only "remote" this module
+    # ever pushes to.
+    _run(["git", "remote", "set-url", "origin", bare], clone)
+
+    # A stubbed `make` that never builds or re-runs pytest: `git gate` (via
+    # the hook) is a no-op that exits 0 and logs its argv, so the hook's own
+    # `.result` marker logic gets exercised without any real toolchain work.
+    stub_dir = os.path.join(SCRATCH_ROOT, "bin")
+    os.makedirs(stub_dir, exist_ok=True)
+    calls_log = os.path.join(SCRATCH_ROOT, "make-calls.log")
+    stub_make = os.path.join(stub_dir, "make")
+    with open(stub_make, "w") as fh:
+        fh.write(f'#!/bin/sh\necho "$@" >> {calls_log}\nexit 0\n')
+    os.chmod(stub_make, 0o755)
+
+    env = dict(_GIT_ENV)
+    env["PATH"] = f"{stub_dir}:{env['PATH']}"
+
+    yield {"clone": clone, "bare": bare, "branch": branch, "env": env,
+           "calls_log": calls_log}
 
     shutil.rmtree(SCRATCH_ROOT, ignore_errors=True)
 
 
-def test_gate_blocks_a_failing_commit(scratch_clone):
-    """A fast-scope failure refuses `git commit`; HEAD does not move."""
-    clone = scratch_clone["clone"]
-    path = os.path.join(clone, FAST_MUTATION_FILE)
-    before = _rev_parse(clone)
-    before_log = _log_shas(clone)
-
-    _mutate(path, FAST_MUTATION_OLD, FAST_MUTATION_NEW)
-    try:
-        _run(["git", "add", FAST_MUTATION_FILE], clone)
-        proc = _run(["git", "commit", "-m", "P0.T43 deliberate red commit"],
-                     clone, env=_HOOK_ENV)
-
-        assert proc.returncode != 0, (
-            f"commit should have been refused; stdout={proc.stdout!r} "
-            f"stderr={proc.stderr!r}")
-        combined = proc.stdout + proc.stderr
-        assert "GATE" in combined and "FAILED" in combined, combined
-
-        after = _rev_parse(clone)
-        after_log = _log_shas(clone)
-        assert after == before, "HEAD moved on a refused commit"
-        assert after_log == before_log, (
-            "a new commit object landed on HEAD despite the refusal")
-    finally:
-        _restore(path, FAST_MUTATION_NEW, FAST_MUTATION_OLD)
-        _run(["git", "checkout", "--", FAST_MUTATION_FILE], clone)
+def _gate_evidence_dir(clone):
+    """Mirrors the hook's own OTC resolution: `$root/../open-toolchain` if
+    it exists, else `$root/open-toolchain`. The scratch clone's parent
+    (a throwaway tmp dir) never has an `open-toolchain` sibling, so this
+    always resolves to the fallback, entirely inside the scratch clone."""
+    return os.path.join(clone, "open-toolchain", "evidence", "_gates")
 
 
-def test_gate_allows_a_green_commit(scratch_clone):
-    """Negative control: an unmutated commit succeeds and HEAD moves."""
-    clone = scratch_clone["clone"]
-    before = _rev_parse(clone)
+def test_task_branch_push_runs_no_gate(scratch_clone):
+    """A task-branch push -- a ref that matches none of
+    main/dev/integration/*/epic/* -- never invokes `make` and the push
+    succeeds immediately.
 
-    marker = os.path.join(clone, "GATE_BLOCKS_PROOF.md")
-    with open(marker, "w") as fh:
-        fh.write("P0.T43 green commit control\n")
-    _run(["git", "add", "GATE_BLOCKS_PROOF.md"], clone)
-    proc = _run(["git", "commit", "-m", "P0.T43 deliberate green commit"],
-                 clone, env=_HOOK_ENV)
-
-    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    after = _rev_parse(clone)
-    assert after != before, "HEAD did not move on a green commit"
-
-
-def test_gate_blocks_would_fail_without_hooks(scratch_clone):
-    """Meta-assertion: with core.hooksPath unset, the same red commit lands.
-
-    Proves `test_gate_blocks_a_failing_commit` is sensitive to the hook,
-    not to some other failure (e.g. a syntax error aborting `git commit`
-    itself regardless of hooks).
-    """
-    clone = scratch_clone["clone"]
-    path = os.path.join(clone, FAST_MUTATION_FILE)
-    _run(["git", "config", "--unset", "core.hooksPath"], clone)
-    before = _rev_parse(clone)
-
-    _mutate(path, FAST_MUTATION_OLD, FAST_MUTATION_NEW)
-    try:
-        _run(["git", "add", FAST_MUTATION_FILE], clone)
-        proc = _run(["git", "commit", "-m", "P0.T43 hookless red commit"],
-                     clone, env=_HOOK_ENV)
-
-        assert proc.returncode == 0, (
-            "commit should have landed with no hook installed: "
-            f"stdout={proc.stdout!r} stderr={proc.stderr!r}")
-        after = _rev_parse(clone)
-        assert after != before, "HEAD should have moved with no hook installed"
-    finally:
-        _run(["git", "config", "core.hooksPath", ".githooks"], clone)
-
-
-def test_gate_blocks_a_failing_push(scratch_clone):
-    """A full-scope failure refuses `git push`; the remote ref does not move.
-
-    The mutation is heavy-scope-only, so the fast-scope pre-commit hook
-    does not catch it -- the commit lands locally, exactly demonstrating
-    why pre-push exists.
-    """
+    Deliberately NOT `scratch_clone["branch"]` (the real ambient branch this
+    suite happens to run from): when this module itself runs from a
+    checkout of `epic/gw5ast138c` (e.g. right after landing this change on
+    the epic tip), that ambient branch name matches `epic/*` and would
+    make this "task branch" case gate for real -- exactly the false
+    negative a hardcoded, always-task-shaped ref name avoids."""
     clone = scratch_clone["clone"]
     bare = scratch_clone["bare"]
-    branch = scratch_clone["branch"]
-    path = os.path.join(clone, HEAVY_MUTATION_FILE)
+    branch = "clocking/gate-blocks-task-proof"
+    env = scratch_clone["env"]
+    calls_log = scratch_clone["calls_log"]
 
-    before_remote = _rev_parse(bare, branch)
+    before_remote = _rev_parse_or_none(bare, branch)
 
-    _mutate(path, HEAVY_MUTATION_OLD, HEAVY_MUTATION_NEW)
-    committed = False
-    try:
-        _run(["git", "add", HEAVY_MUTATION_FILE], clone)
-        commit_proc = _run(
-            ["git", "commit", "-m", "P0.T43 deliberate heavy-red commit"],
-            clone, env=_HOOK_ENV)
-        assert commit_proc.returncode == 0, (
-            "the heavy-only mutation should pass the fast-scope pre-commit "
-            f"hook: stdout={commit_proc.stdout!r} stderr={commit_proc.stderr!r}")
-        committed = True
-
-        push_proc = _run(["git", "push", "origin", f"HEAD:{branch}"], clone,
-                          env=_HOOK_ENV)
-
-        assert push_proc.returncode != 0, (
-            f"push should have been refused; stdout={push_proc.stdout!r} "
-            f"stderr={push_proc.stderr!r}")
-        combined = push_proc.stdout + push_proc.stderr
-        assert "GATE" in combined and "FAILED" in combined, combined
-
-        after_remote = _rev_parse(bare, branch)
-        assert after_remote == before_remote, "the bare remote's ref moved on a refused push"
-    finally:
-        if committed:
-            _run(["git", "reset", "--hard", "HEAD~1"], clone)
-        if os.path.exists(path) and HEAVY_MUTATION_NEW in open(path).read():
-            _restore(path, HEAVY_MUTATION_NEW, HEAVY_MUTATION_OLD)
-        _run(["git", "checkout", "--", HEAVY_MUTATION_FILE], clone)
-
-
-def test_gate_allows_a_green_push(scratch_clone):
-    """Negative control: an unmutated push succeeds and the ref moves."""
-    clone = scratch_clone["clone"]
-    bare = scratch_clone["bare"]
-    branch = scratch_clone["branch"]
-    before_remote = _rev_parse(bare, branch)
-
-    marker = os.path.join(clone, "GATE_BLOCKS_PUSH_PROOF.md")
+    marker = os.path.join(clone, "GATE_BLOCKS_TASK_PROOF.md")
     with open(marker, "w") as fh:
-        fh.write("P0.T43 green push control\n")
-    _run(["git", "add", "GATE_BLOCKS_PUSH_PROOF.md"], clone)
-    commit_proc = _run(
-        ["git", "commit", "-m", "P0.T43 deliberate green push"], clone,
-        env=_HOOK_ENV)
+        fh.write("task-branch push proof\n")
+    _run(["git", "add", "GATE_BLOCKS_TASK_PROOF.md"], clone)
+    commit_proc = _run(["git", "commit", "-m", "gate-blocks: task push"],
+                        clone, env=env)
     assert commit_proc.returncode == 0, commit_proc.stderr
 
-    push_proc = _run(["git", "push", "origin", f"HEAD:{branch}"], clone,
-                      env=_HOOK_ENV)
+    push_proc = _run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], clone,
+                      env=env)
     assert push_proc.returncode == 0, (
         f"stdout={push_proc.stdout!r} stderr={push_proc.stderr!r}")
 
     after_remote = _rev_parse(bare, branch)
-    assert after_remote != before_remote, "the bare remote's ref did not move on a green push"
+    assert after_remote != before_remote, "the ref did not move on a task-branch push"
+
+    # No gate was ever spawned: give a slow/backgrounded invocation a brief
+    # window to appear, then assert it never did.
+    appeared = _wait_for(lambda: os.path.isfile(calls_log), timeout=2)
+    assert not appeared, (
+        "make was invoked for a task-branch push: "
+        + (open(calls_log).read() if os.path.isfile(calls_log) else ""))
+
+
+def test_epic_branch_push_spawns_detached_gate(scratch_clone):
+    """A push to an `epic/*` ref succeeds immediately (pre-push always
+    exits 0) and spawns a detached gate that writes a PASS marker."""
+    clone = scratch_clone["clone"]
+    bare = scratch_clone["bare"]
+    env = scratch_clone["env"]
+    epic_ref = "epic/gate-blocks-proof"
+
+    before_remote = _rev_parse_or_none(bare, epic_ref)
+
+    marker = os.path.join(clone, "GATE_BLOCKS_EPIC_PROOF.md")
+    with open(marker, "w") as fh:
+        fh.write("epic-branch push proof\n")
+    _run(["git", "add", "GATE_BLOCKS_EPIC_PROOF.md"], clone)
+    commit_proc = _run(["git", "commit", "-m", "gate-blocks: epic push"],
+                        clone, env=env)
+    assert commit_proc.returncode == 0, commit_proc.stderr
+    # The hook computes `git rev-parse --short HEAD` itself, inside the
+    # pushed repo, at push time -- match its exact abbreviation length
+    # rather than assuming 7 (git widens it under sha collisions).
+    short_sha = _run(["git", "rev-parse", "--short", "HEAD"], clone).stdout.strip()
+
+    push_proc = _run(["git", "push", "origin", f"HEAD:refs/heads/{epic_ref}"],
+                      clone, env=env)
+    assert push_proc.returncode == 0, (
+        f"stdout={push_proc.stdout!r} stderr={push_proc.stderr!r}")
+
+    after_remote = _rev_parse(bare, epic_ref)
+    assert after_remote != before_remote, "the ref did not move on an epic-branch push"
+
+    repo = os.path.basename(clone)
+    safe_ref = epic_ref.replace("/", "-")
+    result_path = os.path.join(
+        _gate_evidence_dir(clone), f"{repo}-{safe_ref}-{short_sha}.result")
+
+    got = _wait_for(lambda: os.path.isfile(result_path), timeout=5)
+    assert got, f"no .result marker appeared at {result_path}"
+    assert open(result_path).read().strip() == "PASS", open(result_path).read()

@@ -92,6 +92,7 @@ def _seed_row(rows_path, run_id, verdict="ok"):
 # --------------------------------------------------------------------------
 # 1. watchdog: armed + one terminal line, and the interval floor
 # --------------------------------------------------------------------------
+@pytest.mark.heavy  # slow: real sleeping subprocess + watchdog poll interval, not toolchain
 def test_batch_watchdog_emits_armed_and_terminal(tmp_path):
     # A 10-second expected duration: stall = 10s/10 = 1s -> floored at 5 min.
     stall_min, poll_s = batch.watchdog_intervals(10)
@@ -163,6 +164,7 @@ def test_batch_resume_skips_terminal_rows(tmp_path):
     assert len(batch.load_rows(paths["rows"])) == 5
 
 
+@pytest.mark.heavy  # slow: real sleeping subprocess + kill/resume timing, not toolchain
 def test_batch_resume_after_kill_midway(tmp_path):
     """Kill a real detached batch mid-way, then resume with the SAME command.
 
@@ -212,6 +214,7 @@ def test_batch_resume_after_kill_midway(tmp_path):
 # --------------------------------------------------------------------------
 # 4. watchdog: a death without the marker
 # --------------------------------------------------------------------------
+@pytest.mark.heavy  # slow: real sleeping subprocess + watchdog poll interval, not toolchain
 def test_batch_watchdog_detects_death(tmp_path):
     proc, paths = _arm_watchdog(tmp_path, "wd-dead", 5, 100)
     fake = _fake_batch(paths, seconds=30, complete=False)

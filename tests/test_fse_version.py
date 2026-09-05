@@ -149,6 +149,9 @@ NARROW_LONGFUSE_VERSIONS = [
 ]
 
 
+# Parses a full real vendor .fse device file each parametrize case (~5s) --
+# heavy per C12/D94 (a real vendor archive read, same spirit as a real .fs).
+@pytest.mark.heavy
 @pytest.mark.parametrize('ide_version,shape_set', NARROW_LONGFUSE_VERSIONS)
 def test_fse_version_longfuse_width_is_derived(monkeypatch, archived_device_file,
                                                ide_version, shape_set):
@@ -192,6 +195,7 @@ def test_fse_version_longfuse_width_is_derived(monkeypatch, archived_device_file
         assert not derived or used in derived, (hex(data_start), derived, used)
 
 
+@pytest.mark.heavy  # parses the full real vendor .fse (~5s); C12/D94
 def test_fse_version_first_desync_offset_passed(monkeypatch):
     """Parsing runs past the historical desync without an `FseShapeError`."""
     tiles, end, _seen = _parse_selected_fse(monkeypatch)
