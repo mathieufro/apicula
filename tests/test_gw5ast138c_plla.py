@@ -302,3 +302,144 @@ def test_permitted_pll_freqs_138c_does_not_hit_the_base_stub():
     assert 'get_permitted_pll_freqs' in vars(gowin_pack.GW5AST_138C), (
         'GW5AST_138C inherits get_permitted_pll_freqs; instantiating a PLLA '
         'reaches the base stub raise')
+
+
+# ---------------------------------------------------------------- P1.T21
+#
+# NOTE ON FILE PLACEMENT: `blueprints/P1-clocking.md` names
+# `tests/test_gw5ast138c_clocking.py` for these two tests.  That file is
+# already created, on `clocking/gw5a-hclk-6block`, by `P1.T07`/`T08b`/`T11`.
+# Creating it independently here would be an add/add merge conflict on the
+# integration branch for no gain, so the two blueprint-named tests live in
+# this branch's own PLL test file instead.  The test NAMES -- which is what
+# the task's Done-when quotes -- are exactly as the blueprint spells them.
+
+#: The shipped example operating point, `examples/gw5a/clock-PLLA.v` with the
+#: `pll/` defines, and the point `shapes/clocking_pll_trace.py` runs on the
+#: oracle: FCLKIN 50 MHz, IDIV 1, FBDIV 1, MDIV 16, ODIV0 8.
+ISSUE427_TRIPLE = dict(fclkin=50.0, idiv=1, fbdiv=1, mdiv=16, odiv=8)
+
+#: Hand-computed from `UG306-1.0.9E` section 5.1 for that point:
+#:   Fpfd   = 50 / 1       =  50.0 MHz
+#:   Fclkfb = 50 * 1       =  50.0 MHz
+#:   Fvco   = 50 * 16      = 800.0 MHz
+#:   Fclkout0 = 800 / 8    = 100.0 MHz
+ISSUE427_EXPECTED = (50.0, 50.0, 800.0, 100.0)
+
+#: `P1.T20` five-tuple positions 4 and 3.
+FVCO_MIN_138C, FVCO_MAX_138C = 650.0, 1300.0
+
+
+class _Bare138C(gowin_pack.GW5AST_138C):
+    """`GW5AST_138C` with the heavyweight `Device.__init__` bypassed.
+
+    `check_pll_fvco` and `compute_pll_fvco` read nothing but
+    `get_permitted_pll_freqs()`, so this exercises the real methods on the
+    real class without needing a chipdb or a placed netlist.
+    """
+
+    def __init__(self):  # noqa: D107 - deliberately does not call super()
+        pass
+
+
+def test_pll_fvco_issue427_regression():
+    """apicula #427: the GW5A PLL/PLLA VCO formula, in both emitters.
+
+    Reverting the `gowin_pll.py` hunk (the `GW5A-25 ES` entry going back to
+    `pll_name: rPLL` and `plla_freqs`/`solve_plla` disappearing) makes this
+    test fail: `gowin_pll.plla_freqs` no longer exists and the entry no longer
+    declares `pll_kind`.
+    """
+    from apycula import gowin_pll
+
+    # 1. The formula itself, against the hand-computed datasheet value.
+    pfd, fclkfb, fvco, clkout = gowin_pll.plla_freqs(**ISSUE427_TRIPLE)
+    for got, want, what in zip((pfd, fclkfb, fvco, clkout), ISSUE427_EXPECTED,
+                               ('Fpfd', 'Fclkfb', 'Fvco', 'Fclkout0')):
+        assert abs(got - want) < 1e-6, f'{what}: {got} != {want}'
+
+    # 2. It lies inside the 138C VCO band.
+    assert FVCO_MIN_138C <= fvco <= FVCO_MAX_138C
+
+    # 3. The packer computes the identical VCO -- zero differing values
+    #    between the two places apicula derives a GW5A VCO frequency.  This is
+    #    the drift that let #427 exist in one of them and not the other.
+    packer_fvco = _Bare138C().compute_pll_fvco(
+        ISSUE427_TRIPLE['fclkin'], ISSUE427_TRIPLE['idiv'],
+        ISSUE427_TRIPLE['fbdiv'], ISSUE427_TRIPLE['mdiv'])
+    assert abs(packer_fvco - fvco) < 1e-6
+
+    # 4. The generator now knows the GW5A-25 is a PLLA part, not an rPLL one.
+    #    This is the #427 root cause: an rPLL entry meant the emitted design
+    #    used minus-one-encoded dividers, no MDIV at all, and solved
+    #    VCO = CLKOUT*ODIV on a part where CLKOUT = VCO/ODIV.
+    entry = _gw5a_25_pll_entry()
+    assert entry['pll_name'] == 'PLLA'
+    assert entry.get('pll_kind') == 'PLLA'
+
+    # 5. End to end: asking for 100 MHz out of 50 MHz in yields a setup whose
+    #    own numbers close under the PLLA formula.
+    setup = gowin_pll.solve_plla(entry, 50.0, 100.0)
+    assert setup, 'solve_plla found no setup for 50 MHz -> 100 MHz'
+    _, _, s_fvco, s_clkout = gowin_pll.plla_freqs(
+        50.0, setup['IDIV_SEL'], setup['FBDIV_SEL'],
+        setup['MDIV_SEL'], setup['ODIV0_SEL'])
+    assert abs(s_clkout - 100.0) < 1e-6
+    assert abs(s_fvco - setup['VCO']) < 1e-6
+    assert entry['vco_min'] <= s_fvco <= entry['vco_max']
+
+
+def _gw5a_25_pll_entry():
+    """The `GW5A-25 ES` row of `gowin_pll.main`'s `device_limits` literal.
+
+    `device_limits` is a local of `main()`, so it is read out of the function's
+    constants rather than re-typed here -- a copy would not notice a revert.
+    """
+    import ast
+    import inspect
+    from apycula import gowin_pll
+
+    tree = ast.parse(inspect.getsource(gowin_pll.main))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == 'device_limits'):
+            table = ast.literal_eval(node.value)
+            return table['GW5A-25 ES']
+    raise AssertionError('device_limits not found in gowin_pll.main')
+
+
+def test_pll_fvco_out_of_band_is_rejected():
+    """The 138C VCO band check, exact text, inclusive at both ends."""
+    dev = _Bare138C()
+
+    with pytest.raises(Exception) as exc:
+        dev.check_pll_fvco(649.0)
+    assert str(exc.value) == (
+        'FVCO 649.0 MHz is outside the GW5AST-138C permitted range '
+        '[650.0, 1300.0] MHz')
+
+    # Inclusive at both ends: 650.0 and 1300.0 are attainable values.
+    dev.check_pll_fvco(650.0)
+    dev.check_pll_fvco(1300.0)
+
+    with pytest.raises(Exception) as exc:
+        dev.check_pll_fvco(1300.5)
+    assert str(exc.value) == (
+        'FVCO 1300.5 MHz is outside the GW5AST-138C permitted range '
+        '[650.0, 1300.0] MHz')
+
+
+def test_pll_fclkin_check_untouched():
+    """`P1.T21` must not disturb the base-class FCLKIN range check."""
+    import inspect
+    src = inspect.getsource(gowin_pack.Device.get_pll_attrvals)
+    assert ('raise Exception(f"The {fclkin}MHz frequency is outside the '
+            'permissible range of 3-{permitted_freqs[0]}MHz.")') in src
+
+
+def test_pll_rpll_generator_path_unchanged():
+    """The rPLL/PLLVR half of `gowin_pll` keeps its exact old algebra."""
+    from apycula import gowin_pll
+    pfd, clkout, vco = gowin_pll.rpll_freqs(27.0, 0, 3, 16)
+    assert (pfd, clkout, vco) == (27.0, 108.0, 1728.0)
