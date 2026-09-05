@@ -209,3 +209,37 @@ def test_evidence_gitignore_denies_binaries():
                               os.path.join(ev, "chipdb", "summary.md")],
                              capture_output=True, env=env)
     assert allowed.returncode != 0
+
+
+def test_every_row_states_that_the_timing_model_is_unverified():
+    """`D91`: a row never reports a timing number as if the model were verified.
+
+    The `S17a` tables are conservative in aggregate and optimistic per class
+    (every DFF `CLK->Q` arc modelled 16% fast, 825 SDF arcs with no model arc
+    at all), so the token is on every row rather than on the ones a reader
+    happens to recognise as timing rows.
+    """
+    row = evidence.new_row(run_id="t-0001", level="E1", verdict="ok",
+                           primitive="P1", shape="A")
+    assert evidence.TIMING_MODEL_TOKEN in row["notes"]
+
+    kept = evidence.new_row(run_id="t-0002", level="E1", verdict="ok",
+                            notes="measured on the smoke pair")
+    assert kept["notes"].startswith("measured on the smoke pair")
+    assert evidence.TIMING_MODEL_TOKEN in kept["notes"]
+
+    once = evidence.new_row(run_id="t-0003", level="E1", verdict="ok",
+                            notes=f"already said {evidence.TIMING_MODEL_TOKEN}")
+    assert once["notes"].count(evidence.TIMING_MODEL_TOKEN) == 1
+
+
+def test_fmax_line_states_that_the_timing_model_is_unverified(capsys):
+    """`D91`: the `FMAX` line carries it too, where the number is read."""
+    from fuzz.gw5ast138c.harness import openflow
+
+    log = "Info: Max frequency for clock 'clk': 300.00 MHz (PASS at 250.00 MHz)"
+    entries = openflow.parse_fmax(log)
+    assert entries and entries[0]["mhz"] == 300.0
+    import inspect
+    source = inspect.getsource(openflow.main)
+    assert "evidence.TIMING_MODEL_TOKEN" in source

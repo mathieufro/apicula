@@ -11,7 +11,7 @@ count appears anywhere else.  (An earlier "27" in one blueprint contradicted
 the 29-name list in §6; one constant is what stops that drifting again.)
 
 Artefact **paths** in a row are absolute paths into the data store
-`/Users/alex/fine-line-data/open-toolchain-gw5ast/`, each with a recorded
+the data store `harness.paths.datastore()` names, each with a recorded
 sha256; the committed `$OTC/evidence/` tree carries text only (`D41`), which
 `.gitignore` (written by `ensure_tree`) enforces deny-by-default.
 
@@ -74,7 +74,12 @@ LEVELS = ("E0", "E1", "E2")
 VERDICTS = ("ok", "diff", "aborted", "refused")
 DIFF_COUNT_KEYS = ("cells", "attrs", "conns", "pips")
 DECODE_KEYS = ("c1", "c2")
-DECODE_VALUES = ("ok", "mismatch")
+#: `n/a` is the recorded truth for a row the decode check was never run for
+#: -- the `D26` budget-measurement calibration rows -- and is spelled here,
+#: once, because this tuple is the single owner of the vocabulary the gate's
+#: `check_evidence.py` validates against.  It is not a pass: a row carrying it
+#: claims no decode check, and `S6b` cannot be closed from one.
+DECODE_VALUES = ("ok", "mismatch", "n/a")
 
 DEVICE = "GW5AST-138C"
 PART = "GW5AST-LV138PG484AC1/I0, device_version C"
@@ -85,6 +90,17 @@ PART = "GW5AST-LV138PG484AC1/I0, device_version C"
 #: Phase 0 writes no such row; the writer supports and validates the shape
 #: because Phases 2-5b do.
 HW_PENDING_TOKEN = "E0+hw-pending"
+
+#: Every row carries this, because the `S17a` timing tables are not a
+#: conservative bound: they are conservative in aggregate (median ratio 0.787)
+#: and **optimistic per class** -- every DFF `CLK->Q` arc is 0.289 ns modelled
+#: against 0.344 ns measured, with zero spread, and 825 SDF arcs (LUT1-3, IO,
+#: OBUF) have no model arc at all, contributing zero.  A path is the sum of
+#: its arcs, so aggregate pessimism does not compose.  Until Phase 6 / `S17b`
+#: re-identifies the grade against the SDF medians, no Fmax number produced
+#: anywhere in this harness is a verified one, and the row says so rather than
+#: leaving a reader to infer it (`D1`, `D91`).
+TIMING_MODEL_TOKEN = "timing_model=unverified"
 
 #: The evidence tree's slug directories, fixed for Phase 0.
 SLUGS = ("calibration", "chipdb", "e2e-p0", "harness-selftest",
@@ -184,12 +200,23 @@ def _default(field):
     return None
 
 
+def _with_timing_model(fields):
+    """`notes` always states that the timing model is unverified (`D91`)."""
+    notes = str(fields.get("notes") or "")
+    if TIMING_MODEL_TOKEN in notes:
+        return fields
+    out = dict(fields)
+    out["notes"] = f"{notes} | {TIMING_MODEL_TOKEN}".strip(" |")
+    return out
+
+
 def new_row(**fields):
     """A row carrying exactly `REQUIRED_FIELDS`, defaults where unset.
 
     Unknown keys are a programming error, not a silent extra column: the row
     is exactly the 29 names or it is not a row.
     """
+    fields = _with_timing_model(fields)
     unknown = sorted(set(fields) - set(REQUIRED_FIELDS))
     if unknown:
         raise EvidenceSchemaError(
@@ -305,11 +332,14 @@ def validate_row(row):
             "justified residual) or the raw residual map (D35)")
 
     notes = str(row["notes"] or "")
-    if row["level"] == "E0" and not notes.strip():
+    # Tokens every row carries say nothing about *this* row, so they never
+    # satisfy a requirement that the row say something.
+    said = notes.replace(TIMING_MODEL_TOKEN, "").strip(" |").strip()
+    if row["level"] == "E0" and not said:
         raise EvidenceSchemaError(
             "notes is required when level == 'E0' (say why E1 was "
             "unavailable)")
-    if row["verdict"] == "refused" and not notes.strip():
+    if row["verdict"] == "refused" and not said:
         raise EvidenceSchemaError(
             "verdict 'refused' must record the exact packer error text in "
             "notes (D30)")
@@ -318,7 +348,7 @@ def validate_row(row):
             raise EvidenceSchemaError(
                 f"{HW_PENDING_TOKEN} requires level 'E0' and verdict 'ok', "
                 f"got {row['level']!r}/{row['verdict']!r}")
-        if not notes.replace(HW_PENDING_TOKEN, "").strip():
+        if not said.replace(HW_PENDING_TOKEN, "").strip():
             raise EvidenceSchemaError(
                 f"{HW_PENDING_TOKEN} must name the hardware observation still "
                 "owed, plus the reason E1 was unavailable")
@@ -371,7 +401,7 @@ def read_rows(path):
 #: last and cannot be re-allowed by an earlier negation.
 GITIGNORE = """\
 # Evidence tree: deny by default, allow text only (`D41`, P0.T28).
-# Binaries live in /Users/alex/fine-line-data/open-toolchain-gw5ast/ and are
+# Binaries live in the data store (`harness.paths.datastore()`) and are
 # referenced from a row by absolute path plus sha256 -- never committed here.
 # git takes the WHOLE line as the pattern, so every justification is its own
 # comment line, never a trailing one.
