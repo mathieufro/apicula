@@ -1223,8 +1223,17 @@ def gw5_hclk_idx(dev, device, row, col):
 def gw5_hclk_wire_offset(device):
     return {'GW5A-25A': 187, 'GW5AST-138C': 187}[device]
 
+# The inter-HCLK wires occupy the band range(offset, offset + 4 * N) of the
+# same table 48 (see gw5_hclk_wire_offset above), so N is fixed by the highest
+# inter-HCLK source id that any HCLK cell's table 48 mentions:
+#     N = (max_inter_hclk_srcid - offset + 1) // 4
+# GW5AST-138C: max srcid 338 -> (338 - 187 + 1) // 4 == 38.
+# GW5A-25A:    max srcid 446 -> (446 - 187 + 1) // 4 == 65, which reproduces
+# the in-tree value with no residue, so the derivation is calibrated.
+# Measured in $OTC/evidence/hclk/topology-138c.md (P1.T04), sections 4 and 5.
+# No .get() default: a device nobody has measured must still raise.
 def gw5_ihclk_wire_num(device):
-    return {'GW5A-25A': 65}[device]
+    return {'GW5A-25A': 65, 'GW5AST-138C': 38}[device]
 
 def gw5_get_num_of_hclks(device):
     if device == 'GW5A-25A':
