@@ -13,6 +13,7 @@ import struct
 import pytest
 
 from apycula import fse_parser
+from fuzz.gw5ast138c.harness import paths
 
 
 def _u32(v):
@@ -48,12 +49,10 @@ def _mutated_longfuse_stream():
 # resolves the install itself so `pytest -k fse_version` needs no environment.
 # P0.T12: the live pipeline tree is the umbrella *worktree* copy; the main
 # checkout carries only `impl/`. Both are tried, worktree first.
+#: The recorded selection lives in the evidence tree, wherever that is
+#: checked out (`$OTC_EVIDENCE`, else the sibling `open-toolchain` checkout).
 SELECTED = (
-    '/Users/alex/fine-line/.atelier/worktrees/'
-    '2026-09-03-open-toolchain-gw5ast-7e84/.atelier/pipelines/'
-    '2026-09-03-open-toolchain-gw5ast-7e84/evidence/_runs/gowinhome.selected',
-    '/Users/alex/fine-line/.atelier/pipelines/'
-    '2026-09-03-open-toolchain-gw5ast-7e84/evidence/_runs/gowinhome.selected',
+    os.path.join(paths.otc_evidence(), '_runs', 'gowinhome.selected'),
 )
 
 
@@ -232,3 +231,34 @@ def test_fse_version_select_shapes_four_part_vs_three_part_threshold():
     assert fse_parser._version_tuple('1.9.10.99') == (1, 9, 10, 99)
     name, _shapes = fse_parser.select_shapes('1.9.10.99')
     assert name == 'v1_9_10'
+
+
+def test_fse_version_undetectable_raises_instead_of_falling_back(monkeypatch,
+                                                                 tmp_path):
+    """An undetectable IDE version is loud, never a silent shape-set default.
+
+    `_active_shapes()` used to swallow `FseVersionError` and parse on with the
+    pre-1.9.11 widths under `ide_version="unknown"` -- so a 5-series `.fse`
+    from an install whose release notes are missing was read through the wrong
+    row widths, and the error that eventually surfaced named the version as
+    the one thing it could not name.
+    """
+    monkeypatch.delenv("GOWIN_IDE_VERSION", raising=False)
+    monkeypatch.setenv("GOWINHOME", str(tmp_path))
+    with pytest.raises(fse_parser.FseVersionError) as err:
+        fse_parser._active_shapes()
+    assert "GOWIN_IDE_VERSION" in str(err.value)
+    assert str(tmp_path) in str(err.value)
+
+    monkeypatch.delenv("GOWINHOME", raising=False)
+    with pytest.raises(fse_parser.FseVersionError):
+        fse_parser._active_shapes()
+
+
+def test_fse_version_override_is_still_honoured(monkeypatch, tmp_path):
+    """`GOWIN_IDE_VERSION` remains the documented way past a missing install."""
+    monkeypatch.setenv("GOWINHOME", str(tmp_path))
+    monkeypatch.setenv("GOWIN_IDE_VERSION", "1.9.11.03")
+    ide_version, shape_set, shapes = fse_parser._active_shapes()
+    assert (ide_version, shape_set) == ("1.9.11.03", "v1_9_11plus")
+    assert shapes is fse_parser.TABLE_SHAPES["v1_9_11plus"]

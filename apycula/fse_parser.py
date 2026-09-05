@@ -149,14 +149,15 @@ def select_shapes(ide_version: str) -> tuple[str, dict[str, int]]:
 def _active_shapes() -> tuple[str, str, dict[str, int]]:
     """(ide_version, shape_set_name, shapes) for the current environment.
 
-    Version detection is best-effort: a missing or unreadable install must not
-    stop a parse that would otherwise have worked, so it degrades to the
-    default shape set and reports ``unknown`` in any diagnostic.
+    Version detection is **not** best-effort.  The table row widths changed
+    between 1.9.10 and 1.9.11, so an undetectable version does not mean "parse
+    with the old widths and hope": it means a 5-series ``.fse`` would be read
+    through pre-1.9.11 shapes and desync somewhere later, with the version
+    field of the resulting error reading ``unknown`` -- the one field `S2`
+    asks for by name.  So the `FseVersionError` propagates, loudly, and the
+    caller sets ``GOWINHOME`` or ``GOWIN_IDE_VERSION``.
     """
-    try:
-        ide_version = detect_ide_version(os.environ.get("GOWINHOME", ""))
-    except FseVersionError:
-        ide_version = "unknown"
+    ide_version = detect_ide_version(os.environ.get("GOWINHOME", ""))
     shape_set, shapes = select_shapes(ide_version)
     return ide_version, shape_set, shapes
 
