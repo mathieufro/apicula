@@ -229,3 +229,65 @@ def test_chip_flags_138c_maps_to_nextpnr_bit():
         if name in flags:
             computed |= int(value, 0)
     assert computed & 0x10000 != 0
+
+
+# --------------------------------------------------------------- P1.T08b
+#
+# The HCLK *network* completion the P1.T05-T09 verification pass raised as a
+# finding ($OTC/evidence/hclk/port-138c.md, "FINDINGS"): a six-block bel model
+# was sitting on a four-block routing model, and `gw5_hclk_idx` returned -1 for
+# every 138C cell so not one fuse-bearing HCLK pip existed.
+
+def test_hclk_idx_covers_six_blocks(gowinhome):
+    """Every measured 138C block cell resolves to its own block index."""
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    locs = chipdb._gw5a_hclk_locs['GW5AST-138C']
+    for hclk_idx, (row, col) in locs.items():
+        assert chipdb.gw5_hclk_idx(dev, 'GW5AST-138C', row, col) == hclk_idx
+    # the block count the pip builder iterates is the table's, not a literal 4
+    assert chipdb.gw5_get_num_of_hclks('GW5AST-138C') == len(locs) == 6
+    assert chipdb.gw5_get_num_of_hclks('GW5A-25A') == 4
+    # the five inter-HCLK bridge cells carry table 48 but are not blocks
+    # (topology-138c.md section 4); they must not claim a block index
+    for bridge in ((63, 0), (63, 181), (108, 0), (108, 118), (108, 181)):
+        assert chipdb.gw5_hclk_idx(dev, 'GW5AST-138C', *bridge) == -1
+
+
+def test_hclk_pip_nodes_equal_across_blocks(gowinhome):
+    """Blocks 4 and 5 get the same HCLK node population as blocks 0-3."""
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    per_block = {i: len([n for n in dev.nodes if n.startswith(f'HCLK{i}_')])
+                 for i in range(6)}
+    assert len(set(per_block.values())) == 1, per_block
+    # the four-block default-PIP section used to leave blocks 4/5 at 26
+    assert min(per_block.values()) > 26
+    # and the per-block wire families the default PIPs create must all be there
+    for i in range(6):
+        suffixes = {n.split('_', 1)[1] for n in dev.nodes
+                    if n.startswith(f'HCLK{i}_')}
+        for j in range(4):
+            assert f'HCLK{i}{j}' in suffixes
+            assert f'HCLK_BUF_AO{i}{j}' in suffixes
+            assert f'HCLK_HUB{i}0' in suffixes
+            assert f'HCLK_MUX_DELTA{i}{j}' in suffixes
+            assert f'HCLK_TO_IHCLK{i}{j}' in suffixes
+
+
+def test_hclk_pips_carry_fuses_138c(gowinhome):
+    """The 138C HCLK pips are fuse-bearing, and evenly so across the six blocks."""
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    locs = chipdb._gw5a_hclk_locs['GW5AST-138C']
+    fused = {}
+    for (row, col), dests in dev.hclk_pips.items():
+        n = sum(1 for srcs in dests.values() for f in srcs.values() if f)
+        if n:
+            fused[(row, col)] = n
+    # every fuse-bearing tile is a measured block cell, and every block has some
+    assert set(fused) == set(locs.values()), fused
+    assert len(set(fused.values())) == 1, fused
+    assert min(fused.values()) > 100
+    # spot-check the shape of a fuse: a set of (row, col) bit coordinates
+    for srcs in dev.hclk_pips[locs[5]].values():
+        for f in srcs.values():
+            if f:
+                assert all(isinstance(b, tuple) and len(b) == 2 for b in f)
