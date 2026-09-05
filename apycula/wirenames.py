@@ -1031,6 +1031,16 @@ hclknames_5ast138c.update({n: f"HCLK_GCLK1{i}" for i, n in enumerate(range(310, 
 hclknames_5ast138c.update({n: f"HCLK_GCLK2{i}" for i, n in enumerate(range(497, 505))})
 hclknames_5ast138c.update({n: f"HCLK_GCLK3{i}" for i, n in enumerate(range(684, 692))})
 
+# Blocks 4 and 5 and the inter-HCLK band. gw5_make_hclk_pips names a wire
+# hclknames[srcid + idx * gw5_hclk_wire_offset] for idx in range(6) and
+# hclknames[srcid + 5 * offset] for the inter-HCLK ones, so the table has to
+# reach 6 * 187 + 4 * 38 == 1274 (was 701, which covered blocks 0-3 only).
+# Append-only: an index that already has a name keeps it.
+# $OTC/evidence/hclk/topology-138c.md section 5.
+hclknames_5ast138c.update({n: f"HCLK_UNK{n}"
+                           for n in range(701, 6 * 187 + 4 * 38)
+                           if n not in hclknames_5ast138c})
+
 hclknumbers_5ast138c = {v: k for k, v in hclknames_5ast138c.items()}
 
 # Switcher

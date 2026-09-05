@@ -1253,10 +1253,12 @@ def gw5_create_hclk_iol_pip(dev, device, row, col):
             return row not in {2, 10, 27}
     return False
 
+# The cell that carries a block's logic->HCLK entry wires is the block cell
+# itself, so this is _gw5a_hclk_locs -- the 25A literal it used to hold was a
+# duplicate of that table. Reading the one table keeps the 25A byte-identical
+# and gives every measured device its blocks for free.
 def gw5_logic_to_hclk_wires(device):
-    if device == 'GW5A-25A':
-        return {0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)}
-    return {}
+    return _gw5a_hclk_locs.get(device, {})
 
 def make_hclk_pip(dev, hclk_idx, row, col, src, dest, fuses = set()):
     dev.hclk_pips.setdefault((row, col), {}).setdefault(dest, {}).update({src: fuses})
@@ -2015,7 +2017,7 @@ def _iter_edge_coords(dev):
 
 def add_hclk_bels(dat, dev, device):
     #Stub for parts that don't have HCLK bel support yet
-    if device in {'GW5A-25A'}:
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
         gw5_add_hclk_bels(dat, dev, device)
         return
     if device not in ("GW2A-18", "GW2A-18C", "GW1N-9", "GW1N-9C", "GW1N-1", "GW1NZ-1", "GW1NS-4", "GW1N-4"):
@@ -2126,7 +2128,7 @@ def add_hclk_bels(dat, dev, device):
 _global_wire_prefixes = {'PCLK', 'TBDHCLK', 'BBDHCLK', 'RBDHCLK', 'LBDHCLK',
                          'TLPLL', 'TRPLL', 'BLPLL', 'BRPLL'}
 def fse_create_hclk_nodes(dev, device, fse, dat: Datfile):
-    if device in {'GW5A-25A'}:
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
         gw5_make_pin_to_hclk(dev)
         gw5_make_hclk_to_clk_gates(dev, device, fse, dat)
         gw5_make_hclk_pips(dev, device, fse, dat)

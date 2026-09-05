@@ -63,6 +63,9 @@ def _build(device, gowinhome):
     dat = dat_parser.Datfile(_P(base + '.dat'))
     if vendor in {'GW5AT-60B', 'GW5AST-138C'}:
         dat.patch_grid_bram_138()
+    # chipdb.wire2node is module-global and chipdb_builder builds exactly one
+    # device per process; building a second one in-process needs it cleared.
+    chipdb.wire2node.clear()
     dev = chipdb.from_fse(device, fse, dat)
     # chipdb_builder.main() calls this right after from_fse (:451); the HCLK
     # bels are built there, not inside from_fse.
@@ -78,7 +81,8 @@ def test_gw5_add_hclk_bels_138c_block_and_wire_counts(gowinhome):
     # P1.T07 owns the builder, P1.T08 owns routing 138C into it; drive it
     # directly so this test states T07's contract on its own. The call is
     # idempotent, so it stays correct once T08 has landed.
-    chipdb.gw5_add_hclk_bels(dat, dev, 'GW5AST-138C')
+    if not dev.hclk_div2:
+        chipdb.gw5_add_hclk_bels(dat, dev, 'GW5AST-138C')
     assert len(dev.hclk_div2) == 6
     for hclk_idx, slots in dev.hclk_div2.items():
         assert hclk_idx in range(6)
@@ -119,3 +123,41 @@ def test_gw5_add_hclk_bels_25a_unchanged(gowinhome):
         assert func['clkdiv2']['bels'][0]['inputs']['RESETN'] == 'B2'
         assert func['clkdiv']['bels'][0]['inputs']['RESETN'] == 'C4'
         assert func['clkdiv']['bels'][0]['inputs']['CALIB'] == 'B6'
+
+
+# ---------------------------------------------------------------- P1.T08
+
+def test_hclk_nodes_138c_not_pre5a_path(gowinhome):
+    dev, _dat = _build('GW5AST-138C', gowinhome)
+    hclk_nodes = {n for n in dev.nodes if n.startswith('HCLK')}
+    per_block = {i for i in range(6)
+                 if any(n.startswith(f'HCLK{i}_') for n in hclk_nodes)}
+    assert per_block == set(range(6)), f'blocks without a node: {set(range(6)) - per_block}'
+    assert len(hclk_nodes) >= 6
+    # the pre-5A generic path names its wires HCLK_OUT0..3 -- none may appear
+    # (?<!I): HCLK_IHCLK_OUT.. is a GW5A inter-HCLK wire, not a pre-5A one
+    pre5a = re.compile(r'(?<!I)HCLK_OUT[0-3]')
+    assert not [n for n in dev.nodes if pre5a.search(n)]
+    for tile_pips in dev.hclk_pips.values():
+        for dest, srcs in tile_pips.items():
+            assert not pre5a.search(dest)
+            assert not any(pre5a.search(s) for s in srcs)
+
+
+def test_hclk_138c_takes_gw5a_branch(gowinhome, monkeypatch):
+    calls = {'pin': 0, 'gates': 0, 'pips': 0}
+    for name, key in (('gw5_make_pin_to_hclk', 'pin'),
+                      ('gw5_make_hclk_to_clk_gates', 'gates'),
+                      ('gw5_make_hclk_pips', 'pips')):
+        orig = getattr(chipdb, name)
+
+        def counted(*a, _orig=orig, _key=key, **kw):
+            calls[_key] += 1
+            return _orig(*a, **kw)
+        monkeypatch.setattr(chipdb, name, counted)
+
+    _BUILT.pop('GW5AST-138C', None)          # force a real build under the counters
+    _build('GW5AST-138C', gowinhome)
+    assert calls == {'pin': 1, 'gates': 1, 'pips': 1}
+    # `_hclk_to_fclk` is not on the GW5A path and this task adds no key to it
+    assert 'GW5AST-138C' not in chipdb._hclk_to_fclk
