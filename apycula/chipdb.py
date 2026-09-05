@@ -1576,11 +1576,18 @@ _gw5a_hclk_ctrl_wires = {
                     'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
 }
 
-# Which die half a block sits in.  Derived from the block's own row against
-# the grid the .fse describes, so it needs no per-device literal: the 138C's
-# six blocks come out 2 top / 4 bottom (rows 27, 27, 81, 81, 108, 108 of 109),
-# which is the MEASURED partition -- the 3/3 split assumed by the roadmap is
-# refuted ($OTC/evidence/hclk/topology-138c.md section 6).
+# Which die half a block sits in -- the two-half half of the "N blocks x two
+# halves" model.  Derived from the block's own row against the grid the .fse
+# describes, so it needs no per-device literal: the 138C's six blocks come out
+# 2 top / 4 bottom (rows 27, 27, 81, 81, 108, 108 of 109), which is the
+# MEASURED partition -- the 3/3 split assumed by the roadmap is refuted
+# ($OTC/evidence/hclk/topology-138c.md section 6).
+#
+# It is deliberately NOT stored in extra_func: it is a pure function of data
+# the database already carries (the block's row and dev.rows), and writing it
+# into every GW5A device's extra_func would change the GW5A-25A chipdb, whose
+# sha256 6311219d52b996b8431d573cd5c547426370db00852aed285033a19a5518c3ca is a
+# Phase-0 family-regression baseline. Consumers call this instead.
 def gw5_hclk_half(dev, row):
     return 'top' if row * 2 < dev.rows - 1 else 'bottom'
 
@@ -1595,8 +1602,6 @@ def gw5_add_hclk_bels(dat, dev, device):
         extra_clkdiv = extra.setdefault('clkdiv', {})
         extra_clkdiv2['hclk_idx'] = hclk_idx
         extra_clkdiv['hclk_idx'] = hclk_idx
-        extra_clkdiv2['half'] = gw5_hclk_half(dev, row)
-        extra_clkdiv['half'] = extra_clkdiv2['half']
         for i in range(4):
             # CLKDIV2
             dev.hclk_div2.setdefault(hclk_idx, set()).add((row, col, i))

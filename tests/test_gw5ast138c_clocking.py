@@ -99,8 +99,11 @@ def test_gw5_add_hclk_bels_138c_block_and_wire_counts(gowinhome):
         assert idx in range(6)
         assert func['clkdiv2']['hclk_idx'] == idx
         n_clkdiv += len(func['clkdiv']['bels'])
-        assert func['clkdiv']['half'] == func['clkdiv2']['half']
-        halves[idx] = func['clkdiv']['half']
+        # the half is derived, never stored: storing it would change the
+        # GW5A-25A chipdb, a Phase-0 family-regression baseline (see
+        # chipdb.gw5_hclk_half)
+        assert 'half' not in func['clkdiv'] and 'half' not in func['clkdiv2']
+        halves[idx] = chipdb.gw5_hclk_half(dev, row)
     assert n_clkdiv == 24
     assert set(halves.values()) == {'top', 'bottom'}
     # MEASURED partition (topology-138c.md §1): blocks 0,1 sit at row 27 (top
@@ -122,6 +125,10 @@ def test_gw5_add_hclk_bels_25a_unchanged(gowinhome):
         i = func['clkdiv2']['hclk_idx']
         assert i in range(4)
         # the 25A control wires are the in-tree literals
+        # nothing new is written into the 25A extra_func: its chipdb must stay
+        # byte-identical to the Phase-0 baseline 6311219d...
+        assert 'half' not in func['clkdiv2'] and 'half' not in func['clkdiv']
+        assert set(func['clkdiv2']) == {'bels', 'hclk_idx'}
         assert func['clkdiv2']['bels'][0]['inputs']['RESETN'] == 'B2'
         assert func['clkdiv']['bels'][0]['inputs']['RESETN'] == 'C4'
         assert func['clkdiv']['bels'][0]['inputs']['CALIB'] == 'B6'
