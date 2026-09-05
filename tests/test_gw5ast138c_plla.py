@@ -161,3 +161,29 @@ def test_plla_138c_has_no_drp_ports(gowinhome):
     for rc, pll in _pll_entries(dev).items():
         assert not (drp_in & set(pll['inputs'])), f'DRP inputs at {rc}'
         assert not (drp_out & set(pll['outputs'])), f'DRP outputs at {rc}'
+
+
+# ---------------------------------------------------------------- P1.T20
+
+
+def test_permitted_pll_freqs_138c_five_tuple():
+    got = gowin_pack.GW5AST_138C.get_permitted_pll_freqs(
+        gowin_pack.GW5AST_138C)
+    assert isinstance(got, tuple) and len(got) == 5, (
+        f'expected a 5-tuple (max_in, max_out, min_out, max_vco, min_vco), '
+        f'got {got!r}')
+    for name, g, w in zip(('max_in', 'max_out', 'min_out', 'max_vco', 'min_vco'),
+                          got, PERMITTED_FREQS_138C):
+        assert g == w, f'{name}: {g} != {w}'
+
+
+def test_permitted_pll_freqs_25a_unchanged():
+    got = gowin_pack.GW5A_25A.get_permitted_pll_freqs(gowin_pack.GW5A_25A)
+    assert tuple(got) == PERMITTED_FREQS_25A
+
+
+def test_permitted_pll_freqs_138c_does_not_hit_the_base_stub():
+    """`GW5AST_138C` must carry its own override, not inherit `GW5A`'s."""
+    assert 'get_permitted_pll_freqs' in vars(gowin_pack.GW5AST_138C), (
+        'GW5AST_138C inherits get_permitted_pll_freqs; instantiating a PLLA '
+        'reaches the base stub raise')

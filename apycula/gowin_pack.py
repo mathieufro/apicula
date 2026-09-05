@@ -6719,6 +6719,7 @@ class GW5AT_60B(GW5A):
 ################################################################
 class GW5AST_138C(GW5A):
     """ GW5AST-138C chip. Tangmega138k board """
+
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         super().__init__(cli_args, pnr)
         self.used_clock_spines = set()
@@ -6728,6 +6729,28 @@ class GW5AST_138C(GW5A):
         for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
             if self.chipdb.get_ttyp(x, y) in self.clock_bridge_ttypes:
                 self.clock_bridge_xy.add((x, y))
+
+    #==============================
+    #========== Clocks
+    #==============================
+    def get_permitted_pll_freqs(self) -> tuple[float, float, float, float, float]:
+        """ (max_in, max_out, min_out, max_vco, min_vco)
+
+        DS1239-1.0.3E Table 3-18 "PLL Switching Characteristics", GW5AST-138,
+        speed grade C1/I0 -- the only grade this device is supported at:
+
+            FINMAX   Maximum Input Clock Frequency      800    MHz
+            FOUTMAX  PLL Maximum Output Frequency      1000    MHz
+            FOUTMIN  PLL Minimum Output Frequency         5.079 MHz
+            FVCOMAX  Maximum PLL VCO Frequency         1300    MHz
+            FVCOMIN  Minimum PLL VCO Frequency          650    MHz
+
+        Only FINMAX is shared with the GW5A-25A override; the other four
+        differ, so inheriting or copying the 25A's
+        `(800., 1600., 6.25, 1600., 800.)` would let the packer emit divider
+        settings whose VCO frequency the part cannot reach.
+        """
+        return (800., 1000., 5.079, 1300., 650.)
 
     #==============================
     #========== Pips
