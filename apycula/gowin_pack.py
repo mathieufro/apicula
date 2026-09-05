@@ -12,7 +12,8 @@ from apycula import bslib
 from apycula import chipdb
 from apycula import wirenames as wnames
 from apycula.chipdb import add_attr_val, get_shortval_fuses, get_longval_fuses, \
-                           get_bank_fuses, get_bank_io_fuses, get_long_fuses, load_chipdb, Tile, Coord
+                           get_bank_fuses, get_bank_io_fuses, get_long_fuses, load_chipdb, Tile, Coord, \
+                           gw5a_dhce_gate_fuses
 from collections.abc import Iterator
 from dataclasses import dataclass
 from types import FunctionType
@@ -544,6 +545,21 @@ class ChipDB:
     def get_dhcen_wire_side(self, x: int, y: int, idx_int) -> tuple[str, str]:
         _, wire, _, side = self.db.extra_func[y, x]['dhcen'][idx_int]['pip']
         return (wire, side)
+
+    def is_gw5a_dhcen(self, x: int, y: int, idx_int) -> bool:
+        """ True for the GW5A `DHCE` model: per-block sites, no HCLK attrs. """
+        return bool(self.db.extra_func[y, x]['dhcen'][idx_int].get('gw5a'))
+
+    def get_gw5a_dhce_gate_fuses(self, x: int, y: int, idx_int) -> set[Coord]:
+        """ The gate fuse of the HCLK input multiplexer a GW5A DHCE sits on.
+
+        On this family the enable is not an `HCLK` shortval attribute -- the
+        GW5AST-138C `HCLK` table carries no `*_HSTOP`/`*_BRGSTOP` row at all --
+        but the multiplexer's own output-enable bit, i.e. the fuse every one of
+        its sources has in common. MEASURED, `P1.T26`.
+        """
+        dest = self.db.extra_func[y, x]['dhcen'][idx_int]['pip'][1]
+        return gw5a_dhce_gate_fuses(self.db.hclk_pips[y, x], dest)
 
     def get_dcs_spine(self, x: int, y: int, idx_int) -> str:
         return self.db.extra_func[y, x]['dcs'][idx_int]['clkout']
@@ -6719,6 +6735,36 @@ class GW5AT_60B(GW5A):
 ################################################################
 class GW5AST_138C(GW5A):
     """ GW5AST-138C chip. Tangmega138k board """
+    #==============================
+    #========== DHCE
+    #==============================
+    def get_DHCEN_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ GW5A `DHCE`: one gate fuse, in the site's own HCLK block cell.
+
+        Three things differ from the pre-5A model this overrides:
+
+        * the enable is a fuse of the HCLK input multiplexer itself, not an
+          `HCLK` shortval attribute -- this device's `HCLK` table has no
+          `*_HSTOP`/`*_BRGSTOP` row for the wire names that path keys on;
+        * the fuse belongs to the *block cell*, so it is emitted there and
+          nowhere else.  The pre-5A path sweeps a whole die edge because those
+          devices have one HCLK block per side; this die has two blocks on each
+          of `L`, `R` and `B`, and writing the fuse along the edge would gate
+          the neighbouring block as well;
+        * the site index is per block, and there are exactly four of them, so
+          there is no `HCLK_BANK_OUT` (interbank) half of the rule.
+
+        MEASURED, `P1.T26`, `$OTC/evidence/dhcen/fuse-138c.md`.
+        """
+        if 'DHCEN_USED' not in bel.cell.attrs:
+            return []
+        if not self.chipdb.is_gw5a_dhcen(bel.x, bel.y, bel.idx_int):
+            return super().get_DHCEN_fuses(bel)
+        bits = self.chipdb.get_gw5a_dhce_gate_fuses(bel.x, bel.y, bel.idx_int)
+        if not bits:
+            return []
+        return [CellFuseBits(bel.x, bel.y, bits)]
+
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         super().__init__(cli_args, pnr)
         self.used_clock_spines = set()
