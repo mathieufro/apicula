@@ -994,3 +994,342 @@ def test_pll_openflow_row_is_e1():
     assert row['diff_count']['conns'] == 0
     assert row['decode_check'] == {'c1': 'ok', 'c2': 'ok'}
     assert row.get('open_fs'), 'the open flow produced no bitstream'
+
+
+# ------------------------------------------------- P1.T42 batch C, P1.T43 D
+
+BATCH_C_AXES = {'DYN', 'ODIV1L'}
+BATCH_C_ROWS = 12
+BATCH_C_ID = 'p1-pll-sweep-c'
+BATCH_C_ENV = 'dyn,odiv1l'
+
+BATCH_D_AXES = {'SITE'}
+BATCH_D_ROWS = 12
+BATCH_D_ID = 'p1-pll-sweep-d'
+BATCH_D_ENV = 'site'
+
+#: `P1.T39`'s reference operating point (`examples/pll/GW5AST-138C.vh`), the
+#: point batch D holds fixed while it sweeps the placement.
+T39_REFERENCE_POINT = {'FCLKIN': '"50.0"', 'IDIV_SEL': '1', 'FBDIV_SEL': '1',
+                       'MDIV_SEL': '16', 'ODIV0_SEL': '8'}
+
+#: The four batches' oracle-run counts. The blueprint budgeted 14 runs each
+#: for C and D; the owner's run budget caps a clocking batch at 12, and both
+#: batches are complete at 12 -- C sweeps five `DYN` modes plus a baseline and
+#: six `ODIV1L` dividers, D sweeps every one of the twelve sites -- so the
+#: campaign total is 64, not the blueprint's 68.
+CAMPAIGN_RUNS = {BATCH_A_ID: 20, BATCH_B_ID: 20, BATCH_C_ID: 12,
+                 BATCH_D_ID: 12}
+CAMPAIGN_TOTAL = 64
+
+
+def test_pll_sweep_batches_a_and_b_regenerate_byte_identically():
+    """`P1.T42`'s axes are additive: no earlier point's Verilog moved.
+
+    Batch C needs two parameters (`DYN_MDIV_SEL`, `DYN_DPA_EN`) that no
+    earlier point carries and one variant that loads `CLKOUT1`. Both are
+    reached through the axis, never through `BASE_PARAMS` or `RTL`, precisely
+    so every batch-A and batch-B point still renders the bytes it was measured
+    from -- otherwise the campaign's rows would no longer share a design.
+    """
+    from fuzz.gw5ast138c.harness import gen
+    for env, count in ((None, BATCH_A_ROWS), (BATCH_B_ENV, BATCH_B_ROWS)):
+        m = _shape(env) if env else _shape()
+        points = m.points()
+        assert len(points) == count
+        for name, (axis, value) in points.items():
+            assert axis.extra_params == [], f'{name}: {axis.extra_params}'
+            assert not axis.loads_clkout1, name
+            assert axis.param_order() == m.PARAM_ORDER, name
+            assert 'pll_clkout1' not in m.rtl(m.SPEC, name), name
+            gen.render_cst(m.SPEC, name)
+
+
+def test_pll_sweep_batch_c_axes_are_inside_every_datasheet_band():
+    """Every batch-C point satisfies all four DS1239E Table 3-18 bounds.
+
+    The `DYN` axis never moves a divider, so its whole point set sits at one
+    frequency; `ODIV1L` divides `CLKOUT1` after the VCO exactly as `ODIV1`
+    does. Both still get batch A's band check, because a point that cannot be
+    built measures nothing.
+    """
+    m = _shape(BATCH_C_ENV)
+    fin_max, fout_max, fout_min, fvco_max, fvco_min = PERMITTED_FREQS_138C
+    points = m.points()
+    assert len(points) == BATCH_C_ROWS
+    assert {a.name for a, _ in points.values()} == BATCH_C_AXES
+    for name, (axis, value) in points.items():
+        parms = axis.params(value)
+        fclkin = float(parms['FCLKIN'].strip('"'))
+        assert fclkin <= fin_max, f'{name}: FCLKIN {fclkin} > FINMAX'
+        assert FPFD_BAND_138C[0] <= axis.fpfd(value) <= FPFD_BAND_138C[1], \
+            f'{name}: Fpfd {axis.fpfd(value)} outside {FPFD_BAND_138C}'
+        assert fvco_min <= axis.fvco(value) <= fvco_max, \
+            f'{name}: FVCO {axis.fvco(value)} outside [{fvco_min}, {fvco_max}]'
+        divider = int(parms[axis.param]) if axis.name == 'ODIV1L' \
+            else int(parms['ODIV0_SEL'])
+        out = axis.fvco(value) / divider
+        assert fout_min <= out <= fout_max, \
+            f'{name}: CLKOUT {out} outside [{fout_min}, {fout_max}]'
+
+
+def test_pll_sweep_batch_c_dyn_axis_turns_on_exactly_one_mode():
+    """A `DYN` point differs from the all-`FALSE` baseline in one parameter.
+
+    The dynamic-reconfiguration selects are independent booleans, so the axis
+    sweeps *which* one is `"TRUE"` rather than one parameter's value. The
+    property attribution needs is unchanged and asserted here: exactly one key
+    differs from the axis baseline, and it is a `DYN_*` key.
+    """
+    m = _shape(BATCH_C_ENV)
+    modes = set()
+    for name, (axis, value) in m.points().items():
+        if axis.name != 'DYN':
+            continue
+        base = axis.params(axis.baseline)
+        here = axis.params(value)
+        assert set(base) == set(here), name
+        diff = {k for k in base if base[k] != here[k]}
+        if value == axis.baseline:
+            assert diff == set(), f'{name} is the baseline and must not differ'
+            assert all(v == '"FALSE"' for k, v in here.items()
+                       if k.startswith('DYN_')), name
+        else:
+            assert len(diff) == 1, f'{name} differs in {sorted(diff)}'
+            key = diff.pop()
+            assert key.startswith('DYN_') and here[key] == '"TRUE"', name
+            modes.add(key)
+    assert modes == {'DYN_IDIV_SEL', 'DYN_FBDIV_SEL', 'DYN_MDIV_SEL',
+                     'DYN_ODIV0_SEL', 'DYN_DPA_EN'}, modes
+
+
+def test_pll_sweep_batch_c_odiv1l_axis_loads_clkout1():
+    """`ODIV1L` is `ODIV1` plus a load, and the port list is unchanged.
+
+    Batch B measured `A_ODIV1_SEL` (115) written at **none** of six divider
+    values with `CLKOUT1` enabled but unconnected (`sweep-b-138c.md` 3.1).
+    This axis connects `CLKOUT1` to a second flop and raises its dynamic
+    enable; because that flop feeds the existing `dout`, the module's port
+    list -- the thing a moved bit could otherwise be an artefact of -- is
+    byte-identical to every other axis's.
+    """
+    m = _shape(BATCH_C_ENV)
+    base_ports = _module_ports(m.rtl(m.SPEC, 'dyn_none'))
+    seen = 0
+    for name, (axis, value) in m.points().items():
+        if axis.name != 'ODIV1L':
+            continue
+        seen += 1
+        parms = axis.params(value)
+        assert parms['CLKOUT1_EN'] == '"TRUE"', name
+        assert parms['ODIV0_SEL'] == '8', name
+        text = m.rtl(m.SPEC, name)
+        assert '.CLKOUT1      (pll_clkout1)' in text, name
+        assert ".ENCLK1       (1'b1)" in text, name
+        assert 'posedge pll_clkout1' in text, name
+        assert _module_ports(text) == base_ports, name
+    assert seen == 6
+    assert m.AXES['odiv1'].operating_point['CLKOUT1_EN'] == '"TRUE"'
+    assert not m.AXES['odiv1'].loads_clkout1
+
+
+def _module_ports(verilog):
+    """The `module top (...)` port list of a rendered shape."""
+    head = verilog.split('module top (')[1].split(');')[0]
+    return tuple(sorted(line.strip().rstrip(',') for line in head.splitlines()
+                        if line.strip()))
+
+
+def test_pll_sweep_batch_d_is_the_t39_reference_point_on_every_site():
+    """Batch D sweeps the placement and nothing else.
+
+    Twelve points, one per `PLL` site of `sites-138c.md`, every one at
+    `P1.T39`'s reference operating point, every one rendering the same module
+    body. A per-site difference in the resulting bitstream is therefore a
+    property of the site.
+    """
+    m = _shape(BATCH_D_ENV)
+    points = m.points()
+    assert len(points) == BATCH_D_ROWS
+    assert {a.name for a, _ in points.values()} == BATCH_D_AXES
+    assert {v for _, v in points.values()} == set(m.SITES)
+    bodies = set()
+    for name, (axis, value) in points.items():
+        parms = axis.params(value)
+        for key, want in T39_REFERENCE_POINT.items():
+            assert parms[key] == want, f'{name}: {key}={parms[key]}'
+        assert axis.fvco(value) == 800.0 and axis.fpfd(value) == 50.0
+        assert axis.clkout0(value) == 100.0
+        assert m.site(name) == value
+        bodies.add(m.rtl(m.SPEC, name).split('`default_nettype none')[1])
+    assert len(bodies) == 1, 'the twelve designs are not the same design'
+    # the E0/E1 scope is every site's three tiles, so a run placed anywhere is
+    # compared inside its own site rather than outside the scope
+    assert len(m.SPEC.scope.tiles) == 3 * PLL_COUNT_138C
+
+
+def _mask_sha256():
+    """The sha256 of the shared don't-care mask, the file every row cites.
+
+    The blueprint's term for batches C and D is "`mask_sha256` identical to
+    batch A's", but batch A and batch B carry **no** `mask_sha256` at all:
+    their open halves aborted before `equiv` ran (the four
+    `openflow-gap-138c.md` gaps were still open), and the field is `equiv`'s.
+    The mask file itself is the thing that term is about, so it is what the
+    comparison is made against -- and against batch A too, whenever those rows
+    ever gain the field.
+    """
+    import hashlib
+    path = Path(__file__).resolve().parent.parent / 'fuzz' / 'gw5ast138c' \
+        / 'dontcare.mask'
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _assert_mask_is_the_campaign_mask(rows):
+    masks = {r.get('mask_sha256') for r in rows}
+    assert len(masks) == 1, f'mask_sha256 differs inside the batch: {masks}'
+    assert masks == {_mask_sha256()}, masks
+    a_masks = {r.get('mask_sha256') for r in _batch_a_rows()} - {None}
+    if a_masks:
+        assert masks == a_masks, f'mask {masks} != batch A mask {a_masks}'
+
+
+def _batch_rows(batch_id):
+    """One batch's rows out of the slug's `runs.jsonl` (skip when absent)."""
+    import json
+    path = Path(OTC) / 'evidence' / 'plla' / 'runs.jsonl'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    rows = [r for r in rows if str(r.get('run_id', '')).startswith(batch_id)]
+    if not rows:
+        pytest.skip(f'batch {batch_id} has not been merged into runs.jsonl')
+    return rows
+
+
+def _assert_row_is_e1_ok(row):
+    """The row closed `E1` through both flows with nothing unexplained."""
+    assert row['verdict'] == 'ok', f"{row['run_id']}: {row['verdict']}"
+    assert row['level'] == 'E1', row['run_id']
+    for term in ('cells', 'attrs', 'conns'):
+        assert row['diff_count'][term] == 0, f"{row['run_id']}: {term}"
+    assert row['decode_check'] == {'c1': 'ok', 'c2': 'ok'}, row['run_id']
+    assert row.get('vendor_fs'), f"{row['run_id']}: no vendor .fs"
+    assert row.get('open_fs'), f"{row['run_id']}: the open flow made no .fs"
+
+
+def test_plla_sweep_batch_c_rows():
+    """`runs.jsonl` gained exactly 12 admissible batch-C rows, all `E1` ok.
+
+    The blueprint's terms, at the owner's 12-run cap: 12 rows carrying
+    `sweep.axis` in the batch-C axis set, `0` aborted, `mask_sha256` identical
+    to batch A's, one baseline row per axis and every other row differing from
+    it in exactly one key. Unlike batches A and B, which ran before
+    `openflow-gap-138c.md`'s four gaps were closed, both halves of every
+    batch-C row complete, so the verdict asserted is the full `E1` one.
+    """
+    m = _shape(BATCH_C_ENV)
+    rows = _batch_rows(BATCH_C_ID)
+    assert len(rows) == BATCH_C_ROWS, f'{len(rows)} rows'
+    assert len({r['run_id'] for r in rows}) == BATCH_C_ROWS
+    assert {r['sweep']['axis'] for r in rows} == BATCH_C_AXES
+
+    _assert_mask_is_the_campaign_mask(rows)
+
+    baselines = {axis.name: {'axis': axis.name, axis.param: axis.baseline}
+                 for axis, _ in m.points().values()}
+    assert set(baselines) == BATCH_C_AXES
+    n_baseline = 0
+    for row in rows:
+        _assert_row_is_e1_ok(row)
+        sweep = row['sweep']
+        base = baselines[sweep['axis']]
+        assert set(sweep) == set(base), f"{row['run_id']}: {sorted(sweep)}"
+        diff = {k for k in base if base[k] != sweep[k]}
+        if not diff:
+            n_baseline += 1
+        else:
+            assert len(diff) == 1, f"{row['run_id']} differs in {sorted(diff)}"
+    assert n_baseline == len(BATCH_C_AXES)
+    modes = {r['sweep']['DYN_MODE'] for r in rows
+             if r['sweep']['axis'] == 'DYN'}
+    assert len(modes) == 6, f'duplicate DYN mode values: {modes}'
+
+
+def test_plla_sweep_batch_d_rows():
+    """`runs.jsonl` gained exactly 12 admissible batch-D rows, all `E1` ok.
+
+    Twelve rows, `0` aborted, `mask_sha256` identical to batch A's, and
+    exactly twelve distinct site identities with none missing against
+    `sites-138c.md` -- which is the claim "all twelve sites are real" reduced
+    to a property of the evidence file.
+    """
+    m = _shape(BATCH_D_ENV)
+    rows = _batch_rows(BATCH_D_ID)
+    assert len(rows) == BATCH_D_ROWS, f'{len(rows)} rows'
+    assert len({r['run_id'] for r in rows}) == BATCH_D_ROWS
+    assert {r['sweep']['axis'] for r in rows} == BATCH_D_AXES
+
+    _assert_mask_is_the_campaign_mask(rows)
+
+    sites = [r['sweep']['SITE'] for r in rows]
+    assert len(set(sites)) == PLL_COUNT_138C, f'duplicate sites: {sites}'
+    assert set(sites) == set(m.SITES), \
+        f'missing against sites-138c.md: {set(m.SITES) - set(sites)}'
+    for row in rows:
+        _assert_row_is_e1_ok(row)
+
+
+def test_plla_campaign_total_is_64():
+    """The four batches' `runs` columns sum to the campaign total.
+
+    The blueprint budgeted 68 (14 + 14 for C and D); the owner's cap of 12
+    oracle runs per clocking batch makes it 64, and both batches are complete
+    at 12 (see `CAMPAIGN_RUNS`).
+    """
+    path = Path(OTC) / 'evidence' / '_budget' / 'clocking-runs.tsv'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    runs = {}
+    for line in path.read_text().splitlines()[1:]:
+        if not line.strip():
+            continue
+        batch_id, _slug, n, _cum, _ts = line.split('\t')
+        runs[batch_id] = int(n)
+    missing = [b for b in CAMPAIGN_RUNS if b not in runs]
+    if missing:
+        pytest.skip(f'batches not yet charged: {missing}')
+    charged = {b: runs[b] for b in CAMPAIGN_RUNS}
+    assert charged == CAMPAIGN_RUNS, charged
+    assert sum(charged.values()) == CAMPAIGN_TOTAL
+
+
+#: The two sites whose anchor sits in column 0 and whose anchor tile type is
+#: unique on the die; both explicitly disable the internal voltage regulator.
+LEFT_EDGE_SITES = {'PLL_L[1]', 'PLL_L[2]'}
+
+
+def test_plla_sites_decode_identically_except_the_two_left_edge_sites():
+    """One design, twelve placements, one attribute encoding.
+
+    `sites-e1-138c.json` decodes each site's three tiles through
+    `shortval[35]`. Ten sites give an identical `{attribute: value}` map at
+    three different tile-type triples, and the two left-edge sites give that
+    map plus `A_VR_EN` -- so the encoding is a property of the `PLL` and the
+    one difference is a property of the site.
+    """
+    import json
+    path = Path(OTC) / 'evidence' / 'plla' / 'sites-e1-138c.json'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    fit = json.loads(path.read_text())
+    assert fit['sites_decoded'] == PLL_COUNT_138C
+    assert fit['e1_ok'] == PLL_COUNT_138C
+    differing = {e['site'] for e in fit['sites']
+                 if e['same_as_reference'] is False}
+    assert differing == LEFT_EDGE_SITES, differing
+    for entry in fit['sites']:
+        if entry['site'] in LEFT_EDGE_SITES:
+            assert entry['attr_delta'] == {'A_VR_EN': [None, 2]}, entry['site']
+            assert entry['anchor'][1] == 0, entry['site']
+        assert tuple(entry['anchor']) in SITE_ANCHORS_138C, entry['site']

@@ -18,10 +18,25 @@ The batch CLI is frozen at exactly seven options (`F11`/`F29`,
 test-only overrides, and for the same reason.  It is a comma-separated list of
 axis names from `AXES`; the default is batch A.
 
-    FUZZ_PLL_AXIS=idiv,fbdiv   P1.T23  batch A   (this task, 20 runs)
+    FUZZ_PLL_AXIS=idiv,fbdiv   P1.T23  batch A   (20 runs)
     FUZZ_PLL_AXIS=odiv0,odiv1,mdiv   P1.T41  batch B (20 runs)
-    FUZZ_PLL_AXIS=dyn          P1.T42  batch C
-    FUZZ_PLL_AXIS=site         P1.T43  batch D
+    FUZZ_PLL_AXIS=dyn,odiv1l   P1.T42  batch C   (12 runs)
+    FUZZ_PLL_AXIS=site         P1.T43  batch D   (12 runs)
+
+Three kinds of axis
+-------------------
+`Axis` sweeps one `#(...)` parameter over integer values.  Two subclasses
+sweep something a single parameter cannot express, and both keep the one
+property attribution rests on -- *a point differs from its own axis baseline
+in exactly one thing*:
+
+* `ModeAxis` (`dyn`) sweeps **which** of the mutually independent `DYN_*`
+  booleans is `"TRUE"`; its baseline has all of them `"FALSE"`, so each point
+  differs from the baseline in exactly one parameter -- a different one each
+  time, which is the whole point of the axis.
+* `SiteAxis` (`site`) sweeps the **placement** and no parameter at all: every
+  point renders byte-identical Verilog at the `P1.T39` reference operating
+  point and differs only in its `INS_LOC`.
 
 Operating points, and why they are not all `FCLKIN = 100 MHz`
 -------------------------------------------------------------
@@ -104,18 +119,38 @@ BASE_PARAMS = {
 }
 PARAM_ORDER = list(BASE_PARAMS)
 
+#: Parameters no batch-A/B point carries.  They are **not** in `BASE_PARAMS`:
+#: adding a key there would change the rendered `#(...)` block of every point
+#: of every earlier axis, and batch A/B regenerate byte-identically by
+#: construction (`sweep-b-138c.md` §1).  An axis opts into one by naming it in
+#: `extra_params`, and then carries it at this default on its own baseline.
+EXTRA_PARAM_DEFAULTS = {
+    "DYN_MDIV_SEL": '"FALSE"',
+    "DYN_DPA_EN": '"FALSE"',
+}
+
 
 class Axis:
     """One sweep axis: an operating point, a swept parameter and its values."""
 
+    #: What a point of this axis varies against its baseline -- a `#(...)`
+    #: parameter.  The two subclasses below vary a mode and a placement.
+    varies = "param"
+
     def __init__(self, name, param, values, baseline, operating_point,
-                 site=DEFAULT_SITE):
+                 site=DEFAULT_SITE, extra_params=(), loads_clkout1=False):
         self.name = name                      # "IDIV", "FBDIV", ...
         self.param = param                    # "IDIV_SEL", ...
         self.values = list(values)
         self.baseline = baseline
         self.operating_point = dict(operating_point)
         self.site = site
+        self.extra_params = list(extra_params)
+        #: Whether this axis's Verilog loads `CLKOUT1` with a second flop.
+        #: The module's **port list** is the same either way (`dout` is driven
+        #: by both domains), so the batch-A invariant "the port list is
+        #: byte-identical across every point of every axis" survives it.
+        self.loads_clkout1 = loads_clkout1
         if baseline not in self.values:
             raise ValueError(f"{name}: baseline {baseline!r} not in values")
 
@@ -124,9 +159,23 @@ class Axis:
         rest = [v for v in _gray_restricted(self.values) if v != self.baseline]
         return [self.baseline] + rest
 
-    def params(self, value):
+    def point_name(self, value):
+        """The sweep-point name of one value -- `<axis>_<value>`."""
+        return f"{self.name.lower()}_{value:03d}"
+
+    def param_order(self):
+        """The `#(...)` emission order, base parameters first."""
+        return PARAM_ORDER + self.extra_params
+
+    def base_params(self):
         parms = dict(BASE_PARAMS)
+        for key in self.extra_params:
+            parms[key] = EXTRA_PARAM_DEFAULTS[key]
         parms.update(self.operating_point)
+        return parms
+
+    def params(self, value):
+        parms = self.base_params()
         parms[self.param] = str(value)
         return parms
 
@@ -143,6 +192,96 @@ class Axis:
 
     def clkout0(self, value):
         return self.fvco(value) / int(self.params(value)["ODIV0_SEL"])
+
+    def site_of(self, _value):
+        """The `INS_LOC` site of one point -- constant on a parameter axis."""
+        return self.site
+
+    def sites(self):
+        """Every site this axis can place its `PLL` at (the `E0`/`E1` scope)."""
+        return {self.site}
+
+
+class ModeAxis(Axis):
+    """An axis that sweeps *which* boolean parameter is `"TRUE"`.
+
+    The `DYN_*` parameters select a dynamic-reconfiguration port over the
+    static `#(...)` value (`DYN_IDIV_SEL "TRUE"` reads `IDSEL`, and so on).
+    They are independent booleans, so no single parameter's value set covers
+    them: the axis's "value" is the mode itself.  The baseline carries every
+    mode `"FALSE"`, so a point still differs from it in exactly one key.
+    """
+
+    varies = "mode"
+
+    #: `tag -> parameter`, in sweep order after the baseline.  `None` is the
+    #: baseline: no dynamic mode at all.
+    MODES = {
+        "none": None,
+        "idiv": "DYN_IDIV_SEL",
+        "fbdiv": "DYN_FBDIV_SEL",
+        "mdiv": "DYN_MDIV_SEL",
+        "odiv0": "DYN_ODIV0_SEL",
+        "dpa": "DYN_DPA_EN",
+    }
+    BASELINE = "none"
+
+    def __init__(self, name, operating_point, site=DEFAULT_SITE):
+        extra = [p for p in self.MODES.values()
+                 if p is not None and p not in BASE_PARAMS]
+        super().__init__(name, "DYN_MODE", list(self.MODES), self.BASELINE,
+                         operating_point, site=site, extra_params=extra)
+
+    def ordered(self):
+        """Baseline first, then the modes in declaration order.
+
+        There is no Gray ordering to do: the values are names, and every point
+        already differs from the baseline in exactly one bit of the machine's
+        state -- the one mode it turns on.
+        """
+        return [self.baseline] + [v for v in self.values if v != self.baseline]
+
+    def point_name(self, value):
+        return f"{self.name.lower()}_{value}"
+
+    def params(self, value):
+        parms = self.base_params()
+        param = self.MODES[value]
+        if param is not None:
+            parms[param] = '"TRUE"'
+        return parms
+
+
+class SiteAxis(Axis):
+    """An axis that sweeps the placement and nothing else.
+
+    Every point renders byte-identical Verilog -- the `P1.T39` reference
+    operating point -- and differs only in the `INS_LOC` site, which is what
+    makes a per-site fuse difference a property of the *site* and of nothing
+    in the design.
+    """
+
+    varies = "site"
+
+    def __init__(self, name, operating_point):
+        super().__init__(name, "SITE", list(SITES), DEFAULT_SITE,
+                         operating_point)
+
+    def ordered(self):
+        return [self.baseline] + [v for v in self.values if v != self.baseline]
+
+    def point_name(self, value):
+        return "site_" + value.lower().replace("[", "").replace("]", "")
+
+    def params(self, _value):
+        """The operating point, with no swept parameter: the site is swept."""
+        return self.base_params()
+
+    def site_of(self, value):
+        return value
+
+    def sites(self):
+        return set(self.values)
 
 
 def _gray_restricted(values):
@@ -210,12 +349,51 @@ AXIS_MDIV = Axis(
     {"FCLKIN": '"100.0"', "IDIV_SEL": "4", "FBDIV_SEL": "1", "MDIV_SEL": "36",
      "ODIV0_SEL": "8"})
 
+#: `ODIV1L` axis, `P1.T42`.  Batch B measured that `A_ODIV1_SEL` (115) is
+#: written at **none** of six divider values when `CLKOUT1` is enabled but
+#: left unconnected (`sweep-b-138c.md` §3.1): with no load the vendor programs
+#: `A_CLKOUT1_EN` and stops.  This axis is `ODIV1` with `CLKOUT1` driving a
+#: second fabric flop, which is the shape variant that finding asked for.  The
+#: operating point and the values are `ODIV1`'s, so the two axes differ in the
+#: load and in nothing else and the comparison is the clean one.
+AXIS_ODIV1L = Axis(
+    "ODIV1L", "ODIV1_SEL", [2, 4, 8, 16, 32, 64], 8,
+    {"FCLKIN": '"100.0"', "IDIV_SEL": "4", "FBDIV_SEL": "18", "MDIV_SEL": "2",
+     "ODIV0_SEL": "8", "CLKOUT1_EN": '"TRUE"'},
+    loads_clkout1=True)
+
+#: `DYN` axis, `P1.T42`.  Five dynamic-reconfiguration modes against a
+#: baseline that enables none of them, at batch B's charge-pump operating
+#: point (`Fpfd` 25 MHz, `FVCO` 900 MHz) so the pump attributes identically
+#: and any moved bit is the mode's own.  `DYN_IDIV_SEL` and `DYN_ODIV0_SEL`
+#: were sighted by `P1.T22` (`A_DYN_IDIV_SEL` 125, `A_DYN_ODIV0_SEL` 132);
+#: `DYN_FBDIV_SEL`, `DYN_MDIV_SEL` and `DYN_DPA_EN` are first sightings here,
+#: and the `.fse` attribute census leaves 124/127/128/131 unnamed
+#: (`attrids-138c.tsv`), which is what this axis resolves.
+AXIS_DYN = ModeAxis(
+    "DYN",
+    {"FCLKIN": '"100.0"', "IDIV_SEL": "4", "FBDIV_SEL": "18", "MDIV_SEL": "2",
+     "ODIV0_SEL": "8"})
+
+#: `SITE` axis, `P1.T43`.  One run per `PLL` site at the `P1.T39` reference
+#: operating point (`examples/pll/GW5AST-138C.vh`: `FCLKIN` 50 MHz, `IDIV` 1,
+#: `FBDIV` 1, `MDIV` 16, `ODIV0` 8 -> `Fpfd` 50 MHz, `FVCO` 800 MHz,
+#: `CLKOUT0` 100 MHz), so the twelve bitstreams differ only in where the same
+#: attributes land.
+AXIS_SITE = SiteAxis(
+    "SITE",
+    {"FCLKIN": '"50.0"', "IDIV_SEL": "1", "FBDIV_SEL": "1", "MDIV_SEL": "16",
+     "ODIV0_SEL": "8"})
+
 AXES = {
     "idiv": AXIS_IDIV,
     "fbdiv": AXIS_FBDIV,
     "odiv0": AXIS_ODIV0,
     "odiv1": AXIS_ODIV1,
+    "odiv1l": AXIS_ODIV1L,
     "mdiv": AXIS_MDIV,
+    "dyn": AXIS_DYN,
+    "site": AXIS_SITE,
 }
 
 #: Batch A (`P1.T23`). `P1.T41`-`T43` set `FUZZ_PLL_AXIS` instead of editing.
@@ -254,7 +432,7 @@ def points():
     out = {}
     for axis in selected_axes():
         for value in axis.ordered():
-            out[f"{axis.name.lower()}_{value:03d}"] = (axis, value)
+            out[axis.point_name(value)] = (axis, value)
     return out
 
 
@@ -354,13 +532,57 @@ endmodule
 """
 
 
+def _load_clkout1(template):
+    """`RTL` with `CLKOUT1` driving a second flop instead of left open.
+
+    Derived by substitution rather than copied, so the two templates cannot
+    drift and the module's **port list** is identical by construction -- the
+    invariant every attribution in this campaign rests on.  The second flop
+    feeds the existing `dout`, so no pin is added either.
+    """
+    out = template.replace(
+        "    wire pll_clkout0;\n",
+        "    wire pll_clkout0;\n    wire pll_clkout1;\n")
+    out = out.replace(
+        "        .CLKOUT1      (), ", "        .CLKOUT1      (pll_clkout1), ")
+    # A statically enabled output whose dynamic enable is tied low is still
+    # gated off; "loaded" has to mean both.
+    out = out.replace(
+        "        .ENCLK1       (1'b0), ", "        .ENCLK1       (1'b1), ")
+    out = out.replace("""    reg q;
+    always @(posedge pll_clkout0)
+        q <= din ^ pll_lock;
+
+    assign dout = q;
+""", """    reg q;
+    always @(posedge pll_clkout0)
+        q <= din ^ pll_lock;
+
+    // The CLKOUT1 load. Without it the vendor writes A_CLKOUT1_EN and no
+    // A_ODIV1_SEL at any divider value -- MEASURED, six points, batch B
+    // (`sweep-b-138c.md` 3.1), which is what this variant exists to resolve.
+    reg q1;
+    always @(posedge pll_clkout1)
+        q1 <= din;
+
+    assign dout = q ^ q1;
+""")
+    if out == template:
+        raise AssertionError("RTL changed shape: the CLKOUT1 load did not apply")
+    return out
+
+
+#: The `ODIV1L` axis's Verilog (`P1.T42`).
+RTL_CLKOUT1_LOADED = _load_clkout1(RTL)
+
+
 def rtl(spec, sweep_value=None):
     """Render this shape's Verilog for one sweep point."""
     point = sweep_value or SPEC.baseline_value
     axis, value = resolve(point)
     parms = axis.params(value)
-    lines = [f"        .{a}({parms[a]})" for a in PARAM_ORDER]
-    return RTL.format(
+    lines = [f"        .{a}({parms[a]})" for a in axis.param_order()]
+    return (RTL_CLKOUT1_LOADED if axis.loads_clkout1 else RTL).format(
         name=spec.name,
         primitive=spec.primitive,
         sweep_axis=spec.sweep_axis,
@@ -377,9 +599,9 @@ def rtl(spec, sweep_value=None):
 
 
 def site(sweep_value):
-    """The `INS_LOC` site of one point -- the axis's site (`E1`)."""
-    axis, _ = resolve(sweep_value or SPEC.baseline_value)
-    return axis.site
+    """The `INS_LOC` site of one point (`E1`); the `SITE` axis sweeps it."""
+    axis, value = resolve(sweep_value or SPEC.baseline_value)
+    return axis.site_of(value)
 
 
 def _sweep_values():
@@ -391,7 +613,9 @@ def _baseline_value():
 
 
 def _scope():
-    sites = {axis.site for axis in selected_axes()}
+    sites = set()
+    for axis in selected_axes():
+        sites |= axis.sites()
     tiles = []
     for one in sorted(sites):
         tiles.extend(scope_tiles(one))
