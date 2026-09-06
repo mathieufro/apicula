@@ -1,0 +1,76 @@
+#!/bin/sh
+# Local gate -- pre-push ONLY (C12, D94, D95). There is no pre-commit hook.
+#
+# Owner ruling (C12, 2026-09-05): "ci should only run on big branch push
+# like main or dev, not on every push, we don't have time for this (and
+# also it should be detached)". Task-branch pushes get a ZERO gate: this
+# hook reads the pushed refs once and, unless one targets main, dev,
+# integration/* or epic/*, exits 0 immediately. Otherwise it spawns
+# `make gate GATE_SCOPE=branch` DETACHED -- the push completes right away;
+# the gate runs in the background, watched by an out-of-process watchdog
+# (fine-line CLAUDE.md "Long-running work"), and writes a PASS/FAIL marker
+# as its last action. `open-toolchain/tools/gate_status.py` reads the
+# markers; the orchestrator checks them before any merge. This hook never
+# blocks a push.
+set -e
+
+root="$(git rev-parse --show-toplevel)"
+repo="$(basename "$root")"
+
+if [ -f "$root/gate.env" ]; then
+    . "$root/gate.env"
+fi
+
+gate_ref=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "$local_ref" ] && continue
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/dev|refs/heads/integration/*|refs/heads/epic/*)
+            gate_ref="${remote_ref#refs/heads/}"
+            ;;
+    esac
+done
+
+if [ -z "$gate_ref" ]; then
+    exit 0
+fi
+
+if [ -d "$root/../open-toolchain" ]; then
+    otc="$root/../open-toolchain"
+else
+    otc="$root/open-toolchain"
+fi
+evdir="$otc/evidence/_gates"
+mkdir -p "$evdir" 2>/dev/null || true
+
+sha="$(git rev-parse --short HEAD)"
+safe_ref=$(printf '%s' "$gate_ref" | tr '/' '-')
+id="${repo}-${safe_ref}-${sha}"
+log="$evdir/${id}.log"
+result="$evdir/${id}.result"
+pidfile="$evdir/${id}.pid"
+wdlog="$evdir/${id}.watchdog.log"
+
+rm -f "$result" "$pidfile"
+: > "$log"
+: > "$wdlog"
+
+nohup sh -c "
+    echo \$\$ > '$pidfile'
+    if make -C '$root' gate GATE_SCOPE=branch; then
+        echo PASS > '$result'
+    else
+        echo FAIL > '$result'
+    fi
+    echo 'BATCH_COMPLETE $id' >> '$log'
+" >>"$log" 2>&1 </dev/null &
+disown 2>/dev/null || true
+
+watchdog="$otc/tools/gate_watchdog.sh"
+if [ -x "$watchdog" ]; then
+    nohup "$watchdog" "$id" "$log" "$wdlog" "$pidfile" 5 30 >/dev/null 2>&1 </dev/null &
+    disown 2>/dev/null || true
+fi
+
+echo "pre-push: spawned detached gate for $gate_ref (GATE_SCOPE=branch), log: $log" >&2
+exit 0
