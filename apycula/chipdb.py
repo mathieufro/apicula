@@ -2564,6 +2564,34 @@ def _pll_old_style_present(dat, table, idx):
     return dat.gw5aStuff[table][idx] != -1
 
 
+
+#: The primitive each device's PLL sites instantiate.  The GW5A-25A's is the
+#: `PLLA` this family was first modelled around; the GW5AST-138C has **no**
+#: `PLLA` at all and its primitive is `PLL`, with a different port set and a
+#: different VCO band (`D96`, vendor `RP0008` "There is no PLLA resource in
+#: current device").  It is carried in the database rather than inferred by
+#: the consumer, so nextpnr's bel type follows the device instead of the
+#: family.
+_gw5a_pll_primitive = {
+    'GW5A-25A': 'PLLA',
+    'GW5AST-138C': 'PLL',
+}
+
+#: The vendor's symbolic placement handle for each site, keyed by `slot_idx`.
+#: `INS_LOC "<inst>" PLL_L[0];` is how the vendor pins a hard PLL to a site
+#: (SUG1018 sec 2.9), and the bijection below is the one `P1.T19` MEASURED,
+#: one oracle run per site (`$OTC/evidence/plla/sites-138c.md` §8) -- not a
+#: row-major convention.  Devices absent here expose no such handle and their
+#: sites keep the plain `PLL` bel name.
+_gw5a_pll_macros = {
+    'GW5AST-138C': {
+        0: 'PLL_L[0]', 1: 'PLL_L[1]', 2: 'PLL_L[2]', 3: 'PLL_L[3]',
+        4: 'PLL_R[0]', 5: 'PLL_R[1]', 6: 'PLL_R[2]', 7: 'PLL_R[3]',
+        8: 'PLL_B[0]', 9: 'PLL_B[1]', 10: 'PLL_B[2]', 11: 'PLL_B[3]',
+    },
+}
+
+
 def fse_create_slot_plls(dev, device, fse, dat):
     if device not in _gw5a_pll_slots:
         return
@@ -2571,6 +2599,18 @@ def fse_create_slot_plls(dev, device, fse, dat):
         extra = dev.extra_func.setdefault((row, col), {})
         pll = extra.setdefault('pll', {})
         pll['slot_idx'] = slot_idx
+        pll['primitive'] = _gw5a_pll_primitive.get(device, 'PLLA')
+        macro = _gw5a_pll_macros.get(device, {}).get(slot_idx)
+        if macro is not None:
+            pll['macro'] = macro
+        if 'PLL' in dev.shortval[dev.grid[row][col]]:
+            # The unpacker walks `tile.bels`, so a site with no bel there
+            # decodes to nothing at all -- which is what made a GW5A `PLL`
+            # invisible to `gowin_unpack` even though its fuses were in an
+            # ordinary `shortval['PLL']` table (`P1.T41`).  The three tiles of a
+            # site share their ttyp with no other function, so the bel belongs
+            # to the anchor's tile type and to nothing else.
+            dev[row, col].bels.setdefault('PLL', Bel())
         portmap = pll.setdefault('inputs', {})
         pll_idx = slot_idx
         # inputs

@@ -19,7 +19,7 @@ test-only overrides, and for the same reason.  It is a comma-separated list of
 axis names from `AXES`; the default is batch A.
 
     FUZZ_PLL_AXIS=idiv,fbdiv   P1.T23  batch A   (this task, 20 runs)
-    FUZZ_PLL_AXIS=odiv,mdiv    P1.T41  batch B
+    FUZZ_PLL_AXIS=odiv0,odiv1,mdiv   P1.T41  batch B (20 runs)
     FUZZ_PLL_AXIS=dyn          P1.T42  batch C
     FUZZ_PLL_AXIS=site         P1.T43  batch D
 
@@ -174,9 +174,48 @@ AXIS_FBDIV = Axis(
     "FBDIV", "FBDIV_SEL", range(13, 24), 18,
     {"FCLKIN": '"100.0"', "IDIV_SEL": "4", "MDIV_SEL": "2", "ODIV0_SEL": "8"})
 
+#: `ODIV0` axis, `P1.T41`.  `ODIV` divides `CLKOUT0` **after** the VCO, so it
+#: moves neither `Fpfd` nor `FVCO`: the whole axis sits at one charge-pump
+#: operating point, which is what makes it the clean single-attribute axis of
+#: batch B.  `FCLKIN 100`, `IDIV 4`, `FBDIV 18`, `MDIV 2` -> `Fpfd` 25 MHz,
+#: `FVCO` 900 MHz; `CLKOUT0 = 900/ODIV0` -> 900 .. 14.06 MHz over the seven
+#: values, every one inside `[5.079, 1000]`.  The set mixes powers of two with
+#: two odd values so a binary `A_ODIV0_SEL` field is exercised in both halves.
+AXIS_ODIV0 = Axis(
+    "ODIV0", "ODIV0_SEL", [1, 2, 3, 4, 8, 16, 64], 8,
+    {"FCLKIN": '"100.0"', "IDIV_SEL": "4", "FBDIV_SEL": "18", "MDIV_SEL": "2",
+     "ODIV0_SEL": "8"})
+
+#: `ODIV1` axis, `P1.T41`.  Same operating point as `ODIV0`, plus
+#: `CLKOUT1_EN "TRUE"`: with `CLKOUT1` disabled the vendor emits **no**
+#: `A_ODIV1_SEL` fuses at all (MEASURED on batch A, whose `ODIV1_SEL 8` decodes
+#: to no value in the `A_ODIV1_SEL` (115) field), so a disabled-output `ODIV1`
+#: sweep would be twenty runs of nothing.  `CLKOUT1_EN` is part of this axis's
+#: *operating point*, not its swept parameter, so a point still differs from
+#: its own baseline in exactly one key.
+AXIS_ODIV1 = Axis(
+    "ODIV1", "ODIV1_SEL", [2, 4, 8, 16, 32, 64], 8,
+    {"FCLKIN": '"100.0"', "IDIV_SEL": "4", "FBDIV_SEL": "18", "MDIV_SEL": "2",
+     "ODIV0_SEL": "8", "CLKOUT1_EN": '"TRUE"'})
+
+#: `MDIV` axis, `P1.T41`.  `MDIV` multiplies into the VCO exactly as `FBDIV`
+#: does (`FVCO = FCLKIN * FBDIV * MDIV / IDIV`), so the axis is bounded by the
+#: factor-of-two VCO band and by nothing else: `FCLKIN 100`, `IDIV 4`,
+#: `FBDIV 1` -> `FVCO = 25 * MDIV`, legal for `MDIV` in `[26, 52]`.  Seven
+#: values spread across that interval, baseline `36` (`FVCO` 900 MHz, the same
+#: VCO frequency the two `ODIV` axes sit at, so the three axes of batch B share
+#: one charge-pump operating point at their baselines).
+AXIS_MDIV = Axis(
+    "MDIV", "MDIV_SEL", [26, 30, 34, 36, 40, 46, 52], 36,
+    {"FCLKIN": '"100.0"', "IDIV_SEL": "4", "FBDIV_SEL": "1", "MDIV_SEL": "36",
+     "ODIV0_SEL": "8"})
+
 AXES = {
     "idiv": AXIS_IDIV,
     "fbdiv": AXIS_FBDIV,
+    "odiv0": AXIS_ODIV0,
+    "odiv1": AXIS_ODIV1,
+    "mdiv": AXIS_MDIV,
 }
 
 #: Batch A (`P1.T23`). `P1.T41`-`T43` set `FUZZ_PLL_AXIS` instead of editing.

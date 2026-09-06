@@ -60,9 +60,9 @@ def test_clkdiv2_is_listed_as_non_fuse_backed():
     assert "CLKDIV2" in equiv.NON_FUSE_BACKED_BELS
 
 
-def test_hclk_type_does_not_eat_the_2_of_clkdiv2():
+def test_bitstream_cell_type_does_not_eat_the_2_of_clkdiv2():
     """`CLKDIV2` and `CLKDIV` stay distinguishable once the index is stripped."""
-    assert equiv._hclk_type("CLKDIV2_1") == "CLKDIV2"
-    assert equiv._hclk_type("CLKDIV2") == "CLKDIV2"
-    assert equiv._hclk_type("CLKDIV_1") == "CLKDIV"
-    assert equiv._hclk_type("IOB") is None
+    assert equiv._bitstream_cell_type("CLKDIV2_1") == "CLKDIV2"
+    assert equiv._bitstream_cell_type("CLKDIV2") == "CLKDIV2"
+    assert equiv._bitstream_cell_type("CLKDIV_1") == "CLKDIV"
+    assert equiv._bitstream_cell_type("IOB") is None

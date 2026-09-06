@@ -7,6 +7,7 @@ import math
 import re
 
 from apycula import attrids
+from apycula import gw5ast138c_pll_pump as pll_pump
 from apycula import bitmatrix
 from apycula import bslib
 from apycula import chipdb
@@ -5603,13 +5604,7 @@ class GW5A(Device):
         # XXX internal feedback for now
         fvco = self.compute_pll_fvco(fclkin, idiv, fbdiv, mdiv)
         self.check_pll_fvco(fvco)
-        fclkin_idx, icp, r_idx = self.get_pll_pump(fref, fvco)
-        self.chipdb.get_pll_attr_val(AttrVal('KVCO', fclkin_idx // 16), av)
-        if fvco > 1400.0:
-            fclkin_idx += 1
-        self.chipdb.get_pll_attr_val(AttrVal('A_ICP_SEL', int(icp)), av)
-        self.chipdb.get_pll_attr_val(AttrVal('A_LPF_RES_SEL', f'R{r_idx}'), av)
-        self.chipdb.get_pll_attr_val(AttrVal('FLDCOUNT', fclkin_idx), av)
+        self.set_pll_pump_attrvals(av, fref, fvco)
 
         # set other attributes
         attr = 'A_RESET_I_EN'
@@ -5635,6 +5630,24 @@ class GW5A(Device):
         self.chipdb.get_pll_attr_val(AttrVal('A_CLKFBOUT_PE_FINE', 0), av)
 
         return av
+
+    def set_pll_pump_attrvals(self, av: set[int], fref: float, fvco: float):
+        """ Add the four charge-pump / loop-filter attributes to `av`.
+
+        `KVCO`, `FLDCOUNT`, `A_ICP_SEL` and `A_LPF_RES_SEL` are the only
+        attributes the vendor *derives* rather than reads off the cell, and the
+        derivation is per device: the GW5AST-138C ties `KVCO` to neither
+        `FLDCOUNT` nor the VCO, and its VCO band tops out below the 1400MHz
+        step this method takes.  Kept as one overridable step so a device with
+        a different pump changes this and nothing else.
+        """
+        fclkin_idx, icp, r_idx = self.get_pll_pump(fref, fvco)
+        self.chipdb.get_pll_attr_val(AttrVal('KVCO', fclkin_idx // 16), av)
+        if fvco > 1400.0:
+            fclkin_idx += 1
+        self.chipdb.get_pll_attr_val(AttrVal('A_ICP_SEL', int(icp)), av)
+        self.chipdb.get_pll_attr_val(AttrVal('A_LPF_RES_SEL', f'R{r_idx}'), av)
+        self.chipdb.get_pll_attr_val(AttrVal('FLDCOUNT', fclkin_idx), av)
 
     def rename_plla_attrs(self, bel: BelDesc) -> BelDesc:
         cell = bel.cell
@@ -6847,6 +6860,66 @@ class GW5AST_138C(GW5A):
             raise Exception(
                 f"FVCO {fvco:.1f} MHz is outside the GW5AST-138C permitted "
                 f"range [{min_vco}, {max_vco}] MHz")
+
+    def get_pll_bels(self, bel: BelDesc) -> Iterator[tuple[int, int]]:
+        """ The site's three tiles, in ascending column order.
+
+        This device has no PLL slot and no `drpfuse` table (`P1.T17`,
+        MEASURED: no pseudo-ttyp >= 1024 exists on it), so a `PLL`'s fuses are
+        ordinary `shortval[ttyp]['PLL']` fuses of the three horizontally
+        adjacent tiles the site spans, and `bel.x` is the lowest column of the
+        three (`$OTC/evidence/plla/sites-138c.md` §3).
+        """
+        for off in range(3):
+            yield (bel.x + off, bel.y)
+
+    def set_pll_pump_attrvals(self, av: set[int], fref: float, fvco: float):
+        """ The MEASURED charge pump of this device.
+
+        `gw5ast138c_pll_pump` documents where each constant comes from.  Two
+        things differ from the inherited GW5A derivation and both are measured
+        rather than assumed: `KVCO` is a constant here instead of a function of
+        `FLDCOUNT`, and the `FVCO > 1400 MHz` `FLDCOUNT` step cannot be reached
+        at all, because this part's `FVCOMAX` is 1300 MHz.
+        """
+        fldcount, icp, r_idx = self.get_pll_pump(fref, fvco)
+        self.chipdb.get_pll_attr_val(AttrVal('KVCO', pll_pump.KVCO), av)
+        self.chipdb.get_pll_attr_val(AttrVal('A_ICP_SEL', int(icp)), av)
+        self.chipdb.get_pll_attr_val(AttrVal('A_LPF_RES_SEL', f'R{r_idx}'), av)
+        self.chipdb.get_pll_attr_val(AttrVal('FLDCOUNT', fldcount), av)
+
+    def get_pll_pump(self, fref: float, fvco: float) -> tuple[int, int, int]:
+        """ `(FLDCOUNT, A_ICP_SEL, r_idx)` from the measured 138C fit. """
+        return pll_pump.pump(fref, fvco)
+
+    def get_pll_attrvals(self, bel: BelDesc) -> set[int]:
+        """ GW5A attributes, with this device's one unsupported divider value.
+
+        `MDIV_SEL 1` is refused rather than encoded: the vendor accepts it,
+        validates `FVCO` with it, and then writes its own default
+        `A_MDIV_SEL 8` plus a charge pump consistent with neither
+        (`gw5ast138c_pll_pump.MDIV_SEL_MIN`, MEASURED over three runs).  No
+        bitstream built from it can agree with the vendor's, so emitting one
+        would be worse than refusing.
+        """
+        mdiv = int(bel.cell.parms.get('A_MDIV_SEL', bin(8)), 2)
+        if mdiv < pll_pump.MDIV_SEL_MIN:
+            raise Exception(
+                f"MDIV_SEL {mdiv} is not supported on the GW5AST-138C: the "
+                f"vendor silently substitutes its default 8 for it "
+                f"(cell '{bel.cell.name}')")
+        return super().get_pll_attrvals(bel)
+
+    def get_PLL_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ `PLL`, this device's primitive (`D96`) -- ordinary tile fuses.
+
+        `GW5A.common_pll_handler` writes through a DRP slot, which this device
+        does not have; `Device.common_pll_handler` writes the site's own tiles,
+        which is what `P1.T17`-`P1.T23` measured the fuses to be.  The cell's
+        parameters carry no `A_` prefix, so they are renamed exactly the way
+        `get_PLLA_fuses` renames the 25A's.
+        """
+        return Device.common_pll_handler(self, self.rename_plla_attrs(bel))
 
     #==============================
     #========== Pips

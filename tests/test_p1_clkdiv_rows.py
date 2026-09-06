@@ -239,14 +239,14 @@ def test_gen_config_role_pin_needs_a_measured_ack(tmp_path):
         gen.assert_cst_defaults(bad)
 
 
-def test_level_e1_hclk_reads_the_vendor_bitstream_not_its_reports():
+def test_level_e1_bitstream_reads_the_vendor_bitstream_not_its_reports():
     """`E1` for a CLKDIV: the vendor's `.tr` never names one (measured)."""
     exported = {"div0": {"x": 117, "y": 108, "z": 0, "type": "CLKDIV",
                          "bel": "CLKDIV_0"}}
     scope = type("S", (), {"tiles": [(117, 108)]})()
-    ok = equiv.level_e1_hclk(exported, {(117, 108, 0): "CLKDIV"}, scope=scope)
+    ok = equiv.level_e1_bitstream(exported, {(117, 108, 0): "CLKDIV"}, scope=scope)
     assert ok["level"] == "E1" and len(ok["matched"]) == 1
-    moved = equiv.level_e1_hclk(exported, {(64, 108, 0): "CLKDIV"}, scope=scope)
+    moved = equiv.level_e1_bitstream(exported, {(64, 108, 0): "CLKDIV"}, scope=scope)
     assert moved["level"] == "E0" and len(moved["mismatched"]) == 1
     # and the merge: a CLS half that saw nothing in scope must not veto it
     silent = {"level": "E0", "checked": 3, "matched": [], "mismatched": [],
@@ -255,14 +255,14 @@ def test_level_e1_hclk_reads_the_vendor_bitstream_not_its_reports():
     assert equiv.merge_e1(silent, moved)["level"] == "E0"
 
 
-def test_hclk_exported_reads_clkdiv_and_clkdiv2_bels():
+def test_bitstream_bel_exported_reads_clkdiv_and_clkdiv2_bels():
     cells = [
         {"name": "div0", "type": "CLKDIV", "bel": "CLKDIV_2", "site": (117, 108)},
         {"name": "div2", "type": "CLKDIV2", "bel": "CLKDIV2_2", "site": (117, 108)},
         {"name": "ctr", "type": "DFF", "bel": "DFF3", "site": (10, 10)},
         {"name": "un", "type": "CLKDIV", "bel": None, "site": None},
     ]
-    got = equiv.hclk_exported(cells)
+    got = equiv.bitstream_bel_exported(cells)
     assert set(got) == {"div0", "div2"}
     assert got["div0"]["type"] == "CLKDIV" and got["div0"]["z"] == 2
     assert got["div2"]["type"] == "CLKDIV2"

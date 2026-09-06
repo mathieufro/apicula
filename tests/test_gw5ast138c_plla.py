@@ -718,3 +718,279 @@ def test_plla_sweep_batch_a_rows():
             assert len(diff) == 1, f"{row['run_id']} differs in {sorted(diff)}"
     assert n_baseline == len(BATCH_A_AXES), \
         f'{n_baseline} baseline rows, expected one per axis'
+
+
+# ---------------------------------------------------------------- P1.T41
+#
+# Batch B: the `ODIV0` / `ODIV1` / `MDIV` axes, and the four gaps that stood
+# between a `PLL` design and a `.fs` through the open flow
+# (`$OTC/evidence/plla/openflow-gap-138c.md`).
+
+BATCH_B_AXES = {'ODIV0', 'ODIV1', 'MDIV'}
+BATCH_B_ROWS = 20
+BATCH_B_ID = 'p1-pll-sweep-b'
+BATCH_B_ENV = 'odiv0,odiv1,mdiv'
+
+#: `$OTC/evidence/plla/pump-138c.json`, the campaign this fit was made from.
+PUMP_BATCH_ID = 'p1-pll-pump'
+PUMP_POINTS = 10
+
+#: The Done-when run: one `PLL` design through the whole open flow.
+E1_BATCH_ID = 'p1-pll-e1'
+
+#: The nextpnr checkout whose sources the gap-1/2 assertions read.
+_NEXTPNR_SRC = Path(os.environ.get(
+    'NEXTPNR_SRC',
+    '/Users/alex/fine-line/.atelier/worktrees/'
+    '2026-09-03-open-toolchain-gw5ast-7e84/nextpnr'))
+
+
+def _db_138c():
+    """The packaged 138C chipdb, or a skip when it has not been built."""
+    import importlib.resources as ir
+    from apycula import chipdb as _chipdb
+    path = ir.files('apycula') / 'GW5AST-138C.msgpack.xz'
+    if not path.is_file():
+        pytest.skip('apycula/GW5AST-138C.msgpack.xz absent (make it first)')
+    return _chipdb.load_chipdb(str(path))
+
+
+def test_pll_sweep_batch_b_axes_are_inside_every_datasheet_band():
+    """Every batch-B point satisfies all four DS1239E Table 3-18 bounds.
+
+    The `ODIV` axes move `CLKOUT0`/`CLKOUT1` only and the `MDIV` axis moves
+    `FVCO` only, so this is the band check batch A's own points get, applied
+    to the three axes `P1.T41` adds.
+    """
+    m = _shape(BATCH_B_ENV)
+    fin_max, fout_max, fout_min, fvco_max, fvco_min = PERMITTED_FREQS_138C
+    points = m.points()
+    assert len(points) == BATCH_B_ROWS
+    assert {a.name for a, _ in points.values()} == BATCH_B_AXES
+    for name, (axis, value) in points.items():
+        parms = axis.params(value)
+        fclkin = float(parms['FCLKIN'].strip('"'))
+        assert fclkin <= fin_max, f'{name}: FCLKIN {fclkin} > FINMAX'
+        assert FPFD_BAND_138C[0] <= axis.fpfd(value) <= FPFD_BAND_138C[1], \
+            f'{name}: Fpfd {axis.fpfd(value)} outside {FPFD_BAND_138C}'
+        assert fvco_min <= axis.fvco(value) <= fvco_max, \
+            f'{name}: FVCO {axis.fvco(value)} outside [{fvco_min}, {fvco_max}]'
+        # The ODIV1 axis divides CLKOUT1, not CLKOUT0; both share the band.
+        divider = int(parms[axis.param]) if axis.name.startswith('ODIV') \
+            else int(parms['ODIV0_SEL'])
+        out = axis.fvco(value) / divider
+        assert fout_min <= out <= fout_max, \
+            f'{name}: CLKOUT {out} outside [{fout_min}, {fout_max}]'
+
+
+def test_pll_sweep_batch_b_odiv1_axis_enables_clkout1():
+    """`ODIV1` without `CLKOUT1_EN` writes no fuse, so it is in the axis.
+
+    MEASURED on batch A: `ODIV1_SEL 8` with `CLKOUT1_EN "FALSE"` decodes to no
+    value at all in the `A_ODIV1_SEL` (115) field of the site's `shortval[35]`
+    table, i.e. the vendor emits the `ODIV1` divider only for an enabled
+    output. `CLKOUT1_EN` therefore belongs to the axis's *operating point* --
+    which keeps "a point differs from its own baseline in exactly one key"
+    true, and that invariant is asserted for every axis by
+    `test_pll_sweep_shape_changes_exactly_one_parameter_per_point`.
+    """
+    m = _shape(BATCH_B_ENV)
+    for name, (axis, value) in m.points().items():
+        parms = axis.params(value)
+        if axis.name == 'ODIV1':
+            assert parms['CLKOUT1_EN'] == '"TRUE"', name
+        else:
+            assert parms['CLKOUT1_EN'] == '"FALSE"', name
+
+
+def _batch_b_rows():
+    """Batch B's rows out of the slug's `runs.jsonl` (skip when absent)."""
+    import json
+    path = Path(OTC) / 'evidence' / 'plla' / 'runs.jsonl'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    rows = [r for r in rows if str(r.get('run_id', '')).startswith(BATCH_B_ID)]
+    if not rows:
+        pytest.skip('batch p1-pll-sweep-b has not been merged into runs.jsonl')
+    return rows
+
+
+def test_plla_sweep_batch_b_rows():
+    """`runs.jsonl` gained exactly 20 admissible batch-B rows.
+
+    The blueprint's terms: 20 rows carrying `sweep.axis` in the batch-B axis
+    set, `0` aborted **oracle** halves (every row carries a vendor `.fs`),
+    `mask_sha256` identical to batch A's, and every row's `sweep` map
+    differing from its own axis baseline in exactly one key.
+    """
+    m = _shape(BATCH_B_ENV)
+    rows = _batch_b_rows()
+    assert len(rows) == BATCH_B_ROWS, f'{len(rows)} rows, expected {BATCH_B_ROWS}'
+    assert len({r['run_id'] for r in rows}) == BATCH_B_ROWS
+
+    axes = {r['sweep']['axis'] for r in rows}
+    assert axes == BATCH_B_AXES, f'axes {axes}'
+    assert all(r.get('vendor_fs') for r in rows), \
+        'a row carries no vendor .fs: the oracle half did not complete'
+
+    masks = {r.get('mask_sha256') for r in rows}
+    assert len(masks) == 1, f'mask_sha256 differs inside batch B: {masks}'
+    a_masks = {r.get('mask_sha256') for r in _batch_a_rows()}
+    assert masks == a_masks, f'batch B mask {masks} != batch A mask {a_masks}'
+
+    baselines = {}
+    for name, (axis, value) in m.points().items():
+        if value == axis.baseline:
+            baselines[axis.name] = {'axis': axis.name, axis.param: value}
+    assert set(baselines) == BATCH_B_AXES
+
+    n_baseline = 0
+    for row in rows:
+        sweep = row['sweep']
+        base = baselines[sweep['axis']]
+        assert set(sweep) == set(base), f"{row['run_id']}: keys {sorted(sweep)}"
+        diff = {k for k in base if base[k] != sweep[k]}
+        if not diff:
+            n_baseline += 1
+        else:
+            assert len(diff) == 1, f"{row['run_id']} differs in {sorted(diff)}"
+    assert n_baseline == len(BATCH_B_AXES), \
+        f'{n_baseline} baseline rows, expected one per axis'
+
+
+# --- the four gaps `openflow-gap-138c.md` recorded (`P1.T41`) --------------
+
+
+def test_pll_chipdb_names_every_site_primitive_and_macro():
+    """Gap 1/2, data half: the database carries what the die actually has.
+
+    The GW5AST-138C's primitive is `PLL`, not `PLLA` (`D96`), and each of its
+    twelve sites has a vendor placement handle -- the bijection `P1.T19`
+    measured one oracle run at a time. Both live in the chipdb so nextpnr's
+    bel type and `cst.cc`'s macro table follow the *device*; nothing infers
+    either from the family or from where a site sits on the die.
+    """
+    from apycula import chipdb as _chipdb
+    macros = _chipdb._gw5a_pll_macros['GW5AST-138C']
+    assert len(macros) == PLL_COUNT_138C
+    assert set(macros.values()) == {
+        f'PLL_{side}[{i}]' for side in 'LRB' for i in range(4)}
+    slots = {slot: (row, col) for row, col, slot, _io
+             in _chipdb._gw5a_pll_slots['GW5AST-138C']}
+    assert {slots[s] for s in macros} == SITE_ANCHORS_138C
+    assert macros[0] == 'PLL_L[0]' and slots[0] == (27, 1)
+    assert _chipdb._gw5a_pll_primitive['GW5AST-138C'] == 'PLL'
+    assert _chipdb._gw5a_pll_primitive['GW5A-25A'] == 'PLLA'
+
+
+def test_pll_bel_and_macro_reach_the_built_chipdb():
+    """The built database exposes the primitive, the macro and a decodable bel.
+
+    A site with no entry in `tile.bels` decodes to nothing, which is what made
+    a GW5A `PLL` invisible to `gowin_unpack` even though its fuses sat in an
+    ordinary `shortval['PLL']` table.
+    """
+    db = _db_138c()
+    sites = {(row, col): func['pll']
+             for (row, col), func in db.extra_func.items() if 'pll' in func}
+    assert len(sites) == PLL_COUNT_138C
+    assert {s['primitive'] for s in sites.values()} == {'PLL'}
+    assert sites[(27, 1)]['macro'] == 'PLL_L[0]'
+    assert 'PLL' in db.tiles[db.grid[27][1]].bels
+    assert 'PLL' in db.shortval[db.grid[27][1]]
+
+
+def test_nextpnr_accepts_the_pll_cell_and_resolves_the_macro():
+    """Gap 1/2, code half: `cst.cc` and `pack.cc` name the `PLL` at all.
+
+    `cst.cc:334` shipped an empty macro table, so `INS_LOC "u" PLL_L[0];` was
+    `Unknown placement macro`; `pack.cc:162` matched only `rPLL`/`PLLVR`/
+    `PLLA`, so a `PLL` cell had no bel; and `gowin.h`'s `type_is_pll` omitted
+    both GW5A spellings, so every `is_pll()` site skipped them.
+    """
+    gowin = _NEXTPNR_SRC / 'himbaechel' / 'uarch' / 'gowin'
+    if not gowin.is_dir():
+        pytest.skip(f'{gowin} absent (set $NEXTPNR_SRC)')
+    cst = (gowin / 'cst.cc').read_text()
+    assert 'macro_bel_type = {}' not in cst, 'the macro table is still empty'
+    for family in ('PLL_L', 'PLL_R', 'PLL_B'):
+        assert f'{{"{family}", id_PLL}}' in cst, family
+    assert 'macro_bels' in cst, 'the macro is not resolved through the chipdb'
+    pack = (gowin / 'pack.cc').read_text()
+    assert 'id_rPLL, id_PLLVR, id_PLLA, id_PLL' in pack
+    header = (gowin / 'gowin.h').read_text()
+    assert ('type_is_pll(IdString cell_type) { return cell_type.in(id_rPLL, '
+            'id_PLLVR, id_PLLA, id_PLL); }') in header
+
+
+def test_get_PLL_fuses_writes_the_three_site_tiles_without_a_slot():
+    """Gap 3: `gowin_pack` has a `PLL` handler, and it is not the slot path.
+
+    `GW5A.common_pll_handler` writes through `get_pll_slot_fuses`, hardcoded
+    to pseudo-ttyp 1024, which this device does not have (`P1.T17`). The 138C
+    handler writes the site's own three tiles instead.
+    """
+    from apycula.gowin_pack import Device, GW5A, GW5AST_138C
+    assert hasattr(GW5AST_138C, 'get_PLL_fuses')
+    assert GW5AST_138C.get_PLL_fuses is not getattr(GW5A, 'get_PLL_fuses', None)
+    # GW5A defines no `get_pll_bels` at all -- the 25A never needs one, because
+    # its slot path never asks which tiles a site spans.
+    assert not hasattr(GW5A, 'get_pll_bels')
+
+    class _Bel:
+        x, y = 1, 27
+    tiles = list(GW5AST_138C.get_pll_bels(None, _Bel()))
+    assert tiles == [(1, 27), (2, 27), (3, 27)]
+    # the handler must reach Device's tile path, never GW5A's slot path
+    source = GW5AST_138C.get_PLL_fuses.__doc__ or ''
+    assert 'common_pll_handler' in source
+    assert Device.common_pll_handler is not GW5A.common_pll_handler
+
+
+def test_pll_pump_reproduces_every_measured_point():
+    """Gap 4: the fitted charge pump agrees with every vendor bitstream.
+
+    `$OTC/evidence/plla/pump-138c.json` is `gen_pump_138c.py`'s output over the
+    three campaigns; a single disagreeing point means the fit is wrong, and an
+    inconsistent coefficient interval means the model is.
+    """
+    import json
+    from apycula import gw5ast138c_pll_pump as pump_mod
+    path = Path(OTC) / 'evidence' / 'plla' / 'pump-138c.json'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    fit = json.loads(path.read_text())
+    assert fit['mismatches'] == []
+    assert fit['measured_points'] >= 44
+    assert fit['kvco'] == [pump_mod.KVCO]
+    for r_idx, row in fit['fit'].items():
+        assert row['consistent'], f'R{r_idx}: empty coefficient interval'
+        low, high = row['interval']
+        fitted = dict(pump_mod.ICP_PER_NDIV)[int(r_idx)]
+        assert low <= fitted <= high, f'R{r_idx}: {fitted} outside {row["interval"]}'
+    # every point re-derived here, not just trusted from the file
+    for point in fit['points']:
+        assert pump_mod.pump(point['fref'], point['fvco']) == (
+            point['FLDCOUNT'], point['icp'], point['r_value'] - 22)
+
+
+def test_pll_openflow_row_is_e1():
+    """Done-when: one `PLL` design closes `E1` with nothing unexplained."""
+    import json
+    path = Path(OTC) / 'evidence' / 'plla' / 'runs.jsonl'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    rows = [r for r in rows if str(r.get('run_id', '')).startswith(E1_BATCH_ID)]
+    if not rows:
+        pytest.skip(f'batch {E1_BATCH_ID} has not been merged into runs.jsonl')
+    assert len(rows) == 1
+    row = rows[0]
+    assert row['verdict'] == 'ok'
+    assert row['level'] == 'E1'
+    assert row['diff_count']['cells'] == 0
+    assert row['diff_count']['attrs'] == 0
+    assert row['diff_count']['conns'] == 0
+    assert row['decode_check'] == {'c1': 'ok', 'c2': 'ok'}
+    assert row.get('open_fs'), 'the open flow produced no bitstream'

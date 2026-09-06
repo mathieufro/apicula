@@ -1096,10 +1096,25 @@ class NetEndpointIndex:
                 net_id(eps) for eps in self.sides[side].nets.values() if eps}
         return self._all_ids[side]
 
+    #: The two global constant nets.  `D92`'s endpoint test does not apply to
+    #: them: their endpoint set is not a design property but the union of every
+    #: defaulted, unused input on the die, and the two flows fill those
+    #: differently *by construction* -- a vendor bitstream ties `ADCEN` on all
+    #: 400-odd IOBs of this package, the open flow ties none (MEASURED,
+    #: `P1.T41`: the vendor `VCC` net carries 191,062 such endpoints against
+    #: the open flow's 1,686, so the two identities can never be equal).  A pip
+    #: that ties an input to a constant cannot change any *design* net's
+    #: connectivity, and if it did, the `E0` `conns` set reports it -- which is
+    #: the term `D92` requires to stay live.  Both are §5.3 row 3's
+    #: `unused_tile_fill` case seen through a routing fuse.
+    CONSTANT_NET_ROOTS = frozenset({"VCC", "VSS", "GND"})
+
     def net_of(self, side, wire):
         """The identity of the net this wire belongs to on `side`, or `None`."""
         root = self.sides[side].wire_net.get(wire)
-        return None if root is None else self._net_id(side, root)
+        if root is None or root in self.CONSTANT_NET_ROOTS:
+            return None
+        return self._net_id(side, root)
 
     def _wire(self, row, col, dest):
         key = (row, col, dest)
@@ -1630,7 +1645,7 @@ def _clkdiv2_recovered_via_chain(site_cells):
     positive evidence the bitstream carries that the lane was halved.
     """
     for (cell_type, _z), attrs in site_cells.items():
-        if _hclk_type(cell_type) != "CLKDIV":
+        if _bitstream_cell_type(cell_type) != "CLKDIV":
             continue
         have = dict(canon_attr(f) for f in attrs)
         if "DIV_MODE" in have and _norm_param(have["DIV_MODE"]) == "2":
@@ -1664,7 +1679,7 @@ def decode_check_c1(pnr_cells, netlist):
                                    "DHCEN_USED"})
             continue
         base, z = split_bel_name(cell["bel"])
-        if _hclk_type(base) == "CLKDIV2":
+        if _bitstream_cell_type(base) == "CLKDIV2":
             if _clkdiv2_recovered_via_chain(by_site.get(cell["site"], {})):
                 skipped.append({
                     "name": cell["name"], "type": cell["type"],
@@ -2341,10 +2356,11 @@ def level_e1(exported, realised, scope=None):
             "mismatched": mismatched, "unobserved": unobserved, "notes": notes}
 
 
-# --- `E1` for HCLK-class bels (`P1.T14`/`P1.T15`) --------------------------
+# --- `E1` for bels the vendor addresses only in the bitstream --------------
+# (`P1.T14`/`P1.T15` for the HCLK bels, `P1.T41` for the `PLL`)
 #
-# A CLKDIV or CLKDIV2 has no CLS address, so `insloc_lines` skips it and the
-# `.tr`-based realised placement never names it.  MEASURED on the P1.T11
+# A CLKDIV, CLKDIV2 or PLL has no CLS address, so `insloc_lines` skips it and
+# the `.tr`-based realised placement never names it.  MEASURED on the P1.T11
 # vendor run (`$DATASTORE/batch/p1t11/clkdiv/run/impl/pnr/`): `run.tr`,
 # `run.rpt.txt`, `run.p`, `run.pr` and `run.log` contain the string `CLKDIV`
 # nowhere at all -- only `run.vo` names the *instance*, with no location.  So
@@ -2356,10 +2372,12 @@ def level_e1(exported, realised, scope=None):
 # cell at the tile and bel index the vendor chose.  That is a stronger source
 # than a text report, and it is the one used here: exported = the bel nextpnr
 # placed on, realised = the cell the vendor's own bitstream decodes to.
-_HCLK_BEL_RE = re.compile(r"^(CLKDIV2|CLKDIV)_([0-9]+)$")
+#: The `PLL` is the same case for the same reason: `run.tr` names no PLL site,
+#: and the bel carries no index because a site holds exactly one (`P1.T41`).
+_BITSTREAM_BEL_RE = re.compile(r"^(CLKDIV2|CLKDIV|PLL)(?:_([0-9]+))?$")
 
-#: Cell-type prefixes of the HCLK-class bels this check covers.
-HCLK_CELL_TYPES = ("CLKDIV2", "CLKDIV")
+#: Cell-type prefixes of the bels this check covers.
+BITSTREAM_ADDRESSED_CELL_TYPES = ("CLKDIV2", "CLKDIV", "PLL")
 
 
 #: The `_<index>` suffix a bel or decoded-cell name carries, and nothing more.
@@ -2368,41 +2386,42 @@ HCLK_CELL_TYPES = ("CLKDIV2", "CLKDIV")
 _HCLK_INDEX_SUFFIX = re.compile(r"_\d*$")
 
 
-def _hclk_type(name):
+def _bitstream_cell_type(name):
     """`'CLKDIV2_1'`/`'CLKDIV2_'`/`'CLKDIV2'` -> `'CLKDIV2'`, else `None`."""
     if not name:
         return None
     base = _HCLK_INDEX_SUFFIX.sub("", str(name))
-    return base if base in HCLK_CELL_TYPES else None
+    return base if base in BITSTREAM_ADDRESSED_CELL_TYPES else None
 
 
-def hclk_exported(pnr_cells):
-    """`{name: {x, y, z, type, bel}}` for the HCLK bels nextpnr placed."""
+def bitstream_bel_exported(pnr_cells):
+    """`{name: {x, y, z, type, bel}}` for the bels nextpnr placed here."""
     out = {}
     for cell in pnr_cells:
         bel, site = cell.get("bel"), cell.get("site")
         if bel is None or site is None:
             continue
-        m = _HCLK_BEL_RE.match(bel)
+        m = _BITSTREAM_BEL_RE.match(bel)
         if m is None:
             continue
-        out[cell["name"]] = {"x": site[0], "y": site[1], "z": int(m.group(2)),
+        out[cell["name"]] = {"x": site[0], "y": site[1],
+                             "z": int(m.group(2) or 0),
                              "type": m.group(1), "bel": bel}
     return out
 
 
-def hclk_realised(netlist):
-    """`{(x, y, z): type}` of the HCLK-class cells a decoded bitstream holds."""
+def bitstream_bel_realised(netlist):
+    """`{(x, y, z): type}` of those cells a decoded bitstream holds."""
     out = {}
     for cell in getattr(netlist, "cells", {}):
-        kind = _hclk_type(cell.type)
+        kind = _bitstream_cell_type(cell.type)
         if kind is not None:
             out[(cell.x, cell.y, cell.z)] = kind
     return out
 
 
-def level_e1_hclk(exported, realised, scope=None):
-    """`E1` for HCLK bels: is the vendor's decoded cell where we placed ours?
+def level_e1_bitstream(exported, realised, scope=None):
+    """`E1` from the bitstream: is the vendor's decoded cell where we placed ours?
 
     Same return shape as `level_e1`.  A site the vendor's bitstream decodes to
     a *different* HCLK type, or to nothing at all, is `mismatched` -- unlike
@@ -2437,10 +2456,11 @@ def level_e1_hclk(exported, realised, scope=None):
                  f"{first['name']!r} at {first['exported']} -- {first['realised']}")
     elif not exported:
         level = "E0"
-        notes = "no HCLK-class bel in the open placement"
+        notes = "no bitstream-addressed bel in the open placement"
     elif not in_scope_seen:
         level = "E0"
-        notes = ("EC9/HCLK: no HCLK bel lies inside the comparison scope")
+        notes = ("EC9/BEL: no bitstream-addressed bel lies inside the "
+                 "comparison scope")
     return {"level": level, "checked": len(exported), "matched": matched,
             "mismatched": mismatched, "unobserved": [], "notes": notes}
 
@@ -2700,8 +2720,9 @@ def compare_design(design_dir, shape=None, level="E0", mask_path=None,
             else:
                 result.e1 = merge_e1(
                     level_e1(exported, realised, scope=scope),
-                    level_e1_hclk(hclk_exported(read_pnr_cells(pnr)),
-                                  hclk_realised(nl_v), scope=scope))
+                    level_e1_bitstream(
+                        bitstream_bel_exported(read_pnr_cells(pnr)),
+                        bitstream_bel_realised(nl_v), scope=scope))
         else:
             result.e1 = {"level": "E0", "checked": 0, "matched": [],
                          "mismatched": [], "unobserved": [],

@@ -669,6 +669,18 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
             if modes:
                 bels[f'{name}{idx}'] = modes
             continue
+        if name == "PLL":
+            # The GW5A `PLL` (D96: the GW5AST-138C has no `PLLA`) keeps its
+            # fuses in the site's own three tiles' `shortval['PLL']` table, not
+            # in a DRP slot, so it decodes exactly like a pre-5A PLL does --
+            # the only difference is that it is addressed by its tile and never
+            # by a slot number.
+            attrvals = pll_attrs_refine(parse_attrvals(tile, db.rev_logicinfo('PLL'), db.shortval[tiledata.ttyp]['PLL'], attrids.pll_attrids, "PLL"))
+            modes = { f'DEVICE="{_device}"' }
+            for attrval in attrvals:
+                modes.add(attrval)
+            bels[name] = modes
+            continue
         if name == "PLLVR":
             idx = _pll_cells.setdefault(get_pll_A(db, row, col, 'A'), len(_pll_cells))
             attrvals = pll_attrs_refine(parse_attrvals(tile, db.rev_logicinfo('PLL'), db.shortval[tiledata.ttyp]['PLL'], attrids.pll_attrids, "PLL"))

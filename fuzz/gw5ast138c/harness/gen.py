@@ -25,6 +25,7 @@ only be set on an output pin (`DriveDirectionError`; `CT1108`), and every
 import argparse
 import importlib
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -244,6 +245,23 @@ def render_verilog(spec, sweep_value=None):
     return spec.rtl(spec, sweep_value)
 
 
+#: The `INS_LOC` site spellings `nextpnr-himbaechel`'s `.cst` reader accepts
+#: (`cst.cc`): the CLS form, the two-index HCLK side form, and -- since the PLL
+#: work landed its macro table -- the placement-macro form.  A site outside
+#: this set is emitted for the vendor and withheld from the open flow, which
+#: would `log_error` the whole run on it rather than ignore the line.
+OPEN_FLOW_INS_LOC_FORMS = (
+    re.compile(r"^R\d+C\d+\[\d\]\[[AB]\]$"),
+    re.compile(r"^(TOP|RIGHT|BOTTOM|LEFT)SIDE\[[01]\]$"),
+    re.compile(r"^PLL_[LRB]\[\d\]$"),
+)
+
+
+def open_flow_reads_ins_loc(site):
+    """Can `nextpnr-himbaechel`'s `.cst` reader resolve this site?"""
+    return any(form.match(site) for form in OPEN_FLOW_INS_LOC_FORMS)
+
+
 def render_cst(spec, sweep_value=None, with_ins_loc=True):
     """Render a `.cst`: one `IO_LOC`/`IO_PORT` pair per pin, then `INS_LOC`.
 
@@ -287,7 +305,11 @@ def render_cst(spec, sweep_value=None, with_ins_loc=True):
         attrs.extend("%s=%s" % (k, v) for k, v in pin.extra)
         lines.append('IO_LOC  "%s" %s;' % (port, pin.loc))
         lines.append('IO_PORT "%s" %s;' % (port, " ".join(attrs)))
-    ins_loc = ins_loc_of(spec, sweep_value) if with_ins_loc else {}
+    ins_loc = ins_loc_of(spec, sweep_value)
+    if not with_ins_loc:
+        ins_loc = {i: s for i, s in ins_loc.items()
+                   if open_flow_reads_ins_loc(
+                       s(sweep_value) if callable(s) else s)}
     if ins_loc:
         lines.append("")
         for instance in ins_loc:
