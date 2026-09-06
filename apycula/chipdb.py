@@ -2417,10 +2417,93 @@ def fse_create_adc(dev, device, fse, dat):
 # A slot with a specific number is responsible for a fixed primitive—for
 # example, slot 6 is the left PLL, slot 8 is the lower PLL.
 # Only the slots that are used are added to the binary image.
+# Per-device PLL site table, `{device: {(row, col, slot_idx, io_table)}}`.
+#
+# `GW5A-25A` is the original hardcoded literal, moved here unchanged (same set
+# contents, hence the same iteration order and a byte-identical chipdb).
+#
+# `GW5AST-138C` is NOT a bigger 25A, and the differences are measured, not
+# assumed (`$OTC/evidence/plla/sites-138c.md`, `P1.T17`):
+#
+#  * **there are no slots.** The `.fse` carries no pseudo-ttyp >= 1024 and no
+#    `drpfuse` header table -- the parse reaches EOF exactly, so this is an
+#    absence and not a mis-read. The PLL configuration fuses are ordinary
+#    `shortval[ttyp]['PLL']` entries in three horizontally adjacent grid tiles
+#    per site. `slot_idx` on this device is therefore a **site index**
+#    (0..11, row-major over the anchors), kept only because it is what
+#    `get_slot_idx`/`extra_func` already carry and what makes the twelve bels
+#    distinguishable. The packer's `get_pll_slot_fuses`/`set_pll_slot_fuses`
+#    path still needs a per-device branch before a 138C PLLA can be *packed*;
+#    this table gives nextpnr the twelve bels, which is what `V14` asserts.
+#  * **the `.dat` names no site.** All eight `Pll{L,R}{T,B}{Ins,Outs}` tables
+#    are entirely `0xffff`, against 36/32 populated rows each on the 25A, so
+#    every 138C entry is `old_style` and the port wires come from the
+#    position-relative `PllIn`/`PllInDlt` pair.
+#  * **that pair is partial.** The MDIO/DRP rows (`MDCLK`, `MDOPC*`,
+#    `MDAINC`, `MDWDI*`, `MDRDO*`) are `-1` on this device -- consistent with
+#    it having no DRP path at all -- so the lookup below skips absent rows
+#    instead of reaching `wirenames[-1]` and dying with a bare `KeyError`.
+#
+# The vendor cell type on this device is `PLL`, not `PLLA`: an actual `PLLA`
+# instantiation is refused with "ERROR (RP0008) : There is no PLLA resource in
+# current device" (P1.T19, run pll-trace-pilot-clocking_pll_trace-0000), and
+# UG306-1.0.1E Table 5-11 lists GW5A-25 as the only PLLA part. `PLL`
+# (prim_sim.v:13333) has no MDIO/DRP ports and adds the dynamic-divider ports
+# ENCLKn/FBDSEL/IDSEL/MDSEL/ODSELn/DTn, which is exactly the shape of this
+# device's `.dat`. The 23 inputs and 8 outputs built below are the subset of
+# `PLL`'s ports that `_plla_inputs`/`_plla_outputs` happen to index; the
+# dynamic-divider ports occupy the other ~108 populated `PllIn` rows at
+# indices apicula has no table for, and are a recorded gap, not a silent one.
+#
+# The anchor is the lowest-column tile of each three-tile run. Rows 27 and 81
+# start one column further in than rows 45 and 63 because column 0 of those
+# rows is taken by an HCLK block (`P1.T04`); the asymmetry is measured.
+_gw5a_pll_slots = {
+    'GW5A-25A': {(27, 0, 6, 'PllLB'), (27, 91, 2, 'PllRB'), (0, 0, 5, 'PllLT'), (0, 91, 3, 'PllRT'), (0, 45, 4, 'old_style'), (36, 45, 8, 'old_style')},
+    'GW5AST-138C': {
+        # slot_idx is the VENDOR SITE INDEX, traced one site per oracle run in
+        # P1.T19: a single hard PLL constrained with INS_LOC "dut_pll"
+        # PLL_<side>[<n>], whose .fs then carries fuses in exactly one of the
+        # twelve three-tile groups and none in the other eleven. The mapping
+        # below is that bijection, measured, not the row-major order P1.T17
+        # had to assume ($OTC/evidence/plla/sites-138c.md, section 8).
+        ( 27,   1,  0, 'old_style'),   # PLL_L[0]
+        ( 45,   0,  1, 'old_style'),   # PLL_L[1]
+        ( 63,   0,  2, 'old_style'),   # PLL_L[2]
+        ( 81,   1,  3, 'old_style'),   # PLL_L[3]
+        ( 27, 177,  4, 'old_style'),   # PLL_R[0]
+        ( 45, 178,  5, 'old_style'),   # PLL_R[1]
+        ( 63, 178,  6, 'old_style'),   # PLL_R[2]
+        ( 81, 177,  7, 'old_style'),   # PLL_R[3]
+        (108,  28,  8, 'old_style'),   # PLL_B[0]
+        (108,  32,  9, 'old_style'),   # PLL_B[1]
+        (108, 146, 10, 'old_style'),   # PLL_B[2]
+        (108, 150, 11, 'old_style'),   # PLL_B[3]
+    },
+}
+
+
+def _pll_old_style_present(dat, table, idx):
+    """True when the position-relative PLL port table describes port `idx`.
+
+    Only the **wire index** decides. The companion `...Dlt` entry is a signed
+    column offset and `-1` is a legal value for it: the GW5A-25A `.dat` gives
+    `MDRDO4`-`MDRDO7` `PllOut` wires 54/49/39/38 at `PllOutDlt == -1`, i.e.
+    one column to the left. Testing the delta would drop four real 25A ports
+    and change that device's chipdb.
+
+    The GW5AST-138C `.dat` sets **both** fields to `-1` for every MDIO/DRP
+    port (`MDCLK`, `MDOPC0-1`, `MDAINC`, `MDWDI0-7`, `MDRDO0-7`) -- that
+    device has no DRP path (`$OTC/evidence/plla/sites-138c.md` §4) -- and an
+    unguarded lookup reaches `wirenames[-1]`, a bare `KeyError`.
+    """
+    return dat.gw5aStuff[table][idx] != -1
+
+
 def fse_create_slot_plls(dev, device, fse, dat):
-    if device not in {"GW5A-25A"}:
+    if device not in _gw5a_pll_slots:
         return
-    for row, col, slot_idx, io_table in {(27, 0, 6, 'PllLB'), (27, 91, 2, 'PllRB'), (0, 0, 5, 'PllLT'), (0, 91, 3, 'PllRT'), (0, 45, 4, 'old_style'), (36, 45, 8, 'old_style')}:
+    for row, col, slot_idx, io_table in _gw5a_pll_slots[device]:
         extra = dev.extra_func.setdefault((row, col), {})
         pll = extra.setdefault('pll', {})
         pll['slot_idx'] = slot_idx
@@ -2430,8 +2513,12 @@ def fse_create_slot_plls(dev, device, fse, dat):
         wire_type = 'PLL_I'
         for idx, nam in _plla_inputs:
             if io_table == 'old_style':
+                if not _pll_old_style_present(dat, 'PllIn', idx):
+                    continue
                 wire_idx, wrow, wcol = dat.gw5aStuff['PllIn'][idx], row + 1, col + 1 + dat.gw5aStuff['PllInDlt'][idx]
             else:
+                if not _port_row_present(dat.gw5aStuff[io_table + 'Ins'][idx]):
+                    continue
                 wire_idx, wrow, wcol = dat.gw5aStuff[io_table + 'Ins'][idx]
             wrow -= 1
             wcol -= 1
@@ -2466,6 +2553,11 @@ def fse_create_slot_plls(dev, device, fse, dat):
         portmap = pll.setdefault('outputs', {})
         for idx, nam in _plla_outputs:
             wire_type = 'PLL_O'
+            if io_table == 'old_style':
+                if not _pll_old_style_present(dat, 'PllOut', idx):
+                    continue
+            elif not _port_row_present(dat.gw5aStuff[io_table + 'Outs'][idx]):
+                continue
             portmap[nam] = f'MPLL{nam}'
             dev.wire_delay[portmap[nam]] = 'X0'
             if io_table == 'old_style':

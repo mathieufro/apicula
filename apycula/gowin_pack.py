@@ -2331,6 +2331,24 @@ class Device:
     def get_permitted_pll_freqs(self) -> tuple[float, float, float, float, float]:
         raise Exception("get_permitted_pll_freqs is not implemented.")
 
+    def compute_pll_fvco(self, fclkin: float, idiv: int, fbdiv: int, mdiv: int) -> float:
+        """VCO frequency of a GW5A `PLL`/`PLLA`, internal feedback.
+
+        `UG306-1.0.9E` section 5.1: `Fpfd = Fclkin/IDIV`, `Fclkfb = Fpfd*FBDIV`,
+        internal feedback `Fvco = Fclkfb*MDIV`.  One function so the packer and
+        `gowin_pll.plla_freqs` cannot drift apart again (apicula issue #427).
+        """
+        return fclkin / idiv * fbdiv * mdiv
+
+    def check_pll_fvco(self, fvco: float) -> None:
+        """Device hook: reject a VCO frequency the part cannot reach.
+
+        The base class has no opinion -- a device that publishes a VCO band in
+        its datasheet overrides this.  This is deliberately NOT the `FCLKIN`
+        range check below, which is about the *input* pin.
+        """
+        return
+
     def get_pll_attrvals(self, bel: BelDesc) -> set[int]:
         """ rPLL attributes - the most common type of PLL in the GW1N and GW2A series """
         av = set()
@@ -5580,7 +5598,8 @@ class GW5A(Device):
         fref = fclkin / idiv
         fclkfb = fref * fbdiv
         # XXX internal feedback for now
-        fvco = fclkfb * mdiv
+        fvco = self.compute_pll_fvco(fclkin, idiv, fbdiv, mdiv)
+        self.check_pll_fvco(fvco)
         fclkin_idx, icp, r_idx = self.get_pll_pump(fref, fvco)
         self.chipdb.get_pll_attr_val(AttrVal('KVCO', fclkin_idx // 16), av)
         if fvco > 1400.0:
@@ -6774,6 +6793,43 @@ class GW5AST_138C(GW5A):
         for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
             if self.chipdb.get_ttyp(x, y) in self.clock_bridge_ttypes:
                 self.clock_bridge_xy.add((x, y))
+
+    #==============================
+    #========== Clocks
+    #==============================
+    def get_permitted_pll_freqs(self) -> tuple[float, float, float, float, float]:
+        """ (max_in, max_out, min_out, max_vco, min_vco)
+
+        DS1239-1.0.3E Table 3-18 "PLL Switching Characteristics", GW5AST-138,
+        speed grade C1/I0 -- the only grade this device is supported at:
+
+            FINMAX   Maximum Input Clock Frequency      800    MHz
+            FOUTMAX  PLL Maximum Output Frequency      1000    MHz
+            FOUTMIN  PLL Minimum Output Frequency         5.079 MHz
+            FVCOMAX  Maximum PLL VCO Frequency         1300    MHz
+            FVCOMIN  Minimum PLL VCO Frequency          650    MHz
+
+        Only FINMAX is shared with the GW5A-25A override; the other four
+        differ, so inheriting or copying the 25A's
+        `(800., 1600., 6.25, 1600., 800.)` would let the packer emit divider
+        settings whose VCO frequency the part cannot reach.
+        """
+        return (800., 1000., 5.079, 1300., 650.)
+
+    def check_pll_fvco(self, fvco: float) -> None:
+        """Reject a `PLL` VCO frequency outside DS1239E Table 3-18's band.
+
+        `FVCOMIN` 650 MHz .. `FVCOMAX` 1300 MHz, **inclusive at both ends**:
+        the datasheet limits are attainable values, not open bounds.  This is
+        the `S7` check; the base class's `FCLKIN` 3..`FINMAX` range check is a
+        different thing about a different pin and is left exactly as it is.
+        """
+        min_vco = self.get_permitted_pll_freqs()[4]
+        max_vco = self.get_permitted_pll_freqs()[3]
+        if fvco < min_vco or fvco > max_vco:
+            raise Exception(
+                f"FVCO {fvco:.1f} MHz is outside the GW5AST-138C permitted "
+                f"range [{min_vco}, {max_vco}] MHz")
 
     #==============================
     #========== Pips
