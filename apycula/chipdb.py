@@ -534,6 +534,13 @@ def fse_clock_pips_138(fse, ttyp, device):
 
                 pips.setdefault(dest, {})[src] = fuses
 
+    # Table 38 is the device's CENTRAL CLOCK MUX -- cells (54,88) and (54,93)
+    # (fse ttyp 80 and 85) plus their neighbours.  The wires by which the six
+    # HCLK blocks reach a SPINE land inside the two spans this loop otherwise
+    # discards as "longwires" and "unknown", so the measured escape wires are
+    # let through by name and nothing else is (P1.T08d,
+    # $OTC/evidence/hclk/mux38-138c.md).
+    hclk_clk_ids = gw5_hclk_clk_wire_ids(device)
     if _wire_tables['CLOCK_MUX'] in fse[ttyp]['wire']:
         for srcid, destid, *fuses in fse[ttyp]['wire'][_wire_tables['CLOCK_MUX']]:
             fuses = {fuse.fuse_lookup(fse, ttyp, f, device) for f in unpad(fuses)}
@@ -545,12 +552,13 @@ def fse_clock_pips_138(fse, ttyp, device):
             # XXX skip 6 and 7 for now
             if srcid in range(wnames.clknumbers['P16A'], wnames.clknumbers['P47D'] + 1):
                 continue
-            # XXX skip longwires
-            if srcid in range(164, 237):
-                continue
-            # XXX ignore unknown wires
-            if srcid in range(105, 129):
-                continue
+            if srcid not in hclk_clk_ids:
+                # XXX skip longwires
+                if srcid in range(164, 237):
+                    continue
+                # XXX ignore unknown wires
+                if srcid in range(105, 129):
+                    continue
             if srcid in range(253, 269):
                 continue
 
@@ -1200,6 +1208,23 @@ def fse_fill_logic_tables(dev, fse, device):
                 for f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, *fuses in fse[ttyp]['longval'][ltable]:
                     table[(f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15)] = {fuse.fuse_lookup(fse, ttyp, f, device) for f in unpad(fuses)}
 
+# Which HCLK block a cell belongs to, or -1 for "none".
+#
+# The 25A form below is a *region* classifier (every cell of the die is
+# assigned to one of the four blocks); it is kept verbatim because the GW5A-25A
+# chipdb is a Phase-0 family-regression baseline
+# (sha256 6311219d52b996b8431d573cd5c547426370db00852aed285033a19a5518c3ca)
+# and must stay byte-identical.
+#
+# Every other measured device is data-driven off _gw5a_hclk_locs: a cell is a
+# block cell iff it is one of the measured block locations.  Its only two
+# consumers -- gw5_make_hclk_pips' table-48 walk and legacy/gowin_pack.py's
+# do_gw5_ihclk -- only ever look at cells that carry table 48, and on the
+# GW5AST-138C the eleven table-48 cells are exactly the six blocks plus five
+# inter-HCLK *bridge* cells ((63,0) (63,181) (108,0) (108,118) (108,181),
+# MEASURED in $OTC/evidence/hclk/topology-138c.md section 4).  The bridge cells
+# carry inter-HCLK wires only (srcid >= gw5_hclk_wire_offset), which the walk's
+# intra-HCLK branches never touch, so leaving them at -1 loses nothing.
 def gw5_hclk_idx(dev, device, row, col):
     if device == 'GW5A-25A':
         if row == 0:
@@ -1213,6 +1238,9 @@ def gw5_hclk_idx(dev, device, row, col):
         if col == 0:
             return 2
         return 3
+    for hclk_idx, hclk_loc in _gw5a_hclk_locs.get(device, {}).items():
+        if hclk_loc == (row, col):
+            return hclk_idx
     return -1
 
 # Table 48 describes the HCLK wire connections, but the problem is that it also
@@ -1223,13 +1251,28 @@ def gw5_hclk_idx(dev, device, row, col):
 def gw5_hclk_wire_offset(device):
     return {'GW5A-25A': 187, 'GW5AST-138C': 187}[device]
 
+# The inter-HCLK wires occupy the band range(offset, offset + 4 * N) of the
+# same table 48 (see gw5_hclk_wire_offset above), so N is fixed by the highest
+# inter-HCLK source id that any HCLK cell's table 48 mentions:
+#     N = (max_inter_hclk_srcid - offset + 1) // 4
+# GW5AST-138C: max srcid 338 -> (338 - 187 + 1) // 4 == 38.
+# GW5A-25A:    max srcid 446 -> (446 - 187 + 1) // 4 == 65, which reproduces
+# the in-tree value with no residue, so the derivation is calibrated.
+# Measured in $OTC/evidence/hclk/topology-138c.md (P1.T04), sections 4 and 5.
+# No .get() default: a device nobody has measured must still raise.
 def gw5_ihclk_wire_num(device):
-    return {'GW5A-25A': 65}[device]
+    return {'GW5A-25A': 65, 'GW5AST-138C': 38}[device]
 
+# The number of HCLK blocks is whatever the device's measured block table
+# holds -- 4 on the GW5A-25A, 6 on the GW5AST-138C (MEASURED twice over, see
+# $OTC/evidence/hclk/topology-138c.md sections 1-3).  Devices nobody has
+# measured keep the historical optimistic 6 rather than raising, because this
+# is also called on the pre-5A path.
 def gw5_get_num_of_hclks(device):
-    if device == 'GW5A-25A':
-        return 4;
-    return 6
+    locs = _gw5a_hclk_locs.get(device)
+    if locs is None:
+        return 6
+    return len(locs)
 
 # These cells do contain IOLOGIC
 def gw5_create_hclk_iol_pip(dev, device, row, col):
@@ -1244,10 +1287,12 @@ def gw5_create_hclk_iol_pip(dev, device, row, col):
             return row not in {2, 10, 27}
     return False
 
+# The cell that carries a block's logic->HCLK entry wires is the block cell
+# itself, so this is _gw5a_hclk_locs -- the 25A literal it used to hold was a
+# duplicate of that table. Reading the one table keeps the 25A byte-identical
+# and gives every measured device its blocks for free.
 def gw5_logic_to_hclk_wires(device):
-    if device == 'GW5A-25A':
-        return {0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)}
-    return {}
+    return _gw5a_hclk_locs.get(device, {})
 
 def make_hclk_pip(dev, hclk_idx, row, col, src, dest, fuses = set()):
     dev.hclk_pips.setdefault((row, col), {}).setdefault(dest, {}).update({src: fuses})
@@ -1323,10 +1368,12 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
     # default PIPs - The tables for the GW5A series do not include
     # descriptions of the default PIPs. So we add them manually by placing
     # them in cell (0, 0) — this works because the default PIP has no fuse.
-    # XXX This section will need to be modified for the 138C—it has more HCLKs
+    # The block count comes from the device's measured block table, so a
+    # six-block device gets six sets of defaults, not four.
     row = 0
     col = 0
-    for hclk_idx in range(4):
+    num_hclks = gw5_get_num_of_hclks(device)
+    for hclk_idx in range(num_hclks):
         for j in range(4):
             # make pip HCLKxy <- HCLK_MUX_ALPHAxy
             src = f'HCLK_MUX_ALPHA{hclk_idx}{j}'
@@ -1366,7 +1413,7 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
 
 
     # Epsilon defaults
-    for i in range(4):
+    for i in range(num_hclks):
         mk_hclk_pip(i, row, col, f'HCLK_MUX_EPSILON{i}0', f'HCLK_BUF_AI{i}0')
         mk_hclk_pip(i, row, col, f'HCLK_MUX_EPSILON{i}2', f'HCLK_BUF_AI{i}1')
         mk_hclk_pip(i, row, col, f'HCLK_MUX_EPSILON{i}4', f'HCLK_BUF_AI{i}2')
@@ -1450,8 +1497,17 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
 # since it is unclear whether there is a table or whether it will be necessary
 # to experimentally connect the oscillator to the pins and see which route the
 # IDE chooses.
-def gw5_make_pin_to_hclk(dev):
-    pin_hclk_wire = [ {'row': 36, 'col': 11, 'wire': 'F5', 'hclk_idx': 1, 'hclk_wire_idx': 311} ]
+# The one entry is a GW5A-25A / TangPrimer25k board fact (cell (36,11), the pin
+# the external quartz is soldered to), so it is keyed by device: applying it to
+# any other die puts a node on a cell that has nothing to do with that die's
+# HCLK block 1.  On the GW5AST-138C (109x182) it produced exactly one spurious
+# HCLK1_* node and no pip; measuring the 138C's own pin->HCLK routes is Phase 3
+# (spec S10/S12), which is where a 'GW5AST-138C' key would be added.
+_gw5_pin_to_hclk = {
+    'GW5A-25A': [ {'row': 36, 'col': 11, 'wire': 'F5', 'hclk_idx': 1, 'hclk_wire_idx': 311} ],
+}
+def gw5_make_pin_to_hclk(dev, device):
+    pin_hclk_wire = _gw5_pin_to_hclk.get(device, [])
     for node_desc in pin_hclk_wire:
         row = node_desc['row']
         col = node_desc['col']
@@ -1475,6 +1531,95 @@ def gw5_make_pin_to_hclk(dev):
     row, col = 36, 27
     dev.hclk_pips.setdefault((row, col), {}).setdefault(wnames.hclknames[211], {}).update({wnames.hclknames[318]: set()})
     """
+
+
+# HCLK -> global-clock backbone wires, MEASURED per (device, hclk block, wire).
+#
+# On the GW5A-25A the backbone is the sixteen {T,B,R,L}BDHCLK{0..3} wires named
+# in clknames_5a25a, and four dedicated *gate cells* (ttyp 410/393/187/257, at
+# (0,59) (36,46) (27,91) (10,0)) carry the HCLK_TO_GCLK -> BDHCLK fuses in their
+# own table 48.  gw5_make_hclk_to_clk_gates below is written to that shape.
+#
+# The GW5AST-138C is NOT that shape.  Measured on this box (P1.T08c), from the
+# shipped .fse and from four vendor bitstreams:
+#
+#   1. No cell of the 138C has a table-48 row whose source is in {25,27,28,29}
+#      (HCLK_TO_GCLK0..3) and whose destination is a clock-network wire.  The
+#      only such rows are the six HCLK block cells' own {25,27,28,29} -> {34..37},
+#      which the 25A block cells have too.  There is no gate cell on this device
+#      and the HCLK-block -> clock-mux hop carries no fuse at all.
+#   2. The device therefore has no sixteen-wire BDHCLK band to name.  A block's
+#      four CLKDIV outputs surface on the central clock mux as four clock wires
+#      drawn from TWO separate bands, not one contiguous sixteen.
+#   3. The clock-mux pips that select them live in table 38 (cells (54,88) and
+#      (54,93)), which fse_clock_pips_138 does not read -- it reads only 90/91 --
+#      and in the 164..236 span that the same function discards as "longwires".
+#
+# MEASURED (P1.T08d), with the vendor's own placement handle: SUG1018 sec 2.9
+# "HCLK Primitive Constraints" -- `INS_LOC "<inst>" {LEFT,RIGHT,BOTTOM}SIDE[0~7]`
+# pins one CLKDIV to one lane of one block on the GW5A(S)(T)-138.  Twenty-four
+# positions, one single-CLKDIV vendor run each, decoded two ways per run: the
+# block cell's lit table-48 HCLK_MUX_BETA0i row names (block, lane), and the
+# central clock mux's lit table-38 row names the clock wire.  That fixes the
+# side/index convention too -- LEFTSIDE[0..3] = block 0, [4..7] = block 2;
+# RIGHTSIDE[0..3] = 1, [4..7] = 3; BOTTOMSIDE[0..3] = 4, [4..7] = 5 -- and it
+# reproduces P1.T08c's independently measured block-5 row exactly.
+#
+#   block 2 (81,0)    lanes 0..3 -> 105, 106, 220, 221
+#   block 4 (108,64)  lanes 0..3 -> 107, 108, 222, 223
+#   block 5 (108,117) lanes 0..3 -> 109, 110, 224, 225   (== P1.T08c)
+#   block 3 (81,181)  lanes 0..3 -> 111, 112, 226, 227
+#
+# Two wires per lane-pair from each of two disjoint bands, 105..112 and
+# 220..227, ordered by block as [2, 4, 5, 3].  Every one of them is discarded
+# by fse_clock_pips_138's "unknown wires" (105..128) or "longwires" (164..236)
+# filter, which is why no CLKDIV could route before -- see
+# gw5_hclk_clk_wire_ids.
+#
+# Blocks 0 (27,0) and 1 (27,181) -- the two TOP-half blocks -- are ABSENT, not
+# guessed.  Their eight lanes were run too (LEFTSIDE[0..3], RIGHTSIDE[0..3])
+# and every one of them lights exactly one central-mux row, the same one:
+# SPINE16 <= BRPLL0CLK0 (clknames 101).  A confirming staircase of 2, 3 and 4
+# CLKDIVs all pinned inside block 0 still lights only that single row, so the
+# top-half blocks do not surface per-lane on the central clock mux at all and
+# 101 cannot be a bijection.  Their escape mechanism is unidentified; a design
+# placed in block 0 or 1 therefore still has no modelled clock escape.
+_gw5a_hclk_to_clk = {
+    'GW5AST-138C': { 2: {0: 105, 1: 106, 2: 220, 3: 221},
+                     3: {0: 111, 1: 112, 2: 226, 3: 227},
+                     4: {0: 107, 1: 108, 2: 222, 3: 223},
+                     5: {0: 109, 1: 110, 2: 224, 3: 225} },
+}
+
+def gw5_hclk_clk_wire_ids(device):
+    """Every clock-network wire id an HCLK block of `device` escapes onto.
+
+    Used by fse_clock_pips_138 to let exactly the measured escape wires
+    through the two "longwire"/"unknown" source filters and nothing else, so a
+    device with no measured table (the GW5A-25A, every pre-5A part) keeps the
+    filters it had.
+    """
+    return {wid for lanes in _gw5a_hclk_to_clk.get(device, {}).values()
+            for wid in lanes.values()}
+
+
+def gw5_make_hclk_to_clk_nodes(dev, device):
+    """Join each block's CLKDIV output wire to its clock-network wire.
+
+    MEASURED (P1.T08d): on the GW5AST-138C the HCLK-block -> central-clock-mux
+    hop carries no fuse -- see the comment on _gw5a_hclk_to_clk -- so it is a
+    Himbaechel *node*, not a pip.  The clock wire is already a node of the same
+    name: fse_create_5a138_clocks creates it in the bridge cells (54,88)/(54,93)
+    where the table-38 pip muxes it onto a SPINE.  add_node merges the two.
+
+    Without this the CLKDIV output wire is an island and nextpnr reports
+    "Failed to route net ... from X..Y../CLKDIV_O.. using dedicated routing".
+    """
+    for hclk_idx, lanes in sorted(_gw5a_hclk_to_clk.get(device, {}).items()):
+        row, col = _gw5a_hclk_locs[device][hclk_idx]
+        for lane, clk_id in sorted(lanes.items()):
+            add_node(dev, wnames.clknames[clk_id], "GLOBAL_CLK", row, col,
+                     f'CLKDIV_O{hclk_idx}{lane}')
 
 
 # HCLK to global clock network gates
@@ -1538,8 +1683,52 @@ def gw5_make_hclk_to_clk_gates(dev, device, fse, dat: Datfile):
 # The GW5A series has a different CLKDIV/CLKDIV2 configuration—each of the four
 # wires in a single HCLK block has its own dedicated CLKDIV/CLKDIV2. The inputs
 # for CLKDIV2 are HCLK_BUF_BO.
-_gw5a_hclk_locs = { 'GW5A-25A': { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)} }
+# GW5AST-138C: six blocks, MEASURED (two independent instruments -- the .fse
+# table-48 classifier and a vendor presence diff) and recorded in
+# $OTC/evidence/hclk/topology-138c.md (P1.T04).  Indices are the measured
+# (row, col) sort order; the five inter-HCLK *bridge* cells that also carry
+# table 48 -- (63,0) (63,181) (108,0) (108,118) (108,181) -- are deliberately
+# NOT here: they hold no CLKDIV/CLKDIV2.
+_gw5a_hclk_locs = { 'GW5A-25A':    { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)},
+                    'GW5AST-138C': { 0: (27, 0), 1: (27, 181), 2: (81, 0),
+                                     3: (81, 181), 4: (108, 64), 5: (108, 117)} }
+# CLKDIV/CLKDIV2 control-pin wires, per device and per wire index within the
+# block.  These are ordinary fabric wires of the HCLK cell, not table-48 HCLK
+# wires, so they cannot be read out of the .fse; the 25A values are the ones
+# the maintainer traced.
+# GW5AST-138C: ASSUMED equal to the 25A.  P1.T04 measured the block topology
+# but not the control-pin trace and no oracle budget was allocated for one;
+# all twelve wire names do exist in wirenames_5ast138c.  Recorded as ASSUMED
+# in $OTC/evidence/hclk/topology-138c.md -- a shape run that exercises
+# CLKDIV.CALIB / RESETN is what would promote it to MEASURED.
+_gw5a_hclk_ctrl_wires = {
+    'GW5A-25A':    {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
+                    'clkdiv_resetn':  ['C4', 'C5', 'C6', 'C7'],
+                    'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
+    'GW5AST-138C': {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
+                    'clkdiv_resetn':  ['C4', 'C5', 'C6', 'C7'],
+                    'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
+}
+
+# Which die half a block sits in -- the two-half half of the "N blocks x two
+# halves" model.  Derived from the block's own row against the grid the .fse
+# describes, so it needs no per-device literal: the 138C's six blocks come out
+# 2 top / 4 bottom (rows 27, 27, 81, 81, 108, 108 of 109), which is the
+# MEASURED partition -- the 3/3 split assumed by the roadmap is refuted
+# ($OTC/evidence/hclk/topology-138c.md section 6).
+#
+# It is deliberately NOT stored in extra_func: it is a pure function of data
+# the database already carries (the block's row and dev.rows), and writing it
+# into every GW5A device's extra_func would change the GW5A-25A chipdb, whose
+# sha256 6311219d52b996b8431d573cd5c547426370db00852aed285033a19a5518c3ca is a
+# Phase-0 family-regression baseline. Consumers call this instead.
+def gw5_hclk_half(dev, row):
+    return 'top' if row * 2 < dev.rows - 1 else 'bottom'
+
 def gw5_add_hclk_bels(dat, dev, device):
+    ctrl = _gw5a_hclk_ctrl_wires[device]
+    # The number of blocks is whatever the device's measured table holds --
+    # four on the 25A, six on the 138C.  Each block still has four wires.
     for hclk_idx, hclk_loc in _gw5a_hclk_locs[device].items():
         row, col = hclk_loc
         extra = dev.extra_func.setdefault((row, col), {})
@@ -1555,7 +1744,7 @@ def gw5_add_hclk_bels(dat, dev, device):
             # mechanism for pre-5A chips in nextpnr will not be triggered
             #dev[row, col].bels[f'CLKDIV2{i}'] = Bel()
             portmap = clkdiv2.setdefault('inputs', {})
-            portmap['RESETN'] = f'B{i + 2}'  # GW5A-25A 0-B2, 1-B3, 2-B4, 3-B5
+            portmap['RESETN'] = ctrl['clkdiv2_resetn'][i]
             portmap['HCLKIN'] = f'CLKDIV2_HCLKIN{hclk_idx}{i}'
             if i % 2 == 0:
                 src = f'HCLK_BUF_BO{hclk_idx}{i}'
@@ -1575,8 +1764,8 @@ def gw5_add_hclk_bels(dat, dev, device):
             clkdiv = extra_clkdiv.setdefault('bels', {}).setdefault(i, {})
             portmap = clkdiv.setdefault('inputs', {})
             portmap['HCLKIN'] = f'CLKDIV_I{hclk_idx}{i}'
-            portmap['RESETN'] = f'C{i + 4}'  # GW5A-25A 0-C4, 1-C5, 2-C6, 3-C7
-            portmap['CALIB']  = ['B6', 'B7', 'C0', 'C1'][i]  # GW5A-25A
+            portmap['RESETN'] = ctrl['clkdiv_resetn'][i]
+            portmap['CALIB']  = ctrl['clkdiv_calib'][i]
             make_hclk_pip(dev, hclk_idx, row, col, f'HCLK_MUX_ALPHA{hclk_idx}{i}', portmap['HCLKIN'])
 
             portmap = clkdiv.setdefault('outputs', {})
@@ -1584,6 +1773,10 @@ def gw5_add_hclk_bels(dat, dev, device):
             src = portmap['CLKOUT']
             add_node(dev, f'HCLK{hclk_idx}_{src}', "GLOBAL_CLK", row, col, src)
 
+    # The CLKDIV output wires exist now, so the fuseless hop onto the clock
+    # network can be joined to them (no-op for a device with no measured
+    # _gw5a_hclk_to_clk table, so the GW5A-25A is untouched).
+    gw5_make_hclk_to_clk_nodes(dev, device)
     return
 
 # HCLK for Himbaechel
@@ -1967,7 +2160,7 @@ def _iter_edge_coords(dev):
 
 def add_hclk_bels(dat, dev, device):
     #Stub for parts that don't have HCLK bel support yet
-    if device in {'GW5A-25A'}:
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
         gw5_add_hclk_bels(dat, dev, device)
         return
     if device not in ("GW2A-18", "GW2A-18C", "GW1N-9", "GW1N-9C", "GW1N-1", "GW1NZ-1", "GW1NS-4", "GW1N-4"):
@@ -2078,8 +2271,8 @@ def add_hclk_bels(dat, dev, device):
 _global_wire_prefixes = {'PCLK', 'TBDHCLK', 'BBDHCLK', 'RBDHCLK', 'LBDHCLK',
                          'TLPLL', 'TRPLL', 'BLPLL', 'BRPLL'}
 def fse_create_hclk_nodes(dev, device, fse, dat: Datfile):
-    if device in {'GW5A-25A'}:
-        gw5_make_pin_to_hclk(dev)
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
+        gw5_make_pin_to_hclk(dev, device)
         gw5_make_hclk_to_clk_gates(dev, device, fse, dat)
         gw5_make_hclk_pips(dev, device, fse, dat)
         return
@@ -4275,6 +4468,10 @@ def set_chip_flags(dev, device):
         dev.chip_flags.append("NEED_BSRAM_RESET_FIX")
         dev.chip_flags.append("NEED_CFGPINS_INVERSION")
         dev.chip_flags.append("HAS_5A_DSP")
+        # The 138C HCLK network is the GW5A one (six measured blocks, see
+        # _gw5a_hclk_locs), so nextpnr must take the GW5A HCLK path:
+        # CHIP_HAS_5A_HCLK = 0x10000 (gowin_arch_gen.py:39), GowinUtils::has_5A_HCLK().
+        dev.chip_flags.append("HAS_5A_HCLK")
 
     if device in {'GW5A-25A'}:
         dev.dcs_prefix = "CLKIN"
