@@ -1461,7 +1461,8 @@ def _category_of(tile, cells_v, cells_o):
 
 
 def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
-             level="E0", shape_class=None, device=DEVICE, calibration=False):
+             level="E0", shape_class=None, device=DEVICE, calibration=False,
+             scope_tiles=None):
     """§5.1b's mandatory raw residual, computed on the two real `.fs`.
 
     Returns `raw_bit_delta()`'s enumeration plus the `unexplained_bits` list
@@ -1490,6 +1491,26 @@ def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
             total += n
 
     tile_delta, in_tiles = tile_bit_delta(bmv, bmo, db)
+    # The three E0 sets are restricted to the shape's tiles (`canonicalise`),
+    # so the raw residual that decides the same verdict is restricted to the
+    # same tiles -- otherwise a row about a CLKDIV closes `diff` on an IOB
+    # fuse in a tile nothing in the shape names, and the scope stops meaning
+    # anything (`spec-harness.md` §5.1, and the method `P1.T08d` used by hand
+    # in `evidence/hclk/e0_hclk_scope.py`).  Nothing is hidden: the bits this
+    # drops are counted and returned under `outside_scope`, and the row keeps
+    # the whole-device pip statistic (`diff_count.pips`, `D32`) beside it.
+    outside_scope = None
+    if scope_tiles is not None:
+        want = {tuple(t) for t in scope_tiles}
+        outside_scope = {
+            "tiles": {str(t): int(n if isinstance(n, int) else len(n))
+                      for t, n in tile_delta.items() if t not in want},
+            "note": ("bits in tiles outside the shape's E0 scope; counted, "
+                     "classified nowhere, and never a verdict term for this "
+                     "row -- they belong to whatever primitive owns those "
+                     "tiles"),
+        }
+        tile_delta = {t: v for t, v in tile_delta.items() if t in want}
     if nl_v is None:
         nl_v = unpack_netlist(vendor_fs, device=device, db=db)
     if nl_o is None:
@@ -1505,12 +1526,20 @@ def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
         "outside_bitmap": _outside_bitmap(vendor_fs, open_fs),
         "cells": {"vendor": len(nl_v.cells), "open": len(nl_o.cells)},
     }
+    if outside_scope is not None:
+        out["outside_scope"] = outside_scope
+    coords = tile_coord_delta(bmv, bmo, db)
+    if scope_tiles is not None:
+        want = {tuple(t) for t in scope_tiles}
+        coords = {t: v for t, v in coords.items() if t in want}
     out.update(classify_residual(
         tile_delta, cells_by_tile(nl_v), cells_by_tile(nl_o),
-        outside_every_tile=total - in_tiles + out["bitmap_row_delta"],
-        outside=out["outside_bitmap"], mask=mask, level=level,
+        outside_every_tile=(0 if scope_tiles is not None
+                            else total - in_tiles + out["bitmap_row_delta"]),
+        outside=({} if scope_tiles is not None else out["outside_bitmap"]),
+        mask=mask, level=level,
         shape_class=shape_class,
-        tile_coords=tile_coord_delta(bmv, bmo, db), db=db,
+        tile_coords=coords, db=db,
         nl_v=nl_v, nl_o=nl_o, calibration=calibration))
     return out
 
@@ -1557,6 +1586,21 @@ def _expected_attrs(cell):
     return want
 
 
+def _norm_param(value):
+    """`'\"1\"'`, `'1 '` and `'1'` are the same DIV_MODE.
+
+    MEASURED (`P1.T14` trial run): a Verilog string parameter arrives from the
+    nextpnr JSON as `1 ` (yosys' trailing-space marker for a string) and comes
+    back from `gowin_unpack` as `"1"`, quotes included, so `c1` reported a
+    mismatch for two spellings of one value.  Normalising both sides is the
+    fix; comparing raw is not a stricter check, it is a wrong one.
+    """
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = text[1:-1].strip()
+    return text
+
+
 def decode_check_c1(pnr_cells, netlist):
     """`c1` -- does the decode recover every cell the placement contains?
 
@@ -1589,7 +1633,7 @@ def decode_check_c1(pnr_cells, netlist):
             continue
         have = dict(canon_attr(f) for f in attrs)
         for name, value in _expected_attrs(cell).items():
-            if name in have and str(have[name]) != str(value):
+            if name in have and _norm_param(have[name]) != _norm_param(value):
                 attr_mismatch.append({
                     "name": cell["name"], "attr": name,
                     "expected": value, "recovered": str(have[name])})
@@ -2240,6 +2284,127 @@ def level_e1(exported, realised, scope=None):
             "mismatched": mismatched, "unobserved": unobserved, "notes": notes}
 
 
+# --- `E1` for HCLK-class bels (`P1.T14`/`P1.T15`) --------------------------
+#
+# A CLKDIV or CLKDIV2 has no CLS address, so `insloc_lines` skips it and the
+# `.tr`-based realised placement never names it.  MEASURED on the P1.T11
+# vendor run (`$DATASTORE/batch/p1t11/clkdiv/run/impl/pnr/`): `run.tr`,
+# `run.rpt.txt`, `run.p`, `run.pr` and `run.log` contain the string `CLKDIV`
+# nowhere at all -- only `run.vo` names the *instance*, with no location.  So
+# for this class of primitive the vendor's text reports carry no placement and
+# `level_e1` can only ever answer "nothing in scope".
+#
+# The vendor's **bitstream** does carry it: `gowin_unpack` decodes the 138C
+# HCLK block cells (P1.T08c), so the decoded vendor netlist has a `CLKDIV_`
+# cell at the tile and bel index the vendor chose.  That is a stronger source
+# than a text report, and it is the one used here: exported = the bel nextpnr
+# placed on, realised = the cell the vendor's own bitstream decodes to.
+_HCLK_BEL_RE = re.compile(r"^(CLKDIV2|CLKDIV)_([0-9]+)$")
+
+#: Cell-type prefixes of the HCLK-class bels this check covers.
+HCLK_CELL_TYPES = ("CLKDIV2", "CLKDIV")
+
+
+def _hclk_type(name):
+    """`'CLKDIV2_1'`/`'CLKDIV2_'`/`'CLKDIV2'` -> `'CLKDIV2'`, else `None`."""
+    if not name:
+        return None
+    base = str(name).rstrip("_0123456789")
+    return base if base in HCLK_CELL_TYPES else None
+
+
+def hclk_exported(pnr_cells):
+    """`{name: {x, y, z, type, bel}}` for the HCLK bels nextpnr placed."""
+    out = {}
+    for cell in pnr_cells:
+        bel, site = cell.get("bel"), cell.get("site")
+        if bel is None or site is None:
+            continue
+        m = _HCLK_BEL_RE.match(bel)
+        if m is None:
+            continue
+        out[cell["name"]] = {"x": site[0], "y": site[1], "z": int(m.group(2)),
+                             "type": m.group(1), "bel": bel}
+    return out
+
+
+def hclk_realised(netlist):
+    """`{(x, y, z): type}` of the HCLK-class cells a decoded bitstream holds."""
+    out = {}
+    for cell in getattr(netlist, "cells", {}):
+        kind = _hclk_type(cell.type)
+        if kind is not None:
+            out[(cell.x, cell.y, cell.z)] = kind
+    return out
+
+
+def level_e1_hclk(exported, realised, scope=None):
+    """`E1` for HCLK bels: is the vendor's decoded cell where we placed ours?
+
+    Same return shape as `level_e1`.  A site the vendor's bitstream decodes to
+    a *different* HCLK type, or to nothing at all, is `mismatched` -- unlike
+    the `.tr` case there is no renaming to excuse it, because a bel index in a
+    bitstream is an address, not a name.
+    """
+    tiles = None if scope is None else {tuple(t) for t in scope.tiles}
+    matched, mismatched = [], []
+    in_scope_seen = 0
+    for name, want in sorted(exported.items()):
+        inside = tiles is None or (want["x"], want["y"]) in tiles
+        site = (want["x"], want["y"], want["z"])
+        got = realised.get(site)
+        if got == want["type"]:
+            matched.append({"name": name, "in_scope": inside,
+                            "site": f"X{want['x']}Y{want['y']}/{want['bel']}"})
+            in_scope_seen += bool(inside)
+        else:
+            mismatched.append({
+                "name": name, "in_scope": inside,
+                "exported": f"X{want['x']}Y{want['y']}/{want['bel']}",
+                "realised": (f"{got} at the same site" if got
+                             else "no HCLK cell decodes at that site in the "
+                                  "vendor bitstream")})
+    notes = ""
+    level = "E1"
+    if mismatched:
+        level = "E0"
+        first = mismatched[0]
+        notes = (f"EC9/HCLK: {len(mismatched)} HCLK bel(s) the open flow placed "
+                 f"are not where the vendor bitstream decodes them; first is "
+                 f"{first['name']!r} at {first['exported']} -- {first['realised']}")
+    elif not exported:
+        level = "E0"
+        notes = "no HCLK-class bel in the open placement"
+    elif not in_scope_seen:
+        level = "E0"
+        notes = ("EC9/HCLK: no HCLK bel lies inside the comparison scope")
+    return {"level": level, "checked": len(exported), "matched": matched,
+            "mismatched": mismatched, "unobserved": [], "notes": notes}
+
+
+def merge_e1(cls_part, hclk_part):
+    """Fold the CLS and HCLK halves of `E1` into one verdict.
+
+    `E1` holds when neither half contradicts the open placement and at least
+    one half actually observed a constrained cell **in scope**.  A half that
+    observed nothing in scope is silent, not a failure: a CLKDIV shape has no
+    CLS cell in the HCLK tile, and a CLS shape has no CLKDIV.
+    """
+    if not hclk_part["checked"]:
+        return cls_part
+    mismatched = cls_part["mismatched"] + hclk_part["mismatched"]
+    level = "E1" if (not mismatched and
+                     (cls_part["level"] == "E1" or hclk_part["level"] == "E1")
+                     ) else "E0"
+    notes = " | ".join(n for n in (cls_part["notes"], hclk_part["notes"]) if n)
+    return {"level": level,
+            "checked": cls_part["checked"] + hclk_part["checked"],
+            "matched": cls_part["matched"] + hclk_part["matched"],
+            "mismatched": mismatched,
+            "unobserved": cls_part["unobserved"],
+            "notes": notes}
+
+
 # --- `E2`: the pip-set bonus on single-legal-path nets ---------------------
 #: The only net classes `spec-harness.md` §5.1 admits at `E2` -- nets with
 #: exactly one legal path, so two independent routers *must* agree.  A net is
@@ -2429,7 +2594,9 @@ def compare_design(design_dir, shape=None, level="E0", mask_path=None,
     shape_class = getattr(spec, "shape_class", None)
     res = residual(vendor, open_, db=db, nl_v=nl_v, nl_o=nl_o, mask=mask,
                    level=level, shape_class=shape_class, device=device,
-                   calibration=calibration)
+                   calibration=calibration,
+                   scope_tiles=(None if scope is None
+                                else [tuple(t) for t in scope.tiles]))
     result = compare_e0(nl_v, nl_o, scope=scope, mask=mask, residual=res)
     result.level = level
 
@@ -2468,7 +2635,10 @@ def compare_design(design_dir, shape=None, level="E0", mask_path=None,
                                        f"{design_dir}/run/impl/pnr, so the "
                                        "realised placement cannot be read")}
             else:
-                result.e1 = level_e1(exported, realised, scope=scope)
+                result.e1 = merge_e1(
+                    level_e1(exported, realised, scope=scope),
+                    level_e1_hclk(hclk_exported(read_pnr_cells(pnr)),
+                                  hclk_realised(nl_v), scope=scope))
         else:
             result.e1 = {"level": "E0", "checked": 0, "matched": [],
                          "mismatched": [], "unobserved": [],
