@@ -2507,22 +2507,35 @@ def evidence_fields(result):
     is translated into schema field names, mirroring
     `oracle.evidence_row` and `openflow.evidence_fields`.
 
-    `verdict` maps the §6 vocabulary: `ok` when nothing in scope differs and
-    no residual bit is unexplained, otherwise `diff`.  The checker's own
-    `EQUIV <level> ok` sentence is prose and is kept in `notes`.
+    `verdict` maps the §6 vocabulary: `ok` when nothing in scope differs, no
+    residual bit is unexplained **and** both halves of the §5.4 decode check
+    pass, otherwise `diff`.  The checker's own `EQUIV <level> ok` sentence is
+    prose and is kept in `notes`.
+
+    §5.4 states c1 and c2 are both required, so a `mismatch` in either is a
+    verdict term exactly like a set-level difference.  Reading it out of the
+    row's prose only is what let a row say `verdict: ok` while its own notes
+    said the decode check had failed.
     """
     dc = dict(result.diff_count or {})
     residual = result.residual or {}
     unexplained = list(residual.get("unexplained_bits", []))
     set_diffs = sum(int(dc.get(k, 0) or 0) for k in ("cells", "attrs", "conns"))
-    verdict = "ok" if (set_diffs == 0 and not unexplained) else "diff"
     # `decode_check` is exactly `{c1, c2}` in the schema; the checker also
     # carries per-cell diagnostics (`c1_missing`, `c2_differing_bytes`, ...).
     # They are kept -- as a note tail -- never dropped and never smuggled into
     # the schema field, which `validate_row` rejects outright.
     decode = dict(result.decode_check or {})
     decode_check = {k: decode.pop(k) for k in ("c1", "c2") if k in decode}
+    failed_checks = sorted(k for k, v in decode_check.items() if v != "ok")
+    verdict = ("ok" if (set_diffs == 0 and not unexplained
+                        and not failed_checks) else "diff")
     notes = " ".join(part for part in (result.verdict, result.notes) if part)
+    if failed_checks:
+        notes = ((notes + " | " if notes else "")
+                 + "decode check failed: "
+                 + ", ".join(f"{k}={decode_check[k]}" for k in failed_checks)
+                 + " (spec-harness.md 5.4, D34)")
     if decode:
         notes = (notes + " | " if notes else "") + "decode_detail=" + json.dumps(
             decode, sort_keys=True, default=str)

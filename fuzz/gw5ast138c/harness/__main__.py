@@ -393,6 +393,23 @@ def real_runner(run_id, design_dir, shape, sweep_value, level):
                           **equiv.evidence_fields(equiv_result))
 
 
+
+# --------------------------------------------------------------------------
+# 6b. The batch's one chipdb (`spec-harness.md` §6 provenance)
+# --------------------------------------------------------------------------
+def chipdb_sha(path=None):
+    """sha256 of the chipdb this box would hand nextpnr, or `None` if absent.
+
+    A missing chipdb is a fact for the caller (a fake batch has none), never
+    an import-time or batch-time failure.
+    """
+    from . import evidence, openflow
+    try:
+        return evidence.sha256(openflow.resolve_chipdb(path))
+    except Exception:                              # noqa: BLE001
+        return None
+
+
 def fake_runner(seconds):
     """A runner that only burns wall clock -- the fake-batch driver.
 
@@ -442,6 +459,7 @@ def run_batch(batch_id, shape, design_dir, sweep_points=None, level="E1",
     log = BatchLog(paths["log"], echo=echo)
     counts = {"ok": 0, "diff": 0, "aborted": 0}
     refused = 0
+    chipdb_changed = False
     try:
         log.line(f"BATCH_START batch={batch_id} shape={shape} level={level} "
                  f"pid={os.getpid()} design_dir={design_dir}")
@@ -453,7 +471,16 @@ def run_batch(batch_id, shape, design_dir, sweep_points=None, level="E1",
             log.raw(f"BATCH_COMPLETE {batch_id} runs=0 ok=0 diff=0 aborted=0")
             return {"batch_id": batch_id, "executed": 0, "counts": counts,
                     "skipped": 0, "head": statuses, "head_ok": False,
+                    "chipdb_sha256": None, "chipdb_changed": False,
                     "rows_path": paths["rows"]}
+
+        # ONE chipdb per batch: it is pinned here and re-checked before every
+        # run.  A chipdb rebuilt while a batch is running silently changes the
+        # database every later row was measured against, and rows of one batch
+        # carrying two `chipdb_sha256` values cannot be compared with each
+        # other -- so the batch refuses to continue rather than mixing them.
+        pinned_chipdb = chipdb_sha()
+        log.line(f"BATCH_CHIPDB batch={batch_id} sha256={pinned_chipdb}")
 
         sweep_values = _sweep_values(shape, sweep_points, fake)
         ids = run_ids(batch_id, shape, len(sweep_values))
@@ -469,6 +496,13 @@ def run_batch(batch_id, shape, design_dir, sweep_points=None, level="E1",
             if run_id in already:
                 log.line(f"RUN_SKIP {run_id} (terminal row already present)")
                 continue
+            now = chipdb_sha()
+            if pinned_chipdb is not None and now != pinned_chipdb:
+                log.line(f"BATCH_CHIPDB_CHANGED batch={batch_id} "
+                         f"pinned={pinned_chipdb} now={now} — refusing to "
+                         f"continue at {run_id}")
+                chipdb_changed = True
+                break
             log.line(f"RUN_START {run_id} sweep={sweep_value!r}")
             try:
                 row = runner(run_id, os.path.join(design_dir, run_id), shape,
@@ -480,6 +514,18 @@ def run_batch(batch_id, shape, design_dir, sweep_points=None, level="E1",
                        "notes": f"runner raised {exc!r}"}
             row.setdefault("run_id", run_id)
             row.setdefault("verdict", "aborted")
+            row_chipdb = row.get("chipdb_sha256")
+            if (pinned_chipdb is not None and row_chipdb
+                    and row_chipdb != pinned_chipdb):
+                # The rebuild landed *during* this run: the row is already
+                # measured against a different database, so it is dropped
+                # rather than appended beside rows that are not comparable
+                # with it.
+                log.line(f"BATCH_CHIPDB_CHANGED batch={batch_id} "
+                         f"pinned={pinned_chipdb} now={row_chipdb} — "
+                         f"discarding {run_id} and refusing to continue")
+                chipdb_changed = True
+                break
             append_row(paths["rows"], row)
             executed += 1
             verdict = row["verdict"]
@@ -498,6 +544,8 @@ def run_batch(batch_id, shape, design_dir, sweep_points=None, level="E1",
                 f"aborted={counts['aborted']}")
         return {"batch_id": batch_id, "executed": executed, "counts": counts,
                 "skipped": len(already), "head": statuses, "head_ok": True,
+                "chipdb_sha256": pinned_chipdb,
+                "chipdb_changed": chipdb_changed,
                 "rows_path": paths["rows"]}
     finally:
         log.close()
