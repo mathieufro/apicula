@@ -17,7 +17,10 @@ from fuzz.gw5ast138c.shapes import PinSpec
 
 DEVICE = "GW5AST-138C"
 PART = "GW5AST-LV138PG484AC1/I0"
-STATUS_RE = re.compile(r"^(E1|E0\+hw|E0\+hw-pending|refused:.+)$")
+#: A status cell opens with the level reached and may then cite the evidence
+#: rows behind it, after an em dash: "`E1` — (`p1t14-…`) …".
+STATUS_RE = re.compile(r"^`?(E1|E0|E0\+hw|E0\+hw-pending|refused:.+?)`?"
+                       r"( —.*)?$", re.S)
 HEADINGS = ("## Row", "## Sweep", "## Verdict", "## Artefacts")
 
 #: The pipeline document whose section-1 status cells these rows set.
