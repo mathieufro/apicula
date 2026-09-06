@@ -1,47 +1,50 @@
 """`clocking_e2e` -- Phase 1's end-to-end clock tree, one design, one run.
 
-The phase's own end-to-end proof (`P1-clocking.md` §E2E): **one** design that
-carries a whole clock path -- board clock -> HCLK spine -> two `CLKDIV`s on
-two different lanes of one HCLK block, at two different `DIV_MODE`s -> the
-global clock network -> fabric -> LEDs -- built twice, once by the vendor
-oracle and once by the open flow, and compared at `E1` with placement
-identity.  It is distinct from the per-row sweeps: each of those isolates one
-primitive on one lane, this one asserts that the six-block model, the lane
-mapping and the divider fuses still agree when two lanes of the same block are
-configured differently in the same bitstream.
+The phase's own end-to-end proof (`P1-clocking.md` §E2E, `P1.T40`): **one**
+design carrying the whole clock plane -- board clock -> `DHCE`-gated HCLK
+lane -> `CLKDIV` -> `DCE`-gated spine of the other quadrant -> fabric, with a
+hard `PLL` at the reference operating point clocking fabric of its own in the
+same bitstream -- built twice, once by the vendor oracle and once by the open flow,
+and compared at `E1` with placement identity.  It is distinct from the
+per-primitive sweeps: each of those isolates one primitive, this one asserts
+that the PLL attributes, the six-block HCLK model, the lane mapping, the
+divider fuses and both clock gates still agree when they sit in one design.
 
-**What the design does not contain, and why -- all MEASURED, none chosen.**
+Its earlier form (two `CLKDIV`s on two lanes, no PLL and no gate) is what
+`P1.T38b` measured, and that row keeps its evidence: everything that design
+proved this one contains.
 
-* No `PLL`.  `P1.T23` closed the PLL row on the vendor side and recorded four
-  gaps that stop the *open* half at the packer, one of them hard:
-  `GW5AST_138C.get_pll_pump()` is unimplemented and its constants need their
-  own campaign (`$OTC/evidence/plla/openflow-gap-138c.md`).  A PLL here would
-  make the run `ABORT` in `gowin_pack` and measure that gap instead of the
-  clock tree.  The board clock drives the spine directly, over the same HCLK
-  lanes.
+**What the design does not contain, and why -- MEASURED, not chosen.**
+
+* No `DCS`.  Its output side is closed (a DCS-managed net now reaches the
+  quadrant spines its own DCS drives through the bridge), but its *input* side
+  is not modelled on this die: the `P{26,27,36,37}{A..D}` input multiplexers
+  of the two bridge cells are fed by `PCLK*`/`*MDCLK*`/`*BDCLK*` wires that no
+  pip and no node in the 138C database drives -- `PCLKB0`'s node is the two
+  bridge cells and nothing else -- while the vendor's own bitstream selects
+  `P26A-D <- BLMDCLK1`.  A `DCS` here would fail in nextpnr for that reason
+  and measure it instead of the clock tree
+  (`$OTC/evidence/dcs/openflow-gap-138c.md`).
+* The `PLL` does **not** feed the HCLK lane, though the phase asked for that
+  cascade.  MEASURED here on this shape's own first open-flow build: nextpnr
+  reports `Failed to route net ... from X146Y108/MPLLCLKOUT0 to
+  X117Y108/CLKDIV_I50 using dedicated routing`, with and without the `DHCE`
+  in between.  The HCLK lane input multiplexers this die models
+  (`P1.T08d`) carry no `PLL` entry, so a `PLL`->HCLK cascade is a gap in the
+  model, not something the design can phrase differently.  The three clocks
+  therefore run side by side: every primitive is in one bitstream, and each
+  reaches fabric on the path the phase measured for it.
 * No `CLKDIV2`.  `CLKDIV2.CLKOUT` cannot drive ordinary fabric (vendor
   `CK2060`, `P1.T04`) and the primitive writes no fuse of its own (`P1.T15`,
-  `D103`), so adding it would put an inferred cell on the critical path of a
+  `D103`), so it would put an inferred cell on the critical path of a
   comparison whose point is decoded identity.  `P1.T15` owns that row.
-* No `DHCE`.  MEASURED here, on this shape's own first run
-  (`p1t38b-e2e-clocking_e2e-0000`, `$OTC/evidence/clocking/e2e-138c.md`): the
-  open flow never sets the gate.  `globals.cc get_dhcen_bel` matches a routed
-  wire against the `dhcen` pip apicula records, which for block 5 lane 0 is
-  `HCLK_UNK1003 -> HCLK_UNK999`; the vendor's own bitstream for the same
-  design instead sets `HCLK_UNK999 = "HCLK_UNK1007"`, a different source, and
-  the open route into the block never touches that wire at all, so
-  `DHCEN_USED` is never set and `get_DHCEN_fuses` returns nothing.  That is
-  `P1.T27`'s row to close, not something this design can work around.
-* No `DQCE`/`DCS`.  `P1.T28` derived their 138C tile types from vendor runs;
-  neither has an open-flow bel on this device yet, so a `DCS` here would fail
-  in nextpnr for a reason that has nothing to do with the clock tree.
 
-Placement is pinned on both sides, which is what makes `E1` mean anything:
-the vendor by `INS_LOC "div0" BOTTOMSIDE[4]` / `"div2" BOTTOMSIDE[6]`
-(SUG1018-1.7E §2.9, block 5 lanes 0 and 2 -- `P1.T08d`), the open flow by the
-RTL `BEL` attributes, because nextpnr's `.cst` reader cannot parse the 138C's
-`SIDE[0~7]` spelling (`P1.T14`).  Blocks 0 and 1 are avoided: no modelled
-clock escape (`D100a`).
+Placement is pinned on both sides, which is what makes `E1` mean anything: the
+vendor by `INS_LOC` (`PLL_B[2]` for the PLL, `BOTTOMSIDE[4]` for the divider,
+SUG1018-1.7E §2.9), the open flow by the macro form for the PLL and by the RTL
+`BEL` attribute for the divider, because nextpnr's `.cst` reader cannot parse
+the 138C's `SIDE[0~7]` spelling (`P1.T14`).  Blocks 0 and 1 are avoided: no
+modelled clock escape (`D100a`).
 """
 from . import PinSpec, ScopeSpec, ShapeSpec
 
@@ -49,66 +52,151 @@ from . import PinSpec, ScopeSpec, ShapeSpec
 #: `(row 108, col 117)`, so the Himbaechel site is `X117Y108` (`P1.T04`).
 BLOCK5_XY = (117, 108)
 
-#: `INS_LOC` index -> the block/lane the `BEL` attributes name (`P1.T08d`:
-#: `BOTTOMSIDE[4..7]` is block 5, lanes 0..3).
+#: `INS_LOC` index -> the block/lane the `BEL` attribute names (`P1.T08d`:
+#: `BOTTOMSIDE[4..7]` is block 5, lanes 0..3).  Lane 0: lanes 0-2 close at
+#: `E1`, lane 3 does not (`P1.T27`: its entry is a fabric wire).
 INS_LOC_BASE = 4
-LANE_A, LANE_B = 0, 2
+LANE = 0
 
-#: Two modes, deliberately neither the `"2"` default (`gowin_pack.py:5645`):
-#: a run that lost a `defparam` shows up as a different one-hot fuse rather
-#: than as silence.
-DIV_MODE_A, DIV_MODE_B = "4", "8"
+#: Deliberately not the `"2"` default (`gowin_pack.py`): a run that lost a
+#: `defparam` shows up as a different one-hot fuse rather than as silence.
+DIV_MODE = "4"
+
+#: The PLL site: `PLL_L[0]`, anchor tile (row 27, col 1) -- the site every
+#: `P1.T23`/`T41`-`T42` batch measured, and the one whose `CLKOUT0` the open
+#: flow is known to route into fabric.  MEASURED here: from `PLL_B[2]`
+#: (row 108, col 146) nextpnr cannot route `MPLLCLKOUT0` to a fabric flop at
+#: all (`Failed to route net 'pll_clkout0' ... using dedicated routing`), so
+#: the bottom-edge sites' clock-network entry is a further gap in the model.
+PLL_SITE = "PLL_L[0]"
+PLL_TILES = ((1, 27), (2, 27), (3, 27))
+
+#: The `P1.T39` reference operating point, `examples/pll/GW5AST-138C.vh`:
+#: FCLKIN 50 MHz, IDIV 1, FBDIV 1, MDIV 16, ODIV0 8 -> FVCO 800 MHz,
+#: CLKOUT0 100 MHz.  Repeated here rather than `` `include ``d because the
+#: generated design is written into a scratch directory that has no include
+#: path back into the repository; `test_clocktree_e2e_matches_the_pll_header`
+#: asserts the two agree.
+PLL_PARAMS = (("FCLKIN", '"50.0"'), ("IDIV_SEL", "1"), ("FBDIV_SEL", "1"),
+              ("MDIV_SEL", "16"), ("ODIV0_SEL", "8"))
+
+#: The `DCE`-gated spine cell of the other quadrant (`P1.T29`): (row 54,
+#: col 93) carries `SPINE8-13`.
+DCE_CELL_XY = (93, 54)
 
 RTL = """\
 // Generated by fuzz.gw5ast138c.harness.gen from shapes/{name}.py -- do not edit.
 // Shape: {name} (primitive under test: {primitive})
 // Sweep: {sweep_axis} = {sweep_value}
+// PLL: FCLKIN 50 MHz, IDIV 1, FBDIV 1, MDIV 16, ODIV0 8 -> FVCO 800 MHz,
+//      CLKOUT0 100 MHz (examples/pll/GW5AST-138C.vh, P1.T39)
 `default_nettype none
 
 module {top_module} (
     input  wire clk,
     input  wire reset,
+    input  wire cen,
     output wire [3:0] led
 );
 
-    wire div_clk_a;
-    wire div_clk_b;
+    wire pll_clkout0;
+    wire pll_lock;
+    wire gated_hclk;
+    wire div_clk;
+    wire dce_clk;
 
-    // Lane {lane_a} of block 5.  The vendor is pinned by
-    // INS_LOC "div0" BOTTOMSIDE[{ins_a}] in top.cst.
-    (* BEL = "X{bx}Y{by}/CLKDIV_{lane_a}" *) CLKDIV div0 (
-        .HCLKIN (clk),
+    // 1. The hard PLL, pinned to {pll_site}, at the P1.T39 reference
+    //    operating point.  It clocks a fabric flop of its own, so CLKOUT0
+    //    really has to reach the clock network and neither it nor LOCK can be
+    //    optimised away.
+    PLL #(
+{pll_params}
+    ) dut_pll (
+        .CLKIN        (clk),
+        .CLKFB        (1'b0),
+        .RESET        (~reset),
+        .PLLPWD       (1'b0),
+        .RESET_I      (1'b0),
+        .RESET_O      (1'b0),
+        .FBDSEL       (6'b0),
+        .IDSEL        (6'b0),
+        .MDSEL        (7'b0),
+        .MDSEL_FRAC   (3'b0),
+        .ODSEL0       (7'b0), .ODSEL0_FRAC (3'b0),
+        .ODSEL1       (7'b0), .ODSEL2 (7'b0), .ODSEL3 (7'b0),
+        .ODSEL4       (7'b0), .ODSEL5 (7'b0), .ODSEL6 (7'b0),
+        .DT0          (4'b0), .DT1 (4'b0), .DT2 (4'b0), .DT3 (4'b0),
+        .ICPSEL       (6'b0),
+        .LPFRES       (3'b0),
+        .LPFCAP       (2'b0),
+        .PSSEL        (3'b000),
+        .PSDIR        (1'b0),
+        .PSPULSE      (1'b0),
+        .ENCLK0       (1'b1),
+        .ENCLK1       (1'b0), .ENCLK2 (1'b0), .ENCLK3 (1'b0),
+        .ENCLK4       (1'b0), .ENCLK5 (1'b0), .ENCLK6 (1'b0),
+        .SSCPOL       (1'b0),
+        .SSCON        (1'b0),
+        .SSCMDSEL     (7'b0),
+        .SSCMDSEL_FRAC(3'b0),
+        .LOCK         (pll_lock),
+        .CLKOUT0      (pll_clkout0),
+        .CLKOUT1      (), .CLKOUT2 (), .CLKOUT3 (),
+        .CLKOUT4      (), .CLKOUT5 (), .CLKOUT6 (),
+        .CLKFBOUT     ()
+    );
+
+    // 2. The HCLK gate, on the board clock (the PLL cannot reach an HCLK
+    //    lane on this die -- see the module docstring).  Its whole bitstream
+    //    signature is the output-enable bit of the HCLK input multiplexer of
+    //    the lane its clock lands on (P1.T26 for the bit, P1.T27 for the
+    //    lane).
+    DHCE gate0 (
+        .CLKIN  (clk),
+        .CEN    (cen),
+        .CLKOUT (gated_hclk)
+    );
+
+    // 3. Lane {lane} of block 5.  The vendor is pinned by
+    //    INS_LOC "div0" BOTTOMSIDE[{ins}] in top.cst.
+    (* BEL = "X{bx}Y{by}/CLKDIV_{lane}" *) CLKDIV div0 (
+        .HCLKIN (gated_hclk),
         .RESETN (reset),
         .CALIB  (1'b0),
-        .CLKOUT (div_clk_a)
+        .CLKOUT (div_clk)
     );
-    defparam div0.DIV_MODE = "{div_a}";
+    defparam div0.DIV_MODE = "{div_mode}";
 
-    // Lane {lane_b} of the SAME block, at a different mode: the point of the
-    // design is that two lanes configured differently coexist in one
-    // bitstream and both decode.
-    (* BEL = "X{bx}Y{by}/CLKDIV_{lane_b}" *) CLKDIV div2 (
-        .HCLKIN (clk),
-        .RESETN (reset),
-        .CALIB  (1'b0),
-        .CLKOUT (div_clk_b)
+    // 4. The quadrant gate, on the divided clock: it gates a spine of the
+    //    bridge cell {dce_cell}, a different piece of the clock plane from the
+    //    HCLK block above, so the whole chain -- pin, HCLK gate, lane,
+    //    divider, quadrant gate -- is one path through the die (P1.T29).
+    //    Spelled DCE: DQCE is the pre-5A name and GowinSynthesis refuses it
+    //    (EX3937).
+    DCE dce0 (
+        .CLKIN  (div_clk),
+        .CE     (cen),
+        .CLKOUT (dce_clk)
     );
-    defparam div2.DIV_MODE = "{div_b}";
 
-    // Context, NOT compared (the E0 scope is the HCLK block cell only): the
-    // counters are what force each divided clock out of the block and onto
+    // Context, NOT compared (the E0 scope is the PLL site, the HCLK block and
+    // the bridge cell): the ring counters are what force each clock out onto
     // the global clock network.  Ring counters, deliberately not adders: the
     // `c1` decode check unpacks with `noalu=True`, so an ALU comes back
     // missing for a reason that is not the clock tree (MEASURED, P1.T14).
     reg [1:0] ring_a;
-    always @(posedge div_clk_a)
+    always @(posedge div_clk)
         ring_a <= {{ring_a[0], ~ring_a[1]}};
 
-    reg [1:0] ring_b;
-    always @(posedge div_clk_b)
-        ring_b <= {{ring_b[0], ~ring_b[1]}};
+    reg ring_b;
+    always @(posedge dce_clk)
+        ring_b <= ~ring_b;
 
-    assign led = {{ring_b, ring_a}};
+    reg ring_c;
+    always @(posedge pll_clkout0)
+        ring_c <= ~ring_c ^ pll_lock;
+
+    assign led = {{ring_c, ring_b, ring_a}};
 
 endmodule
 
@@ -117,15 +205,16 @@ endmodule
 
 
 def rtl(spec, sweep_value=None):
+    params = ",\n".join("        .%s(%s)" % (k, v) for k, v in PLL_PARAMS)
     return RTL.format(
         name=spec.name, primitive=spec.primitive,
         sweep_axis=spec.sweep_axis,
         sweep_value=sweep_value if sweep_value is not None else spec.baseline_value,
         top_module=spec.top_module,
         bx=BLOCK5_XY[0], by=BLOCK5_XY[1],
-        lane_a=LANE_A, lane_b=LANE_B,
-        div_a=DIV_MODE_A, div_b=DIV_MODE_B,
-        ins_a=INS_LOC_BASE + LANE_A)
+        lane=LANE, div_mode=DIV_MODE, ins=INS_LOC_BASE + LANE,
+        pll_site=PLL_SITE, pll_params=params,
+        dce_cell="(%d, %d)" % (DCE_CELL_XY[1], DCE_CELL_XY[0]))
 
 
 #: The MEASURED evidence each config-role exemption rests on (`P1.T14`).
@@ -140,22 +229,25 @@ SPEC = ShapeSpec(
     name="clocking_e2e",
     primitive="HCLK block",
     sweep_axis="design",
-    sweep_values=["two-lane-clkdiv"],
-    baseline_value="two-lane-clkdiv",
+    sweep_values=["full-clocktree"],
+    baseline_value="full-clocktree",
     pins={
         "clk": PinSpec(loc="V22", bank=4, drive=None, direction="input",
                        config_role_ack=_ACK_CLK),
         "reset": PinSpec(loc="Y12", bank=5, pull_mode="UP", drive=None,
                          direction="input", config_role_ack=_ACK_RESET),
+        "cen": PinSpec(loc="AA11", bank=5, pull_mode="UP", drive=None,
+                       direction="input"),
         "led[0]": PinSpec(loc="P20", bank=4, direction="output"),
         "led[1]": PinSpec(loc="Y17", bank=5, direction="output"),
         "led[2]": PinSpec(loc="W14", bank=5, direction="output"),
         "led[3]": PinSpec(loc="Y16", bank=5, direction="output"),
     },
     bank_vccio={4: "3.3", 5: "3.3"},
-    scope=ScopeSpec(tiles=[list(BLOCK5_XY)]),
+    scope=ScopeSpec(tiles=[list(BLOCK5_XY), list(DCE_CELL_XY)]
+                          + [list(t) for t in PLL_TILES]),
     rtl=rtl,
-    ins_loc={"div0": "BOTTOMSIDE[%d]" % (INS_LOC_BASE + LANE_A),
-             "div2": "BOTTOMSIDE[%d]" % (INS_LOC_BASE + LANE_B)},
+    ins_loc={"dut_pll": PLL_SITE,
+             "div0": "BOTTOMSIDE[%d]" % (INS_LOC_BASE + LANE)},
     clocks={"clk": 20.0},
 )
