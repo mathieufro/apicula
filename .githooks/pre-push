@@ -23,7 +23,13 @@ if [ "${LANDING_GATE:-0}" != "1" ]; then
 fi
 
 root="$(git rev-parse --show-toplevel)"
-repo="$(basename "$root")"
+# The marker id must name the REPO, not the directory: a per-task worktree
+# is checked out under a name of its own (`nextpnr-wt/integ`), which used to
+# label its gates `integ-*` and hid which repo they belonged to. The origin
+# URL is the same from every checkout.
+repo="$(basename "$(git config --get remote.origin.url || echo "$root")")"
+repo="${repo%.git}"
+[ -n "$repo" ] || repo="$(basename "$root")"
 
 if [ -f "$root/gate.env" ]; then
     . "$root/gate.env"
