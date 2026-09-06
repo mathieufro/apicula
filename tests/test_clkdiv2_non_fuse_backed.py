@@ -66,3 +66,44 @@ def test_bitstream_cell_type_does_not_eat_the_2_of_clkdiv2():
     assert equiv._bitstream_cell_type("CLKDIV2") == "CLKDIV2"
     assert equiv._bitstream_cell_type("CLKDIV_1") == "CLKDIV"
     assert equiv._bitstream_cell_type("IOB") is None
+
+
+def _pnr_cells_cross_lane(tmp_path):
+    """A CLKDIV2 on lane 2 and an unrelated CLKDIV on lane 0 of the same block.
+
+    `by_site` is keyed on the tile, and an HCLK block tile holds all four
+    lanes, so this is the shape that separates "the lane was halved" from
+    "some CLKDIV in this block happens to sit at its default".
+    `gowin_pack.GW5A.get_default_clkdiv_divmode()` is `"2"`, so the lane-0
+    cell here is an ordinary untouched CLKDIV.
+    """
+    pnr = {"modules": {"top": {"cells": {
+        "dut_clkdiv2": {"type": "CLKDIV2", "attributes": {
+            "NEXTPNR_BEL": "X20Y41/CLKDIV2_2"}},
+        "other_clkdiv": {"type": "CLKDIV", "attributes": {
+            "NEXTPNR_BEL": "X20Y41/CLKDIV_0"},
+            "parameters": {"DIV_MODE": "2"}},
+    }}}}
+    path = tmp_path / "clkdiv2_cross_lane_pnr.json"
+    path.write_text(json.dumps(pnr))
+    return equiv.read_pnr_cells(str(path))
+
+
+def test_clkdiv2_is_not_recovered_by_a_clkdiv_on_another_lane(tmp_path):
+    """`D103` is a per-lane rule: a lane-0 default cannot vouch for lane 2.
+
+    Without the lane comparison a packer that never bypasses the lane-2
+    buffer -- i.e. never halves the lane -- closes `c1 ok` with 0 unexplained
+    bits, because the CLKDIV2's real signature is an *absent* mux select bit
+    that no layer of the check asserts.
+    """
+    cells = _pnr_cells_cross_lane(tmp_path)
+    decoded = Netlist(cells={
+        Cell(20, 41, 0, "CLKDIV_"): frozenset({("DIV_MODE", "2")}),
+    })
+
+    out = equiv.decode_check_c1(cells, decoded)
+
+    assert out["c1"] == "mismatch"
+    assert [m["type"] for m in out["missing"]] == ["CLKDIV2"]
+    assert out["missing"][0]["bel"] == "CLKDIV2_2"

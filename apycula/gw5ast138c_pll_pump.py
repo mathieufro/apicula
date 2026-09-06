@@ -84,9 +84,48 @@ KVCO = 7
 #: this module does, so the value is refused instead of silently mis-encoded.
 MDIV_SEL_MIN = 2
 
+#: The `Fpfd` band the campaign actually covered, in MHz -- the min and max
+#: `fref` of the 45 points in `$OTC/evidence/plla/pump-138c.json`.  The
+#: **device** allows 19 .. 81.25 MHz (DS1239E; the vendor refuses `FCLKIN`
+#: 650 MHz on a single-ended input, `PA2078`), so `Fpfd` in `(50, 81.25]` is
+#: an ordinary operating point that nothing here has measured: `FLDCOUNT`
+#: would cross into a band no bitstream has ever shown.  Only the first
+#: `FLDCOUNT` boundary is observable, so the second is refused, not computed.
+FPFD_MEASURED_MIN = 19.0
+FPFD_MEASURED_MAX = 50.0
+
+#: The `Ndiv` span each fitted resistor was observed over, from the same 45
+#: points: `R4` on 36 points, `R5` on 9.  The interior boundary between them
+#: is not a gap -- the ladder's own step, `ICP_MAX_UA / a[R4]` = 39.68, lies
+#: inside the 38 .. 40 bracket the two spans leave, so `Ndiv 39` is `R4` by
+#: derivation rather than by interpolation.
+NDIV_OBSERVED_BAND = {4: (26.0, 38.0), 5: (40.0, 68.0)}
+
+#: Below this `Ndiv` the vendor's ladder reaches `R3`, which `ICP_PER_NDIV`
+#: does not carry: `Ic(R4, Ndiv) <= ICP_MAX_UA` is satisfied immediately, so
+#: an un-guarded ladder answers `R4` for a point the vendor answers `R3`.
+#: `R3` is out of the campaign's reach, not out of the device's: `Ndiv` runs
+#: down to `650 / 81.25 = 8.0` inside the datasheet envelope.
+NDIV_R3_BOUNDARY = 11.5
+
+#: Above this `Ndiv` the ladder runs off its top into `R6`, equally unfitted.
+NDIV_LADDER_MAX = ICP_MAX_UA / ICP_PER_NDIV[-1][1]
+
 
 class PllPumpError(Exception):
     """An operating point no measured constant covers."""
+
+
+class PllPumpUnmeasured(PllPumpError):
+    """The operating point is legal on the device and unmeasured here.
+
+    Raised instead of extrapolating.  Every constant in this module is a fit
+    over a bounded wedge of `(Fpfd, Ndiv)`; outside it the honest answer is
+    "no measurement", and a refusal by name is what `D30` asks for -- the
+    alternative is a plausible wrong fuse whose failure mode (a PLL that
+    locks but jitters) does not surface until the Hardware Gate.  Closing a
+    band costs oracle runs, not a guess: `pump-138c.md` §1 has the geometry.
+    """
 
 
 def fldcount(fref):
@@ -99,13 +138,34 @@ def pump(fref, fvco):
 
     `fref` and `fvco` are in MHz; `Ndiv = fvco / fref` is the feedback divider
     the charge current scales with.
+
+    Raises `PllPumpUnmeasured` for any point outside the fitted wedge --
+    `Fpfd` outside `[FPFD_MEASURED_MIN, FPFD_MEASURED_MAX]`, or an `Ndiv`
+    the ladder would answer with an unfitted resistor (`R3` below,
+    `R6` above).  It never extrapolates.
     """
+    if not FPFD_MEASURED_MIN <= fref <= FPFD_MEASURED_MAX:
+        raise PllPumpUnmeasured(
+            f"Fpfd {fref} MHz is outside the measured band "
+            f"[{FPFD_MEASURED_MIN}, {FPFD_MEASURED_MAX}] MHz of the "
+            f"GW5AST-138C charge-pump fit: FLDCOUNT past "
+            f"{FPFD_MEASURED_MAX} MHz has never been observed on this "
+            f"device (the vendor refuses the FCLKIN that would reach it, "
+            f"PA2078). Close the band with oracle runs, do not extrapolate")
+
     ndiv = fvco / fref
+    if ndiv < NDIV_R3_BOUNDARY:
+        raise PllPumpUnmeasured(
+            f"Ndiv {ndiv:.3f} (Fpfd {fref} MHz, FVCO {fvco} MHz) is below "
+            f"{NDIV_R3_BOUNDARY}, where the vendor's ladder reaches R3; "
+            f"ICP_PER_NDIV carries no R3 coefficient, so answering R4 here "
+            f"would be an extrapolation, not a measurement")
+
     for r_idx, per_ndiv in ICP_PER_NDIV:
         current = per_ndiv * ndiv
         if current <= ICP_MAX_UA:
             return fldcount(fref), int(current + 0.5) * 10, r_idx
-    raise PllPumpError(
+    raise PllPumpUnmeasured(
         f"no measured loop-filter resistor of the GW5AST-138C carries "
         f"Ndiv {ndiv:.3f} (Fpfd {fref} MHz, FVCO {fvco} MHz): the fitted "
-        f"ladder covers Ndiv up to {ICP_MAX_UA / ICP_PER_NDIV[-1][1]:.1f}")
+        f"ladder covers Ndiv up to {NDIV_LADDER_MAX:.1f}")

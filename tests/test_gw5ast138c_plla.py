@@ -1414,3 +1414,57 @@ def test_pll_dyn_selects_default_to_false():
     dev.get_pll_attrvals(_Bel(dict(_BATCH_C_PARMS)))
     for name in DYN_SELECT_IDS:
         assert dev.chipdb.seen[name] == 'FALSE', name
+
+
+def test_pll_pump_refuses_fpfd_above_the_measured_band():
+    """`B5`: above 50 MHz `FLDCOUNT` is extrapolation, so it raises.
+
+    `Fpfd` 60 / 66 / 74.25 MHz are ordinary Pro DSP reference points and sit
+    inside the device's own 19 .. 81.25 MHz PFD envelope, but outside the
+    campaign's wedge; the second `FLDCOUNT` boundary has never been observed.
+    """
+    from apycula import gw5ast138c_pll_pump as pump_mod
+    for fref in (60.0, 66.0, 74.25, 81.25):
+        with pytest.raises(pump_mod.PllPumpUnmeasured):
+            pump_mod.pump(fref, 900.0)
+    with pytest.raises(pump_mod.PllPumpUnmeasured):
+        pump_mod.pump(18.0, 700.0)          # below the measured band too
+    # the band's own edges still answer
+    assert pump_mod.pump(pump_mod.FPFD_MEASURED_MAX, 800.0)[2] == 4
+
+
+def test_pll_pump_refuses_ndiv_outside_the_fitted_ladder():
+    """`B5`: an `Ndiv` the ladder would answer with `R3` or `R6` raises.
+
+    `ICP_PER_NDIV` starts at `R4` and is searched in ascending-resistance
+    order, so without the guard a point the vendor answers with `R3` gets
+    `R4` silently -- the loop finds `Ic <= ICP_MAX_UA` on the first entry.
+    """
+    from apycula import gw5ast138c_pll_pump as pump_mod
+    # Ndiv 10 -- R3 territory, reachable inside the datasheet envelope.
+    with pytest.raises(pump_mod.PllPumpUnmeasured):
+        pump_mod.pump(50.0, 500.0)
+    # Ndiv 150 -- off the top of the ladder, R6.
+    with pytest.raises(pump_mod.PllPumpUnmeasured):
+        pump_mod.pump(20.0, 3000.0)
+    assert pump_mod.NDIV_R3_BOUNDARY < min(
+        lo for lo, _hi in pump_mod.NDIV_OBSERVED_BAND.values())
+
+
+def test_pll_pump_observed_bands_match_the_evidence():
+    """The named band constants are the ones `pump-138c.json` actually shows."""
+    import json
+    from collections import defaultdict
+    from apycula import gw5ast138c_pll_pump as pump_mod
+    path = Path(OTC) / 'evidence' / 'plla' / 'pump-138c.json'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    fit = json.loads(path.read_text())
+    frefs = [p['fref'] for p in fit['points']]
+    assert min(frefs) == pump_mod.FPFD_MEASURED_MIN
+    assert max(frefs) == pump_mod.FPFD_MEASURED_MAX
+    ndivs = defaultdict(list)
+    for point in fit['points']:
+        ndivs[point['r_value'] - 22].append(float(point['ndiv']))
+    assert {r: (min(v), max(v)) for r, v in ndivs.items()} == \
+        pump_mod.NDIV_OBSERVED_BAND

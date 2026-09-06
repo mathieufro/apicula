@@ -1688,15 +1688,22 @@ def _norm_param(value):
     return text
 
 
-def _clkdiv2_recovered_via_chain(site_cells):
-    """Does this site decode a `CLKDIV` at `DIV_MODE=2`? (`D103`)
+def _clkdiv2_recovered_via_chain(site_cells, z):
+    """Does this site decode a `CLKDIV` at `DIV_MODE=2` **on lane `z`**? (`D103`)
 
     `site_cells` is one entry of `decode_check_c1`'s `by_site` map:
-    `{(cell type, z): attrs}` for one tile of the decoded bitstream.  A
-    `CLKDIV2` leaves no fuse, so this chained `DIV_MODE=2` bit is the only
-    positive evidence the bitstream carries that the lane was halved.
+    `{(cell type, z): attrs}` for one HCLK **block** tile of the decoded
+    bitstream -- all four of the block's lanes, not one.  A `CLKDIV2` leaves
+    no fuse, so this chained `DIV_MODE=2` bit is the only positive evidence
+    the bitstream carries that the lane was halved; it is evidence only for
+    the lane it sits on.  `DIV_MODE = "2"` is also `gowin_pack`'s documented
+    CLKDIV default, so an unrelated CLKDIV left at its default on another
+    lane of the same block would otherwise recover every CLKDIV2 in the
+    block for free.
     """
-    for (cell_type, _z), attrs in site_cells.items():
+    for (cell_type, cell_z), attrs in site_cells.items():
+        if cell_z != z:
+            continue
         if _bitstream_cell_type(cell_type) != "CLKDIV":
             continue
         have = dict(canon_attr(f) for f in attrs)
@@ -1749,7 +1756,7 @@ def decode_check_c1(pnr_cells, netlist):
             continue
         base, z = split_bel_name(cell["bel"])
         if _bitstream_cell_type(base) == "CLKDIV2":
-            if _clkdiv2_recovered_via_chain(by_site.get(cell["site"], {})):
+            if _clkdiv2_recovered_via_chain(by_site.get(cell["site"], {}), z):
                 skipped.append({
                     "name": cell["name"], "type": cell["type"],
                     "bel": cell["bel"],
