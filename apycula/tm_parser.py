@@ -87,8 +87,63 @@ def parse_dl(data):
 def parse_iddroddr(data):
     pass
 
+# ---------------------------------------------------------------------------
+# PLL (`offsets[0x7cc]`), P1.T33
+# ---------------------------------------------------------------------------
+# The block between the `iddroddr` offset (`0x4a0`) and the `dll` offset
+# (`0x81c`) ends in exactly 0x50 = 80 bytes = 5 groups of 4 floats -- the
+# `float_data` shape of five named paths.  On `GW5AST-138C.tm` chunk 0 those
+# twenty floats are
+#
+#     0.198  0.1935 0.208  0.2015
+#     0.1785 0.1805 0.216  0.2275
+#     0.1705 0.181  0.226  0.2215
+#     0.169  0.1635 0.2025 0.206
+#     0.183  0.1765 0.206  0.221
+#
+# and they are **byte-identical to `GW2A-18.tm` chunk 0** (as is 15,471 of that
+# chunk's 15,552 bytes: only the `iodelay` and `fanout` blocks differ).  Five
+# paths is the output count of the *rPLL* primitive GW1N/GW2A ship
+# (CLKOUT / LOCK / CLKOUTP / CLKOUTD / CLKOUTD3, the set nextpnr still hard-codes
+# at `gowin_arch_gen.py:1766`).  The Arora-V `PLL` this die actually has does not
+# have those ports at all: UG306E Table 5-2 gives it CLKOUT0..CLKOUT6, CLKFBOUT
+# and LOCK, and the vendor's own SDF for a 138C PLL design emits seven
+# `(IOPATH CLKIN CLKOUTn ...)` arcs, every one of them `0.000:0.000:0.000`.
+#
+# So the block is inherited GW2A rPLL data carried into the GW5A preamble, it
+# cannot be mapped onto this die's PLL ports, and the vendor models this die's
+# PLL as zero internal delay.  Publishing the five floats under GW5A PLL names
+# would invent a model the silicon vendor does not have; `parse_pll` therefore
+# emits **no timing group at all**, deliberately and on the record.  The decoder
+# is kept as `pll_block` so the claim stays inspectable from the shipped file.
+#
+# Evidence: `$OTC/evidence/timing-l0-cfu/pll-slice.md` (`P1.T33`, `V12a`),
+# DS1239E Table 3-18 (no CLKIN->CLKOUT delay is published at all), `D60`.
+_PLL_INHERITED_RPLL_PATHS = [
+    'clkin_clkout',    # 0x00  rPLL CLKOUT
+    'clkin_lock',      # 0x10  rPLL LOCK
+    'clkin_clkoutp',   # 0x20  rPLL CLKOUTP
+    'clkin_clkoutd',   # 0x30  rPLL CLKOUTD
+    'clkin_clkoutd3',  # 0x40  rPLL CLKOUTD3
+]
+
+def pll_block(data):
+    """Decode the 0x7cc block verbatim, under its inherited rPLL path names.
+
+    Inspection/regression helper only -- `parse_pll` does not publish it, see
+    the comment above.  The names are the GW1N/GW2A rPLL output order and are
+    NOT a claim about this die's PLL.
+    """
+    return float_data(data, _PLL_INHERITED_RPLL_PATHS)
+
 def parse_pll(data):
-    pass
+    """No PLL timing group: the .tm carries no PLL model for this die.
+
+    Returns an empty mapping (falsy, so `read_tm` publishes nothing) rather
+    than silently falling off the end of the function.  See above for why, and
+    `$OTC/evidence/timing-l0-cfu/pll-slice.md` for the measurement.
+    """
+    return {}
 
 def parse_dll(data):
     pass
