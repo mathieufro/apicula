@@ -1333,3 +1333,80 @@ def test_plla_sites_decode_identically_except_the_two_left_edge_sites():
             assert entry['attr_delta'] == {'A_VR_EN': [None, 2]}, entry['site']
             assert entry['anchor'][1] == 0, entry['site']
         assert tuple(entry['anchor']) in SITE_ANCHORS_138C, entry['site']
+
+
+# --------------------------------------------------- P1.T42 follow-up: DYN
+
+#: The `DYN_*` selects the packer must encode from the cell, with the attribute
+#: id each one was MEASURED at (`P1.T22` 125/132, `P1.T42` 124/131/190).
+DYN_SELECT_IDS = {
+    'A_DYN_IDIV_SEL': 125,
+    'A_DYN_FBDIV_SEL': 124,
+    'A_DYN_MDIV_SEL': 131,
+    'A_DYN_ODIV0_SEL': 132,
+    'A_DYN_DPA_EN': 190,
+}
+
+
+class _RecordingChipdb:
+    """A chipdb stub that records the `AttrVal`s the packer asks it to encode."""
+
+    def __init__(self):
+        self.seen = {}
+
+    def get_pll_attr_val(self, attrval, av):
+        self.seen[attrval.attr] = attrval.val
+
+
+class _AttrVals138C(gowin_pack.GW5AST_138C):
+    """`GW5AST_138C` whose only collaborator is the recording chipdb."""
+
+    def __init__(self):  # noqa: D107 - deliberately does not call super()
+        self.chipdb = _RecordingChipdb()
+
+
+class _Cell:
+    def __init__(self, parms):
+        self.name, self.parms = 'dut_pll', parms
+
+
+class _Bel:
+    def __init__(self, parms):
+        self.x, self.y, self.cell = 27, 1, _Cell(parms)
+
+
+#: The `P1.T42` batch-C operating point, `A_`-prefixed as `get_PLL_fuses`
+#: hands it to `get_pll_attrvals`.
+_BATCH_C_PARMS = {'A_FCLKIN': '100.0', 'A_IDIV_SEL': bin(4),
+                  'A_FBDIV_SEL': bin(18), 'A_MDIV_SEL': bin(2),
+                  'A_ODIV0_SEL': bin(8)}
+
+
+def test_pll_attrids_name_the_two_batch_c_first_sightings():
+    """`P1.T42` measured 124 and 131; an unnamed id cannot be encoded."""
+    from apycula import attrids
+    for name, attr_id in DYN_SELECT_IDS.items():
+        assert attrids.pll_attrids[name] == attr_id, name
+
+
+def test_pll_dyn_selects_are_encoded_from_the_cell_not_forced_false():
+    """Each `DYN_*` cell parameter reaches the bitstream as its own boolean.
+
+    The packer used to write every dynamic select `FALSE` regardless of the
+    cell, so a `DYN_MDIV_SEL "TRUE"` design produced a static bitstream.
+    """
+    for name in DYN_SELECT_IDS:
+        parm = name[len('A_'):]
+        dev = _AttrVals138C()
+        dev.get_pll_attrvals(_Bel(dict(_BATCH_C_PARMS, **{name: 'TRUE'})))
+        assert dev.chipdb.seen[name] == 'TRUE', parm
+        others = {n: dev.chipdb.seen[n] for n in DYN_SELECT_IDS if n != name}
+        assert set(others.values()) == {'FALSE'}, others
+
+
+def test_pll_dyn_selects_default_to_false():
+    """A cell that names no dynamic mode still writes all five, all `FALSE`."""
+    dev = _AttrVals138C()
+    dev.get_pll_attrvals(_Bel(dict(_BATCH_C_PARMS)))
+    for name in DYN_SELECT_IDS:
+        assert dev.chipdb.seen[name] == 'FALSE', name

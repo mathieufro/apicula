@@ -1436,6 +1436,16 @@ pll_attrids = {
         # See $OTC/evidence/plla/attrmap-138c.{md,json}.
         'A_DYN_IDIV_SEL':         125,
         'A_DYN_ODIV0_SEL':        132,
+
+        # P1.T42, MEASURED on GW5AST-138C, batch p1-pll-sweep-c, site PLL_L[0]:
+        # the same one-parameter sweep against a baseline that differs in no
+        # other key.  DYN_FBDIV_SEL="TRUE" moves 319 bits across the site's
+        # three tiles, all in shortval[35] rows keyed by (attr 124, val 50);
+        # DYN_MDIV_SEL="TRUE" moves one bit in (27,1), keyed by (131, 50).
+        # Both ids were unnamed in this device's .fse attribute table.
+        # See $OTC/evidence/plla/sweep-c-138c.{md,json}.
+        'A_DYN_FBDIV_SEL':        124,
+        'A_DYN_MDIV_SEL':         131,
     }
 pll_attrvals = {
         'UNKNOWN':          0,

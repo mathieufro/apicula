@@ -5204,6 +5204,25 @@ class GW2A_18C(GW2A):
         return super().__repr__() + ""
 
 ################################################################
+#: The GW5A `PLL` dynamic-reconfiguration selects, in attribute-id order.
+#: Each is a plain boolean cell parameter naming the port that replaces a
+#: static divider value: `DYN_IDIV_SEL` reads `IDSEL`, `DYN_FBDIV_SEL`
+#: `FBDSEL`, `DYN_MDIV_SEL` `MDSEL`, `DYN_ODIV0_SEL` `ODSEL0`, and
+#: `DYN_DPA_EN` the dynamic phase-adjust ports.  Ids 124/125/131/132/190 are
+#: MEASURED one-parameter sightings on the GW5AST-138C (`P1.T22`, `P1.T42`);
+#: `A_DYN_ICP_SEL` and `A_DYN_LPF_SEL` have no measured sighting yet and are
+#: listed here so a design that sets them is encoded rather than ignored.
+DYN_SELECT_ATTRS = (
+    'A_DYN_FBDIV_SEL',
+    'A_DYN_IDIV_SEL',
+    'A_DYN_ICP_SEL',
+    'A_DYN_LPF_SEL',
+    'A_DYN_MDIV_SEL',
+    'A_DYN_ODIV0_SEL',
+    'A_DYN_DPA_EN',
+)
+
+
 class GW5A(Device):
     """ GW5A series """
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
@@ -5614,10 +5633,14 @@ class GW5A(Device):
             val = int(cell_parms.get(attr, '0'), 2)
             self.chipdb.get_pll_attr_val(AttrVal(attr, val), av)
 
-        # XXX only static
-        self.chipdb.get_pll_attr_val(AttrVal('A_DYN_DPA_EN', 'FALSE'), av)
-        self.chipdb.get_pll_attr_val(AttrVal('A_DYN_ICP_SEL', 'FALSE'), av)
-        self.chipdb.get_pll_attr_val(AttrVal('A_DYN_LPF_SEL', 'FALSE'), av)
+        # The DYN_* selects are cell parameters like any other divider
+        # setting: each one replaces a static `#(...)` value with the matching
+        # dynamic-reconfiguration port, and the vendor writes it as the plain
+        # boolean attribute (`pll_attrvals['TRUE'] == 50`).  Forcing them all
+        # FALSE here silently dropped every dynamic mode from the bitstream.
+        for attr in DYN_SELECT_ATTRS:
+            val = cell_parms.get(attr, 'FALSE')
+            self.chipdb.get_pll_attr_val(AttrVal(attr, val), av)
         self.chipdb.get_pll_attr_val(AttrVal('A_LPF_CAP_SEL', '0'), av)
         self.chipdb.get_pll_attr_val(AttrVal('A_SSC_EN', '0'), av)
 
