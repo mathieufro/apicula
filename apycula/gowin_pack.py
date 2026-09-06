@@ -2564,7 +2564,6 @@ class Device:
         name_pattern = r'^_HCLK([0,1])_SECT([0,1])$'
         pattern_match = re.findall(name_pattern, bel.idx_str)
         if (not pattern_match):
-            import ipdb; ipdb.set_trace()
             raise Exception (f"Unknown HCLK Bel/HCLK Section: {bel.cell.typ}{bel.idx_str}")
         return pattern_match[0]
 
@@ -5653,6 +5652,31 @@ class GW5A(Device):
         self.set_pll_slot_fuses(slot_idx, av)
         return []
 
+    # The GW5A HCLK block indexes its CLKDIV by the bel's own index, not by the
+    # pre-5A "_HCLK<n>_SECT<n>" name, and it has no DCS section select.  This
+    # lived in GW5A_25A, so GW5AT-60B and GW5AST-138C inherited the pre-5A
+    # implementation and died in get_hclk_sections on the first CLKDIV
+    # (P1.T08d, measured: that method's stray `import ipdb` raised
+    # ModuleNotFoundError instead of its own Exception).  Moved up unchanged --
+    # GW5A_25A now inherits exactly what it used to define, bit for bit.
+    def get_CLKDIV_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        hclk_idx = bel.idx_str[-1]
+
+        av = set()
+        self.chipdb.get_hclk_attr_val(AttrVal(f"HCLKDIV{hclk_idx}_DIV", self.get_clkdiv_divmode(bel)), av)
+
+        fuses = []
+        bels_x_y = self.get_clkdiv_bels(bel)
+        for x_y in bels_x_y:
+            x, y = x_y
+            bits = self.chipdb.get_hclk_fuses(x, y, av)
+            if bits:
+                fuses.append(CellFuseBits(x, y, bits))
+        return fuses
+
+    def get_CLKDIV2_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        return []
+
     def get_default_clkdiv_divmode(self) -> str:
         return "2"
 
@@ -6352,24 +6376,6 @@ class GW5A_25A(GW5A):
             if bits:
                 fuses.append(CellFuseBits(x, y, bits))
         return fuses
-
-    def get_CLKDIV_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        hclk_idx = bel.idx_str[-1]
-
-        av = set()
-        self.chipdb.get_hclk_attr_val(AttrVal(f"HCLKDIV{hclk_idx}_DIV", self.get_clkdiv_divmode(bel)), av)
-
-        fuses = []
-        bels_x_y = self.get_clkdiv_bels(bel)
-        for x_y in bels_x_y:
-            x, y = x_y
-            bits = self.chipdb.get_hclk_fuses(x, y, av)
-            if bits:
-                fuses.append(CellFuseBits(x, y, bits))
-        return fuses
-
-    def get_CLKDIV2_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        return []
 
     #==============================
     #========== DSP
