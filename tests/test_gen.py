@@ -34,11 +34,13 @@ def _yosys_reads(path):
 
 
 @pytest.mark.heavy  # invokes the real yosys binary via _yosys_reads
-def test_gen_emits_three_files(tmp_path):
+def test_gen_emits_four_files(tmp_path):
     written = gen.run(smoke.SPEC, tmp_path)
     names = sorted(p.name for p in tmp_path.iterdir())
-    assert names == ["top.cst", "top.sdc", "top.v"]
-    assert len(names) == 3
+    # `top-open.cst` is the open-flow copy: the same constraints without the
+    # `INS_LOC` lines nextpnr's `.cst` reader rejects.
+    assert names == ["top-open.cst", "top.cst", "top.sdc", "top.v"]
+    assert len(names) == 4
     for name in names:
         assert (tmp_path / name).stat().st_size > 0
     assert sorted(p.name for p in written) == names
@@ -166,8 +168,9 @@ def test_gen_regenerated_oracle_smoke_passes_cst_assertion(tmp_path):
 
     target = gen.datastore_root() / "oracle-smoke"
     regenerated = gen.run(smoke.SPEC, target)
-    assert sorted(p.name for p in regenerated) == ["top.cst", "top.sdc", "top.v"]
-    for name in ("top.v", "top.cst", "top.sdc"):
+    assert sorted(p.name for p in regenerated) == [
+        "top-open.cst", "top.cst", "top.sdc", "top.v"]
+    for name in ("top.v", "top.cst", "top-open.cst", "top.sdc"):
         assert (target / name).read_bytes() == (tmp_path / name).read_bytes()
-    assert len(reference) == 3
+    assert len(reference) == 4
     assert _yosys_reads(target / "top.v")
