@@ -546,3 +546,175 @@ def test_pll_attrmap_138c_artefact_is_complete():
             continue
         assert run['moved_bits'] > 0, f"{run['point']} moved no bit at all"
         assert run['attrvals'], f"{run['point']} resolved to no shortval row"
+
+
+# ======================================================================
+# P1.T23 -- the `PLL` sweep shape and batch A (`IDIV` / `FBDIV`)
+#
+# The shape is `fuzz/gw5ast138c/shapes/clocking_pll.py` (`D96`: the cell type
+# is `PLL`, not `PLLA`; the evidence slug stays `plla` for path stability).
+# `P1.T41`-`T43` reuse it unedited through `$FUZZ_PLL_AXIS`.
+# ======================================================================
+
+#: DS1239E Table 3-18 `FPFDMIN` / `FPFDMAX`, the same bounds `P1.T22` used.
+FPFD_BAND_138C = (19.0, 81.25)
+
+#: Batch A's axes and its expected row count (blueprint `P1.T23`).
+BATCH_A_AXES = {'IDIV', 'FBDIV'}
+BATCH_A_ROWS = 20
+BATCH_A_ID = 'p1-pll-sweep-a'
+
+
+def _shape(axes='idiv,fbdiv'):
+    """Import the shape module with `$FUZZ_PLL_AXIS` set, freshly."""
+    import importlib
+    mod = 'fuzz.gw5ast138c.shapes.clocking_pll'
+    old = os.environ.get('FUZZ_PLL_AXIS')
+    os.environ['FUZZ_PLL_AXIS'] = axes
+    try:
+        import sys
+        sys.modules.pop(mod, None)
+        return importlib.import_module(mod)
+    finally:
+        if old is None:
+            os.environ.pop('FUZZ_PLL_AXIS', None)
+        else:
+            os.environ['FUZZ_PLL_AXIS'] = old
+
+
+def test_pll_sweep_shape_points_are_inside_every_datasheet_band():
+    """`S7` at generation time: no point of batch A can be out of band.
+
+    `FVCO` in [650, 1300] (`P1.T21`), `Fpfd` in [19, 81.25], `CLKOUT0` in
+    [5.079, 1000] and `FCLKIN` <= `FINMAX` 800 -- all four, for all 20 points.
+    """
+    m = _shape()
+    fin_max, fout_max, fout_min, fvco_max, fvco_min = PERMITTED_FREQS_138C
+    points = m.points()
+    assert len(points) == BATCH_A_ROWS
+    for name, (axis, value) in points.items():
+        parms = axis.params(value)
+        fclkin = float(parms['FCLKIN'].strip('"'))
+        assert fclkin <= fin_max, f'{name}: FCLKIN {fclkin} > FINMAX {fin_max}'
+        assert FPFD_BAND_138C[0] <= axis.fpfd(value) <= FPFD_BAND_138C[1], \
+            f'{name}: Fpfd {axis.fpfd(value)} outside {FPFD_BAND_138C}'
+        assert fvco_min <= axis.fvco(value) <= fvco_max, \
+            f'{name}: FVCO {axis.fvco(value)} outside [{fvco_min}, {fvco_max}]'
+        assert fout_min <= axis.clkout0(value) <= fout_max, \
+            f'{name}: CLKOUT0 {axis.clkout0(value)} outside band'
+
+
+def test_pll_sweep_shape_changes_exactly_one_parameter_per_point():
+    """One parameter per run: a point differs from ITS axis baseline in 1 key."""
+    m = _shape()
+    for name, (axis, value) in m.points().items():
+        base = axis.params(axis.baseline)
+        here = axis.params(value)
+        assert set(base) == set(here)
+        diff = {k for k in base if base[k] != here[k]}
+        if value == axis.baseline:
+            assert diff == set(), f'{name} is the baseline and must not differ'
+        else:
+            assert diff == {axis.param}, \
+                f'{name} differs in {sorted(diff)}, not just {axis.param}'
+
+
+def test_pll_sweep_shape_axis_env_is_the_t41_t43_reuse_contract():
+    """`$FUZZ_PLL_AXIS` selects the axes; the batch CLI stays seven options."""
+    only_idiv = _shape('idiv')
+    assert {a.name for a, _ in only_idiv.points().values()} == {'IDIV'}
+    only_fbdiv = _shape('fbdiv')
+    assert {a.name for a, _ in only_fbdiv.points().values()} == {'FBDIV'}
+    both = _shape('idiv,fbdiv')
+    assert len(both.points()) == len(only_idiv.points()) + len(only_fbdiv.points())
+    with pytest.raises(ValueError):
+        _shape('nosuchaxis').points()
+    # The published CLI is exactly seven options (F11/F29) -- the axis is not
+    # an eighth one.
+    from fuzz.gw5ast138c.harness import __main__ as batch
+    opts = [a for a in batch.build_parser()._actions if a.dest != 'help']
+    assert len(opts) == 7, [a.dest for a in opts]
+
+
+def test_plla_no_bank67_pins():
+    """No sweep `.cst` may touch a bank 6/7 pin or a non-`LVCMOS33` IO_TYPE.
+
+    `F73`/PR #423: an `LVCMOS*` value on a bank 6/7 pin of this die is a live
+    thermal hazard. Authored by `P1.T23`, re-run unchanged by `P1.T41`-`T43`.
+    """
+    from fuzz.gw5ast138c.harness import gen
+    from fuzz.gw5ast138c.shapes import DDR_BANKS
+    m = _shape()
+    spec = m.SPEC
+    bad_banks = [p.loc for p in spec.pins.values() if p.bank in DDR_BANKS]
+    assert bad_banks == [], f'sweep pins on a DDR bank: {bad_banks}'
+    bad_types = [(n, p.io_type) for n, p in spec.pins.items()
+                 if p.io_type != 'LVCMOS33']
+    assert bad_types == [], f'non-LVCMOS33 IO_TYPE: {bad_types}'
+    for name in m.points():
+        cst = gen.render_cst(spec, name)
+        for bank in DDR_BANKS:
+            assert f'BANK_VCCIO {bank}' not in cst and \
+                   f'BANK_VCCIO={bank}' not in cst, \
+                   f'{name}: .cst configures bank {bank}'
+        for line in cst.splitlines():
+            if 'IO_TYPE=' in line:
+                value = line.split('IO_TYPE=')[1].split()[0].rstrip(';,')
+                assert value == 'LVCMOS33', f'{name}: IO_TYPE={value}'
+
+
+def _batch_a_rows():
+    """Batch A's rows out of the slug's `runs.jsonl` (skip when absent)."""
+    import json
+    path = Path(OTC) / 'evidence' / 'plla' / 'runs.jsonl'
+    if not path.is_file():
+        pytest.skip(f'{path} absent (set $OTC)')
+    rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    rows = [r for r in rows if r.get('shape') == 'clocking_pll'
+            and str(r.get('run_id', '')).startswith(BATCH_A_ID)]
+    if not rows:
+        pytest.skip('batch p1-pll-sweep-a has not been merged into runs.jsonl')
+    return rows
+
+
+def test_plla_sweep_batch_a_rows():
+    """`runs.jsonl` gained exactly 20 admissible batch-A rows.
+
+    Every row's `sweep` map is `{axis, <swept parameter>}`; a non-baseline row
+    differs from its axis baseline in exactly **one** key (the parameter), and
+    each axis contributes exactly one baseline row. `mask_sha256` is one value
+    across the batch. The verdict term asserted here is the **oracle** half:
+    every row must carry a vendor `.fs`, because the vendor bitstream is what
+    batch A measures (the open half's status is recorded in `notes`; see
+    `$OTC/evidence/plla/openflow-gap-138c.md`).
+    """
+    m = _shape()
+    rows = _batch_a_rows()
+    assert len(rows) == BATCH_A_ROWS, f'{len(rows)} rows, expected {BATCH_A_ROWS}'
+    assert len({r['run_id'] for r in rows}) == BATCH_A_ROWS
+
+    axes = {r['sweep']['axis'] for r in rows}
+    assert axes == BATCH_A_AXES, f'axes {axes}'
+    assert len({r.get('mask_sha256') for r in rows}) == 1, 'mask_sha256 differs'
+    assert all(r.get('vendor_fs') for r in rows), \
+        'a row carries no vendor .fs: the oracle half did not complete'
+    assert all(r.get('level') == 'E1' for r in rows)
+
+    baselines = {}
+    for name, (axis, value) in m.points().items():
+        if value == axis.baseline:
+            baselines[axis.name] = {'axis': axis.name, axis.param: value}
+    assert set(baselines) == BATCH_A_AXES
+
+    n_baseline = 0
+    for row in rows:
+        sweep = row['sweep']
+        base = baselines[sweep['axis']]
+        assert set(sweep) == set(base), f"{row['run_id']}: keys {sorted(sweep)}"
+        diff = {k for k in base if base[k] != sweep[k]}
+        if not diff:
+            n_baseline += 1
+        else:
+            assert len(diff) == 1, f"{row['run_id']} differs in {sorted(diff)}"
+    assert n_baseline == len(BATCH_A_AXES), \
+        f'{n_baseline} baseline rows, expected one per axis'
