@@ -2542,10 +2542,116 @@ _dhcen_ce = {
          'B' : [(54, 27, 'A2'), (54, 27, 'A3'), (54, 27, 'D2'), (54, 27, 'D3'), (54, 27, 'D0'), (54, 27, 'D1')],
          'L' : [(27,  0, 'A2'), (27,  0, 'A3'), (27,  0, 'D2'), (27,  0, 'D3'), (27,  0, 'D0'), (27,  0, 'D1')],
          'T' : [( 0, 27, 'A2'), ( 0, 27, 'A3'), ( 0, 27, 'D2'), ( 0, 27, 'D3'), (  0,27, 'D0'), ( 0, 27, 'D1')]},
+        # GW5A is different in three ways that the table above cannot express,
+        # so it gets its own builder (`gw5a_create_dhce`) rather than a shape
+        # this loop can consume; all three are MEASURED, not assumed:
+        #  * the primitive is not called DHCEN.  GowinSynthesis answers
+        #    `ERROR (EX3937) : Instantiating unknown module 'DHCEN'` and
+        #    `IDE/ipcore/DHCEN/dhcen.ipspec` lists no GW5* device.  The GW5A
+        #    primitive table `IDE/bin/prim_syns/gw5a/primitive.xml` spells it
+        #    DHCE(CLKIN, CEN, CLKOUT) -- the enable port is CEN, not CE.
+        #  * the sites are per HCLK *block*, not per side.  The GW5AST-138C
+        #    has six HCLK blocks and no top-edge block, and the vendor's own
+        #    `Clock Resource Usage Summary` reads `DHCE 24/24` with a 25th
+        #    instance refused (`PA2017`): 6 blocks x 4, i.e. eight entries on
+        #    each of L/R/B and no 'T' key at all.
+        #  * there are no interbank (HCLK_BANK_OUT) entries: the vendor
+        #    allocates exactly four DHCE per block and refuses the fifth, so
+        #    the `idx >= 4` half of the pre-5A rule has nothing to bind to.
+        # `idx` here is the vendor's allocation order *within a block*, read
+        # off an incremental sweep, one instance at a time.
+        # Evidence: `$OTC/evidence/dhcen/ce-wires-138c.md` and `trace-138c.md`
+        # (P1.T25), 28 vendor compiles.
+        'GW5AST-138C':
+        {'R' : [( 27, 181, 'C2'), ( 27, 181, 'C5'), ( 27, 181, 'C7'), ( 27, 181, 'D2'),
+                ( 81, 181, 'C2'), ( 81, 181, 'C5'), ( 81, 181, 'C7'), ( 81, 181, 'D2')],
+         'B' : [(108,  64, 'C2'), (108,  64, 'C5'), (108,  64, 'C7'), (108,  64, 'D2'),
+                (108, 117, 'C2'), (108, 117, 'C5'), (108, 117, 'C7'), (108, 117, 'D2')],
+         'L' : [( 27,   0, 'C2'), ( 27,   0, 'C5'), ( 27,   0, 'C7'), ( 27,   0, 'D2'),
+                ( 81,   0, 'C2'), ( 81,   0, 'A5'), ( 81,   0, 'C7'), ( 81,   0, 'A4')]},
         }
+
+# Devices whose DHCEN table is the GW5A one (primitive `DHCE`, port `CEN`,
+# four sites per HCLK block).  Kept as a set rather than a family test so that
+# adding a GW5A device is a deliberate act with its own traced table.
+_gw5a_dhce_devices = {'GW5AST-138C'}
+#: Local table-48 destination id of the first of an HCLK block's four input
+#: multiplexers.  A block's multiplexers are the four consecutive ids
+#: `_GW5A_HCLK_IN_MUX0 .. +3`, offset per block by `gw5_hclk_wire_offset`, so
+#: on the GW5AST-138C block 0 is 64..67, block 1 251..254 ... block 5 999..1002.
+#: MEASURED (P1.T26, `$OTC/evidence/dhcen/fuse-138c.md`): each of those four
+#: destinations is a three-source mux whose three source fuse sets share
+#: exactly one fuse, and instantiating the block's n-th DHCE sets exactly that
+#: shared fuse of the n-th multiplexer and nothing else in the block.  That
+#: also *confirms* P1.T25's hypothesis that the vendor's allocation order
+#: inside a block is the multiplexer order.
+_GW5A_HCLK_IN_MUX0 = 64
+_GW5A_DHCE_PER_BLOCK = 4
+
+def gw5a_dhce_gate_pip(dev, device, row, col, idx):
+    """The HCLK input multiplexer that DHCE `idx` of block `(row, col)` gates.
+
+    Returns `(dest, src)` -- a real pip of `dev.hclk_pips[row, col]`, because
+    nextpnr resolves the DHCEN wire->bel map by looking the pip up by name and
+    comparing its destination wire to the routed one (`get_dhcen_bel`), and
+    gowin_pack derives the gate fuse from the same destination.  `src` is the
+    lowest-named of the multiplexer's sources; which one is picked does not
+    matter, only that the pip exists and its destination is the multiplexer.
+    """
+    hclk_idx = gw5_hclk_idx(dev, device, row, col)
+    dest = wnames.hclknames[_GW5A_HCLK_IN_MUX0 + idx
+                            + hclk_idx * gw5_hclk_wire_offset(device)]
+    srcs = dev.hclk_pips[row, col][dest]
+    return dest, sorted(srcs)[0]
+
+def gw5a_dhce_gate_fuses(hclk_pips, dest):
+    """The gate fuse of one HCLK input multiplexer: what all its sources share.
+
+    A GW5A HCLK input multiplexer is fused as one output-enable bit plus a
+    per-source select; the enable is therefore the intersection of the source
+    fuse sets, and it is the bit -- the only bit -- that a DHCE sets.
+    """
+    srcs = hclk_pips[dest]
+    if not srcs:
+        return set()
+    return set.intersection(*(set(f) for f in srcs.values()))
+
+def gw5a_create_dhce(dev, device):
+    """Create the GW5A `DHCE` bels: four per HCLK block cell.
+
+    One `extra_func[(row, col)]['dhcen']` entry per site, in the vendor's own
+    allocation order inside the block, so entry `idx` of a block gates that
+    block's `idx`-th HCLK input multiplexer.  The dict shape is the one
+    `gowin_arch_gen.create_extra_funcs` and `gowin_pack.get_dhcen_wire_side`
+    already consume:
+
+        {'pip': [tile, mux_dest, mux_src, side], 'ce': cen_wire}
+
+    `ce` is the measured `CEN` wire (`P1.T25`); `pip` is the real multiplexer
+    pip the site gates (`P1.T26`).  `gw5a` marks the entry as belonging to this
+    family so the fuse path does not reach for the pre-5A `HCLK` shortval
+    attributes, which this device's HCLK table does not carry at all.
+    """
+    for side, ces in _dhcen_ce[device].items():
+        idx_in_block = {}
+        for row, col, wire in ces:
+            idx = idx_in_block.get((row, col), 0)
+            idx_in_block[(row, col)] = idx + 1
+            assert idx < _GW5A_DHCE_PER_BLOCK, (
+                f'{device}: more than {_GW5A_DHCE_PER_BLOCK} DHCE in block '
+                f'({row}, {col}) -- the vendor refuses the fifth')
+            dest, src = gw5a_dhce_gate_pip(dev, device, row, col, idx)
+            extra = dev.extra_func.setdefault((row, col), {})
+            extra.setdefault('dhcen', []).append(
+                {'pip': [f'X{col}Y{row}', dest, src, side], 'ce': wire,
+                 'gw5a': True})
+
 def fse_create_dhcen(dev, device, fse, dat: Datfile):
     if device not in _dhcen_ce:
         print(f'No DHCEN for {device} for now.')
+        return
+    if device in _gw5a_dhce_devices:
+        gw5a_create_dhce(dev, device)
         return
     for side, ces in _dhcen_ce[device].items():
         for idx, ce_wire in enumerate(ces):
