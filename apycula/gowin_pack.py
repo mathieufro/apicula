@@ -557,8 +557,12 @@ class ChipDB:
         GW5AST-138C `HCLK` table carries no `*_HSTOP`/`*_BRGSTOP` row at all --
         but the multiplexer's own output-enable bit, i.e. the fuse every one of
         its sources has in common. MEASURED, `P1.T26`.
+
+        The multiplexer is `'gate'`, never `'pip'`: `'pip'` names the lane wire
+        nextpnr matches a routed clock against (`P1.T27`), which carries no
+        fuse of the gate.
         """
-        dest = self.db.extra_func[y, x]['dhcen'][idx_int]['pip'][1]
+        dest = self.db.extra_func[y, x]['dhcen'][idx_int]['gate']
         return gw5a_dhce_gate_fuses(self.db.hclk_pips[y, x], dest)
 
     def get_dcs_spine(self, x: int, y: int, idx_int) -> str:

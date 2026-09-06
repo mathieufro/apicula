@@ -204,15 +204,15 @@ def test_dhce_gate_fuses_match_the_vendor_138c(gowinhome):
     dev = _build('GW5AST-138C', gowinhome)
     block = dev.extra_func[(108, 64)]['dhcen']
     pips = dev.hclk_pips[108, 64]
-    assert [s['pip'][1] for s in block] == GATE_MUXES_108_64
+    assert [s['gate'] for s in block] == GATE_MUXES_108_64
     for idx, site in enumerate(block):
-        fuses = chipdb.gw5a_dhce_gate_fuses(pips, site['pip'][1])
+        fuses = chipdb.gw5a_dhce_gate_fuses(pips, site['gate'])
         assert fuses == {GATE_FUSES_108_64[idx]}, (
             f'site {idx}: {sorted(fuses)} != {GATE_FUSES_108_64[idx]}')
     # every block has exactly one gate fuse per site, nowhere zero or two
     for rc, blk in _dhcen_sites(dev).items():
         for site in blk:
-            f = chipdb.gw5a_dhce_gate_fuses(dev.hclk_pips[rc], site['pip'][1])
+            f = chipdb.gw5a_dhce_gate_fuses(dev.hclk_pips[rc], site['gate'])
             assert len(f) == 1, f'{rc} {site["pip"][1]}: {sorted(f)}'
 
 
@@ -235,7 +235,8 @@ def test_dhce_gowin_pack_emits_the_gate_fuse_138c():
     for idx in range(4):
         assert db.is_gw5a_dhcen(x, y, idx)
         wire, side = db.get_dhcen_wire_side(x, y, idx)
-        assert wire == GATE_MUXES_108_64[idx]
+        assert wire == f'HCLK_MUX_BETA4{idx}'      # the routed lane wire
+        assert sites[idx]['gate'] == GATE_MUXES_108_64[idx]
         assert side == 'B'
         assert db.get_gw5a_dhce_gate_fuses(x, y, idx) == {GATE_FUSES_108_64[idx]}
     # and the pre-5A devices keep the attribute-driven path
@@ -291,3 +292,99 @@ def test_dhce_gowin_pack_get_DHCEN_fuses_138c():
     cells = {(f.x, f.y)
              for f in gowin_pack.GW5AST_138C.get_DHCEN_fuses(_Self(), bel)}
     assert cells == {(64, 108)}
+
+
+# ---------------------------------------------------------------- P1.T27
+
+#: MEASURED (`P1.T27`, batch `p1t27-dhce-lane` + `p1t38b-e2e`, six vendor
+#: compiles): the gate fuse a *single* DHCE sets when the clock it gates is on
+#: HCLK lane `i` of the named block.  It is the fuse of input multiplexer `i`
+#: in every one of the six points and in both blocks, which is what settles
+#: the question `P1.T26`'s allocation-order sweep could not: a DHCE site index
+#: **is** the lane index, not the order the vendor happened to allocate in.
+GATE_FUSE_BY_LANE = {
+    (108, 117): {0: (21, 7), 1: (20, 31), 2: (20, 94), 3: (20, 50)},
+    (108, 64): {0: (20, 2), 2: (21, 32)},
+}
+
+
+def _lane_mux(dev, device, row, col, idx):
+    return 'HCLK_MUX_BETA%d%d' % (
+        chipdb.gw5_hclk_idx(dev, device, row, col), idx)
+
+
+@pytest.mark.heavy
+def test_dhce_gate_pip_is_the_routed_lane_wire_138c(gowinhome):
+    """The wire->bel handle is a wire an HCLK route actually lands on.
+
+    `nextpnr` picks the hardware DHCE by comparing the destination wire of the
+    recorded pip against every wire on the routed clock path
+    (`globals.cc route_dhcen_net` / `get_dhcen_bel`).  The gate multiplexer
+    itself cannot serve: its sources are dangling in table 48, so no route
+    ever reaches it.  The lane's own entry multiplexer can, and does.
+    """
+    device = 'GW5AST-138C'
+    dev = _build(device, gowinhome)
+    for (row, col), block in _dhcen_sites(dev).items():
+        pips = dev.hclk_pips[row, col]
+        for idx, site in enumerate(block):
+            tile, dest, src, _side = site['pip']
+            assert tile == f'X{col}Y{row}'
+            assert dest == _lane_mux(dev, device, row, col, idx)
+            assert dest in pips, f'{dest} is not a pip of block {(row, col)}'
+            assert src in pips[dest], f'{src} does not drive {dest}'
+            # the gate multiplexer is kept, separately, for the fuse
+            assert site['gate'] in pips
+            assert len(chipdb.gw5a_dhce_gate_fuses(pips, site['gate'])) == 1
+
+
+@pytest.mark.heavy
+def test_dhce_gate_fuse_follows_the_lane_138c(gowinhome):
+    """The fuse of site `i` is the one the vendor sets for a DHCE on lane `i`."""
+    dev = _build('GW5AST-138C', gowinhome)
+    for block, by_lane in GATE_FUSE_BY_LANE.items():
+        sites = dev.extra_func[block]['dhcen']
+        for idx, expected in by_lane.items():
+            fuses = chipdb.gw5a_dhce_gate_fuses(dev.hclk_pips[block],
+                                                sites[idx]['gate'])
+            assert fuses == {expected}, f'{block} lane {idx}: {sorted(fuses)}'
+
+
+def test_dhce_gowin_pack_gate_fuse_comes_from_the_gate_mux_138c():
+    """`gowin_pack` reads the fuse from `gate`, not from the routing handle."""
+    from apycula import gowin_pack
+    try:
+        db = gowin_pack.ChipDB('GW5AST-138C')
+    except Exception as exc:                       # chipdb not built yet
+        pytest.skip(f'GW5AST-138C.msgpack.xz unavailable: {exc}')
+    for (row, col), by_lane in GATE_FUSE_BY_LANE.items():
+        x, y = col, row
+        for idx, expected in by_lane.items():
+            assert db.is_gw5a_dhcen(x, y, idx)
+            wire, side = db.get_dhcen_wire_side(x, y, idx)
+            assert wire.startswith('HCLK_MUX_BETA') and wire.endswith(str(idx))
+            assert side == 'B'
+            assert db.get_gw5a_dhce_gate_fuses(x, y, idx) == {expected}
+
+
+#: MEASURED (`P1.T27`, same six compiles): the CIB wire the vendor drives each
+#: HCLK lane's `CLKDIV.RESETN` and `CLKDIV.CALIB` over.  `RESETN` refutes the
+#: value carried over from the GW5A-25A (`C4..C7`), which collided with the
+#: `CEN` wires of DHCE sites 1 and 2; `CALIB` confirms it.
+CLKDIV_CTRL_WIRES_138C = {'clkdiv_resetn': ['D4', 'D5', 'D6', 'D7'],
+                          'clkdiv_calib': ['B6', 'B7', 'C0', 'C1']}
+
+
+def test_clkdiv_control_wires_do_not_collide_with_dhce_cen_138c():
+    """No lane's CLKDIV control wire is a DHCE enable wire of the same block.
+
+    A collision is not cosmetic: both are bel pin wires, so a design holding a
+    CLKDIV and a DHCE on the affected lanes cannot be routed at all
+    (`ERROR: Found two arcs with same sink wire`).
+    """
+    ctrl = chipdb._gw5a_hclk_ctrl_wires['GW5AST-138C']
+    for key, wires in CLKDIV_CTRL_WIRES_138C.items():
+        assert ctrl[key] == wires, key
+    cen = {w for _side, ws in CE_WIRES_138C.values() for w in ws}
+    for key in ('clkdiv_resetn', 'clkdiv_calib', 'clkdiv2_resetn'):
+        assert not set(ctrl[key]) & cen, f'{key} collides with a CEN wire'

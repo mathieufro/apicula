@@ -1696,17 +1696,20 @@ _gw5a_hclk_locs = { 'GW5A-25A':    { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34,
 # block.  These are ordinary fabric wires of the HCLK cell, not table-48 HCLK
 # wires, so they cannot be read out of the .fse; the 25A values are the ones
 # the maintainer traced.
-# GW5AST-138C: ASSUMED equal to the 25A.  P1.T04 measured the block topology
-# but not the control-pin trace and no oracle budget was allocated for one;
-# all twelve wire names do exist in wirenames_5ast138c.  Recorded as ASSUMED
-# in $OTC/evidence/hclk/topology-138c.md -- a shape run that exercises
-# CLKDIV.CALIB / RESETN is what would promote it to MEASURED.
+# GW5AST-138C: `clkdiv_resetn` and `clkdiv_calib` are MEASURED (P1.T27, six
+# vendor compiles of a single CLKDIV pinned lane by lane, `$OTC/evidence/
+# dhcen/lane-138c.md`): the vendor drives lane `i`'s RESETN over `D<4+i>` and
+# its CALIB over the assumed wire.  The `C4..C7` carried over from the 25A was
+# wrong, and not harmlessly so -- `C5` and `C7` are the CEN wires of DHCE
+# sites 1 and 2, so a design with both a CLKDIV and a DHCE on those lanes made
+# nextpnr fail with two arcs on one sink wire.  `clkdiv2_resetn` is still the
+# ASSUMED 25A row (no CLKDIV2 point in that campaign).
 _gw5a_hclk_ctrl_wires = {
     'GW5A-25A':    {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
                     'clkdiv_resetn':  ['C4', 'C5', 'C6', 'C7'],
                     'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
     'GW5AST-138C': {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
-                    'clkdiv_resetn':  ['C4', 'C5', 'C6', 'C7'],
+                    'clkdiv_resetn':  ['D4', 'D5', 'D6', 'D7'],
                     'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
 }
 
@@ -2741,19 +2744,31 @@ _gw5a_dhce_devices = {'GW5AST-138C'}
 _GW5A_HCLK_IN_MUX0 = 64
 _GW5A_DHCE_PER_BLOCK = 4
 
-def gw5a_dhce_gate_pip(dev, device, row, col, idx):
-    """The HCLK input multiplexer that DHCE `idx` of block `(row, col)` gates.
+def gw5a_dhce_gate_mux(dev, device, row, col, idx):
+    """The HCLK input multiplexer whose enable fuse DHCE `idx` sets.
 
-    Returns `(dest, src)` -- a real pip of `dev.hclk_pips[row, col]`, because
-    nextpnr resolves the DHCEN wire->bel map by looking the pip up by name and
-    comparing its destination wire to the routed one (`get_dhcen_bel`), and
-    gowin_pack derives the gate fuse from the same destination.  `src` is the
-    lowest-named of the multiplexer's sources; which one is picked does not
-    matter, only that the pip exists and its destination is the multiplexer.
+    A destination of the block's table-48 pip set, `_GW5A_HCLK_IN_MUX0 + idx`
+    offset per block.  Its own sources are dangling -- nothing in the modelled
+    fabric drives them -- so it names a fuse and never a route.
     """
     hclk_idx = gw5_hclk_idx(dev, device, row, col)
-    dest = wnames.hclknames[_GW5A_HCLK_IN_MUX0 + idx
+    return wnames.hclknames[_GW5A_HCLK_IN_MUX0 + idx
                             + hclk_idx * gw5_hclk_wire_offset(device)]
+
+def gw5a_dhce_lane_pip(dev, device, row, col, idx):
+    """The pip a clock gated by DHCE `idx` is routed over: lane `idx`'s own mux.
+
+    Returns `(dest, src)` -- a real pip of `dev.hclk_pips[row, col]`.  nextpnr
+    resolves the DHCEN wire->bel map by walking the *routed* path and comparing
+    each pip's destination wire against this one (`get_dhcen_bel`), so the
+    destination has to be a wire a route can reach.  The gate multiplexer
+    cannot be it; `HCLK_MUX_BETA<block><lane>` is the wire every clock entering
+    that lane lands on, and P1.T08d already uses it as the lane's identity.
+    `src` is the lowest-named of its sources: which one is picked does not
+    matter, only that the pip exists and its destination is the lane mux.
+    """
+    hclk_idx = gw5_hclk_idx(dev, device, row, col)
+    dest = f'HCLK_MUX_BETA{hclk_idx}{idx}'
     srcs = dev.hclk_pips[row, col][dest]
     return dest, sorted(srcs)[0]
 
@@ -2776,14 +2791,21 @@ def gw5a_create_dhce(dev, device):
     allocation order inside the block, so entry `idx` of a block gates that
     block's `idx`-th HCLK input multiplexer.  The dict shape is the one
     `gowin_arch_gen.create_extra_funcs` and `gowin_pack.get_dhcen_wire_side`
-    already consume:
+    already consume, plus one key of its own:
 
-        {'pip': [tile, mux_dest, mux_src, side], 'ce': cen_wire}
+        {'pip': [tile, lane_dest, lane_src, side], 'gate': mux_dest,
+         'ce': cen_wire}
 
-    `ce` is the measured `CEN` wire (`P1.T25`); `pip` is the real multiplexer
-    pip the site gates (`P1.T26`).  `gw5a` marks the entry as belonging to this
-    family so the fuse path does not reach for the pre-5A `HCLK` shortval
-    attributes, which this device's HCLK table does not carry at all.
+    `ce` is the measured `CEN` wire (`P1.T25`).  `gate` is the input
+    multiplexer whose enable bit the site sets (`P1.T26`), and `pip` is the
+    lane multiplexer a gated clock is routed over (`P1.T27`) -- two different
+    wires, because the fuse-bearing one is unreachable by any route and the
+    routed one carries no fuse of the gate.  Site index is lane index: measured
+    on six vendor compiles across two blocks, a lone DHCE on lane `i` sets the
+    fuse of multiplexer `i` (`$OTC/evidence/dhcen/lane-138c.md`).  `gw5a` marks
+    the entry as belonging to this family so the fuse path does not reach for
+    the pre-5A `HCLK` shortval attributes, which this device's HCLK table does
+    not carry at all.
     """
     for side, ces in _dhcen_ce[device].items():
         idx_in_block = {}
@@ -2793,11 +2815,12 @@ def gw5a_create_dhce(dev, device):
             assert idx < _GW5A_DHCE_PER_BLOCK, (
                 f'{device}: more than {_GW5A_DHCE_PER_BLOCK} DHCE in block '
                 f'({row}, {col}) -- the vendor refuses the fifth')
-            dest, src = gw5a_dhce_gate_pip(dev, device, row, col, idx)
+            dest, src = gw5a_dhce_lane_pip(dev, device, row, col, idx)
             extra = dev.extra_func.setdefault((row, col), {})
             extra.setdefault('dhcen', []).append(
-                {'pip': [f'X{col}Y{row}', dest, src, side], 'ce': wire,
-                 'gw5a': True})
+                {'pip': [f'X{col}Y{row}', dest, src, side],
+                 'gate': gw5a_dhce_gate_mux(dev, device, row, col, idx),
+                 'ce': wire, 'gw5a': True})
 
 def fse_create_dhcen(dev, device, fse, dat: Datfile):
     if device not in _dhcen_ce:
