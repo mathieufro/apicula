@@ -7,6 +7,7 @@ bottom** die-half partition, which refutes the blueprint's assumed 3/3.
 """
 import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -296,15 +297,10 @@ def test_hclk_pips_carry_fuses_138c(gowinhome):
 # ---------------------------------------------------------------- P1.T11
 #
 # Structural proof that the built 138C chipdb yields placeable CLKDIV and
-# CLKDIV2 bels through the real nextpnr. The blueprint's "Done when" also asks
-# for a routed .fs; that half is NOT met and is not pretended here -- full PnR
-# exits 125 on "Failed to find a route for arc N of net div_clk" because
-# `clknames_5ast138c` defines none of the 16 `{T,B,R,L}BDHCLK{0..3}` names, so
-# `gw5_make_hclk_to_clk_gates` never fires and the CLKDIV output has no path to
-# a global clock spine. Measured, with the run logs, in
-# `$OTC/evidence/hclk/clkdiv-138c.md`. These tests therefore assert exactly the
-# placement, via `--no-route`, and will start failing the day routing is fixed
-# only if the placement itself regresses.
+# CLKDIV2 bels through the real nextpnr. These three assert PLACEMENT only, via
+# `--no-route`, against whatever chipdb the toolchain has installed. The routed
+# half -- which P1.T11 and P1.T08c could not reach -- is P1.T08d's
+# `test_clkdiv_routes_138c` below, which needs a chipdb built from THIS tree.
 
 _DATASTORE = Path('/Users/alex/fine-line-data/open-toolchain-gw5ast')
 _NEXTPNR = _DATASTORE / 'toolchains/nextpnr/bin/nextpnr-himbaechel'
@@ -512,20 +508,152 @@ def test_unpack_hclk_decode_is_device_gated():
 # for the vendor runs behind it.
 
 def test_hclk5_backbone_map_138c_is_the_measured_staircase():
-    """Block 5's four CLKDIV outputs, as MEASURED on four vendor bitstreams.
+    """Block 5's four CLKDIV outputs, as MEASURED twice over.
 
-    Adding CLKDIVs one at a time lit block-5 wire indices 0,1,2,3 in the
-    (108,117) table-48 fuses and, in lockstep, clock wires 109, 110, 224, 225
-    at the central clock mux (54,88).  Blocks 0-4 are deliberately absent:
-    the vendor placed every design in block 5 and nothing measured the rest.
+    P1.T08c added CLKDIVs one at a time and watched wire indices 0,1,2,3 light
+    in the (108,117) table-48 fuses and clock wires 109, 110, 224, 225 light at
+    the central clock mux (54,88).  P1.T08d reproduced the identical row from
+    four INDEPENDENT single-CLKDIV runs pinned with `INS_LOC ... BOTTOMSIDE[4]`
+    through `[7]`.
     """
     m = chipdb._gw5a_hclk_to_clk['GW5AST-138C']
-    assert set(m) == {5}, 'only block 5 is measured; do not guess the others'
     assert m[5] == {0: 109, 1: 110, 2: 224, 3: 225}
     # the two bands are disjoint and neither is the 25A's 169..184
     assert set(m[5].values()).isdisjoint(range(169, 185))
     # the 25A must not acquire an entry by accident
     assert 'GW5A-25A' not in chipdb._gw5a_hclk_to_clk
+
+
+# ---------------------------------------------------------------- P1.T08d
+
+def test_hclk_to_clk_mapping_six_blocks_measured():
+    """The (block, lane) -> clock-wire table, and what is deliberately absent.
+
+    Twenty-four vendor runs, one CLKDIV each, pinned lane by lane with the
+    vendor's own handle (`INS_LOC "<inst>" {LEFT,RIGHT,BOTTOM}SIDE[0~7]`,
+    SUG1018 sec 2.9).  Each run is decoded twice: the block cell's lit table-48
+    `HCLK_MUX_BETA0i` row gives (block, lane), the central clock mux's lit
+    table-38 row gives the clock wire.  $OTC/evidence/hclk/mux38-138c.md.
+
+    Blocks 0 and 1 -- the two TOP-half blocks -- are ABSENT on purpose: all
+    eight of their lanes, plus a 2/3/4-CLKDIV staircase inside block 0, light
+    one and the same central-mux row (SPINE16 <= clknames 101), so there is no
+    per-lane bijection to record and nothing is guessed.
+    """
+    m = chipdb._gw5a_hclk_to_clk['GW5AST-138C']
+    assert sorted(m) == [2, 3, 4, 5], 'blocks 0 and 1 are unmeasured, not guessed'
+    assert m[2] == {0: 105, 1: 106, 2: 220, 3: 221}
+    assert m[3] == {0: 111, 1: 112, 2: 226, 3: 227}
+    assert m[4] == {0: 107, 1: 108, 2: 222, 3: 223}
+    assert m[5] == {0: 109, 1: 110, 2: 224, 3: 225}
+    # every lane of every measured block has its own wire
+    wires = [w for lanes in m.values() for w in lanes.values()]
+    assert len(wires) == 16 and len(set(wires)) == 16
+    ids = chipdb.gw5_hclk_clk_wire_ids('GW5AST-138C')
+    assert ids == set(wires)
+    # a device with no measured table keeps the filters it had
+    assert chipdb.gw5_hclk_clk_wire_ids('GW5A-25A') == set()
+    # each wire falls in one of the two spans fse_clock_pips_138 discards --
+    # that is exactly why nothing routed before
+    assert all(w in range(105, 129) or w in range(164, 237) for w in wires)
+
+
+def test_clock_pips_138c_reads_table38(gowinhome):
+    """`fse_clock_pips_138` reads .fse table 38 and keeps the escape wires.
+
+    Table 38 (`_wire_tables['CLOCK_MUX']`) is the 138C's central clock mux --
+    fse ttyp 80 at (54,88) and ttyp 85 at (54,93).  The function reads it, but
+    its "unknown wires" (105..128) and "longwires" (164..236) source filters
+    used to throw away every wire an HCLK block escapes on.  Now exactly the
+    measured ones survive and nothing else in those spans does.
+    """
+    from apycula import fse_parser
+    vendor = 'GW5AST-138C'
+    base = f'{gowinhome}/IDE/share/device/{vendor}/{vendor}'
+    if not os.path.isfile(base + '.fse'):
+        pytest.skip(f'{base}.fse absent')
+    with open(base + '.fse', 'rb') as fh:
+        fse = fse_parser.read_fse(fh, vendor)
+    ttyp = 80                                   # the (54,88) central clock mux
+    assert chipdb._wire_tables['CLOCK_MUX'] == 38
+    assert 38 in fse[ttyp]['wire'], 'ttyp 80 must carry table 38'
+    pips = chipdb.fse_clock_pips_138(fse, ttyp, vendor)
+    srcs = {s for d in pips for s in pips[d]}
+    kept = chipdb.gw5_hclk_clk_wire_ids(vendor)
+    names = wnames.clknames_5ast138c
+    # every measured escape wire that table 38 offers as a source is kept
+    offered = {s for s, *_ in fse[ttyp]['wire'][38]}
+    for wid in kept & {abs(s) for s in offered}:
+        assert names[wid] in srcs, f'{names[wid]} was discarded again'
+    # and nothing else from the two discarded spans came back with it
+    for wid in set(range(105, 129)) | set(range(164, 237)):
+        if wid in kept:
+            continue
+        assert names[wid] not in srcs, f'{names[wid]} should stay discarded'
+    # at least one of them actually reaches a SPINE, which is the whole point
+    spine_srcs = {s for d in pips if d.startswith('SPINE') for s in pips[d]}
+    assert spine_srcs & {names[w] for w in kept}
+
+
+_T08D_CHIPDB = Path(os.environ.get(
+    'GW5AST138C_T08D_CHIPDB',
+    str(_DATASTORE / 'chipdb/p1t08d/chipdb-GW5AST-138C.bin')))
+
+
+@pytest.mark.heavy  # real yosys + the installed nextpnr + gowin_pack
+def test_clkdiv_routes_138c(tmp_path):
+    """A CLKDIV output reaches the global clock network through the open flow.
+
+    The P1.T11 design, full place-and-route (no `--no-route`), then packed.
+    Asserts what P1.T08c could not: nextpnr exit 0, the log line saying the
+    CLKDIV output net went out on global resources, and a `.fs` gowin_pack
+    actually wrote.  The chipdb must be one built from THIS tree -- the .bin
+    the toolchain has installed is whatever the integration branch put there --
+    so the test points at $DATASTORE/chipdb/p1t08d/ (override with
+    GW5AST138C_T08D_CHIPDB) and skips rather than lying if it is absent.
+    """
+    import json
+    import shutil
+    import subprocess
+    for tool in (_NEXTPNR, _T08D_CHIPDB, _YOSYS):
+        if not tool.exists():
+            pytest.skip(f'{tool} absent')
+    src = Path(__file__).resolve().parents[1] / 'examples' / 'gw5a'
+    shutil.copy(src / 'clkdiv_chain-tangmega138k.v', tmp_path / 'top.v')
+    shutil.copy(src / 'tangmega138k.cst', tmp_path / 'top.cst')
+    subprocess.run(
+        [str(_YOSYS), '-p',
+         'read_verilog top.v; synth_gowin -family gw5a -setundef -json top.json'],
+        cwd=tmp_path, check=True, capture_output=True)
+    pnr = subprocess.run(
+        [str(_NEXTPNR), '--device', 'GW5AST-LV138PG484AC1/I0',
+         '--chipdb', str(_T08D_CHIPDB), '--vopt', 'cst=top.cst',
+         '--json', 'top.json', '--write', 'top_pnr.json',
+         '--timing-allow-fail'],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert pnr.returncode == 0, pnr.stderr[-3000:]
+    assert "'div_clk' net was routed using global resources only" in pnr.stderr, \
+        pnr.stderr[-3000:]
+
+    pack = subprocess.run(
+        [sys.executable, '-m', 'apycula.gowin_pack', '-d', 'GW5AST-138C',
+         '--cpu_as_gpio', '-o', 'top.fs', 'top_pnr.json'],
+        cwd=tmp_path, capture_output=True, text=True,
+        env={**os.environ,
+             'PYTHONPATH': str(Path(__file__).resolve().parents[1])})
+    assert pack.returncode == 0, pack.stderr[-3000:]
+    fs = tmp_path / 'top.fs'
+    assert fs.is_file() and fs.stat().st_size > 0
+    from apycula import bslib
+    bslib.read_bitstream(str(fs))
+
+    # the CLKDIV landed in one of the four blocks whose escape is measured
+    placed = json.loads((tmp_path / 'top_pnr.json').read_text())
+    bels = [c['attributes']['NEXTPNR_BEL']
+            for m in placed['modules'].values()
+            for c in m['cells'].values() if c['type'] == 'CLKDIV']
+    assert len(bels) == 1
+    assert _block_of(bels[0]) in chipdb._gw5a_hclk_to_clk['GW5AST-138C']
 
 
 @pytest.mark.xfail(strict=True, reason=(

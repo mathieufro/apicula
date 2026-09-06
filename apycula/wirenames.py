@@ -1019,17 +1019,18 @@ hclknames_5ast138c[562] = 'VCC'
 
 hclknames_5ast138c.update({n: f"HCLK_UNK{n}" for n in range(2, 701)})
 
-# HCLK->CLK
-hclknames_5ast138c.update({n: f"HCLK_TO_GCLK0{i}" for i, n in enumerate([25, 27, 28, 29])})
-hclknames_5ast138c.update({n: f"HCLK_TO_GCLK1{i}" for i, n in enumerate([212, 214, 215, 216])})
-hclknames_5ast138c.update({n: f"HCLK_TO_GCLK2{i}" for i, n in enumerate([399, 401, 402, 403])})
-hclknames_5ast138c.update({n: f"HCLK_TO_GCLK3{i}" for i, n in enumerate([586, 588, 589, 590])})
-
-# GCLK pins
-hclknames_5ast138c.update({n: f"HCLK_GCLK0{i}" for i, n in enumerate(range(123, 131))})
-hclknames_5ast138c.update({n: f"HCLK_GCLK1{i}" for i, n in enumerate(range(310, 318))})
-hclknames_5ast138c.update({n: f"HCLK_GCLK2{i}" for i, n in enumerate(range(497, 505))})
-hclknames_5ast138c.update({n: f"HCLK_GCLK3{i}" for i, n in enumerate(range(684, 692))})
+# HCLK->CLK and the GCLK pins.  These were four-block literals whose ids are
+# the block-0 ids plus 187, 374, 561 -- one gw5_hclk_wire_offset per block --
+# so the SIX-block 138C left blocks 4 and 5 (748, 935) unnamed and every
+# per-block node count came out four short for them (P1.T08d).  Same literals,
+# generated for all six blocks; blocks 0-3 keep byte-identical names.
+for _blk in range(6):
+    _off = _blk * 187
+    hclknames_5ast138c.update({n + _off: f"HCLK_TO_GCLK{_blk}{i}"
+                               for i, n in enumerate([25, 27, 28, 29])})
+    hclknames_5ast138c.update({n + _off: f"HCLK_GCLK{_blk}{i}"
+                               for i, n in enumerate(range(123, 131))})
+del _blk, _off
 
 # Blocks 4 and 5 and the inter-HCLK band. gw5_make_hclk_pips names a wire
 # hclknames[srcid + idx * gw5_hclk_wire_offset] for idx in range(6) and
@@ -1037,9 +1038,48 @@ hclknames_5ast138c.update({n: f"HCLK_GCLK3{i}" for i, n in enumerate(range(684, 
 # reach 6 * 187 + 4 * 38 == 1274 (was 701, which covered blocks 0-3 only).
 # Append-only: an index that already has a name keeps it.
 # $OTC/evidence/hclk/topology-138c.md section 5.
+# The guard used to be `if n not in hclknames_5ast138c`, which was a no-op:
+# the table starts life as a copy of clknames_5ast138c, so EVERY id below 2009
+# is already present -- carrying clock-network names ('LWSPINETR2', 'UNK779')
+# into the HCLK namespace.  Blocks 4 and 5 live at 4*187 and 5*187, i.e. right
+# on top of the LWSPINE* band at 1001..1048, and the wrong names made block 5's
+# table-48 wires disjoint from the ones gw5_add_hclk_bels names, so its CLKDIV
+# had no input path (P1.T08d).  Keep only names this table set for itself.
 hclknames_5ast138c.update({n: f"HCLK_UNK{n}"
                            for n in range(701, 6 * 187 + 4 * 38)
-                           if n not in hclknames_5ast138c})
+                           if not str(hclknames_5ast138c.get(n, '')).startswith('HCLK')})
+
+# The 138C's table 48 is structurally the GW5A-25A's (P1.T08b measured the same
+# walk and the same per-block count on all six blocks), and P1.T08d confirmed it
+# wire by wire on two block cells: the chain a vendor bitstream lights for one
+# CLKDIV is L2HCLK<b><i> -> HCLK_MUX_BETA<b><i> -> HCLK_BUF_BI<b><i> ->
+# HCLK_BUF_BO<b><i> -> HCLK_MUX_ALPHA<b><i>, exactly the 25A's shape.  So carry
+# the 25A's structural names across for all SIX blocks (stride
+# gw5_hclk_wire_offset == 187).
+#
+# This is load-bearing, not cosmetic.  gw5_add_hclk_bels builds every CLKDIV /
+# CLKDIV2 bel port wire from an f-string literal ('HCLK_MUX_ALPHA41',
+# 'CLKDIV_I41', ...).  While every 138C HCLK wire was called 'HCLK_UNK<n>',
+# those literals named wires no table-48 pip ever touched: each CLKDIV input was
+# an island and nextpnr failed the HCLKIN arc of the T11 design.
+#
+# Append-only in two senses: an id the 138C table already names for itself
+# (HCLK_TO_GCLK*, HCLK_GCLK*) keeps that name, and the source table
+# hclknames_5a25a is read, never written -- the GW5A-25A chipdb
+# 6311219d52b996b8431d573cd5c547426370db00852aed285033a19a5518c3ca is a
+# Phase-0 family-regression baseline.  Names whose block digit is not the
+# penultimate character (the legacy CLKDIV2_I11 / CLKDIV2_I32 pair at 86/87)
+# are skipped rather than transformed into something that is not measured.
+for _blk in range(6):
+    for _base, _name in hclknames_5a25a.items():
+        if _base >= 187 or _base < 2 or not _name[-2:-1] == '0':
+            continue
+        if _name.startswith('HCLK_UNK'):
+            continue
+        _id = _base + _blk * 187
+        if hclknames_5ast138c.get(_id, '').startswith('HCLK_UNK'):
+            hclknames_5ast138c[_id] = _name[:-2] + str(_blk) + _name[-1]
+del _blk, _base, _name, _id
 
 hclknumbers_5ast138c = {v: k for k, v in hclknames_5ast138c.items()}
 
