@@ -851,7 +851,27 @@ RESIDUAL_CATEGORIES = {
 #: apicula recovers it as a pip, not as a bel (`gowin_unpack.py` returns it in
 #: `clock_pips`), so requiring it as a cell would assert something the decode
 #: does not claim to produce.  Measured on the smoke pair, 2026-09-04.
-NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG")
+#:
+#: `CLKDIV2` joined the list on measurement, not by analogy (`D103`, `P1.T15`):
+#: a GW5A `CLKDIV2` writes no fuse of its own.  Its whole bitstream signature
+#: is negative -- the *absent* `HCLK_BUF_BO` select bit for its lane -- plus
+#: the positive `DIV_MODE=2` bit of the `CLKDIV` it is chained to.  There is
+#: therefore no `CLKDIV2` cell for `gowin_unpack` to recover, and `c1` asks
+#: instead for that chained `CLKDIV` on the same lane; see
+#: `_clkdiv2_recovered_via_chain`.  Leaving it out would make every HCLK-lane
+#: design that uses a `CLKDIV2` permanently `diff`.
+NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG", "CLKDIV2")
+
+#: Cell-name prefix of nextpnr's `DHCEN` placeholders.  When a design holds any
+#: `DHCE`, `pack.cc` binds one `$PACKER_DHCEN_<n>` cell to **every** `DHCEN`
+#: bel on the device and only later, in `globals.cc route_dhcen_net`, marks the
+#: few the route actually needs with `DHCEN_USED` -- which is what
+#: `gowin_pack.GW5AST_138C.get_DHCEN_fuses` keys on.  An unmarked placeholder
+#: writes no fuse by construction, so requiring the decode to recover 24 of
+#: them makes `c1` assert the absence of a gate as if it were a missing cell
+#: (MEASURED on the `clocking_e2e` DHCE run, 2026-09-06).  A *named* `DHCE`
+#: from the design keeps its own name and stays required.
+PACKER_DHCEN_PREFIX = "$PACKER_DHCEN_"
 
 
 #: Which residual category a chipdb fuse group hands its bits to.  The group
@@ -1601,6 +1621,23 @@ def _norm_param(value):
     return text
 
 
+def _clkdiv2_recovered_via_chain(site_cells):
+    """Does this site decode a `CLKDIV` at `DIV_MODE=2`? (`D103`)
+
+    `site_cells` is one entry of `decode_check_c1`'s `by_site` map:
+    `{(cell type, z): attrs}` for one tile of the decoded bitstream.  A
+    `CLKDIV2` leaves no fuse, so this chained `DIV_MODE=2` bit is the only
+    positive evidence the bitstream carries that the lane was halved.
+    """
+    for (cell_type, _z), attrs in site_cells.items():
+        if _hclk_type(cell_type) != "CLKDIV":
+            continue
+        have = dict(canon_attr(f) for f in attrs)
+        if "DIV_MODE" in have and _norm_param(have["DIV_MODE"]) == "2":
+            return True
+    return False
+
+
 def decode_check_c1(pnr_cells, netlist):
     """`c1` -- does the decode recover every cell the placement contains?
 
@@ -1619,7 +1656,27 @@ def decode_check_c1(pnr_cells, netlist):
             skipped.append({"name": cell["name"], "type": cell["type"],
                             "why": "not placed on any bel"})
             continue
+        if cell["name"].startswith(PACKER_DHCEN_PREFIX):
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"],
+                            "why": "nextpnr DHCEN placeholder; writes a fuse "
+                                   "only when route_dhcen_net marks it "
+                                   "DHCEN_USED"})
+            continue
         base, z = split_bel_name(cell["bel"])
+        if _hclk_type(base) == "CLKDIV2":
+            if _clkdiv2_recovered_via_chain(by_site.get(cell["site"], {})):
+                skipped.append({
+                    "name": cell["name"], "type": cell["type"],
+                    "bel": cell["bel"],
+                    "why": "fuseless CLKDIV2; recovered via the chained "
+                           "CLKDIV decoding DIV_MODE=2 on the same lane"})
+                continue
+            missing.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "site": list(cell["site"]),
+                            "why": "fuseless CLKDIV2 with no chained CLKDIV "
+                                   "at DIV_MODE=2 on the same lane"})
+            continue
         if base in NON_FUSE_BACKED_BELS:
             skipped.append({"name": cell["name"], "type": cell["type"],
                             "bel": cell["bel"], "why": "pseudo-bel, no fuse"})
@@ -2305,11 +2362,17 @@ _HCLK_BEL_RE = re.compile(r"^(CLKDIV2|CLKDIV)_([0-9]+)$")
 HCLK_CELL_TYPES = ("CLKDIV2", "CLKDIV")
 
 
+#: The `_<index>` suffix a bel or decoded-cell name carries, and nothing more.
+#: Stripping the digits *characterwise* would eat the `2` of `CLKDIV2` and
+#: report every CLKDIV2 as a CLKDIV, so exactly one trailing `_<digits>` goes.
+_HCLK_INDEX_SUFFIX = re.compile(r"_\d*$")
+
+
 def _hclk_type(name):
     """`'CLKDIV2_1'`/`'CLKDIV2_'`/`'CLKDIV2'` -> `'CLKDIV2'`, else `None`."""
     if not name:
         return None
-    base = str(name).rstrip("_0123456789")
+    base = _HCLK_INDEX_SUFFIX.sub("", str(name))
     return base if base in HCLK_CELL_TYPES else None
 
 
