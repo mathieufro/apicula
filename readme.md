@@ -110,3 +110,7 @@ You can also come chat on [Matrix](https://matrix.to/#/#apicula:matrix.org) or [
 ### Funding
 
 This project was funded through the <a href="https://nlnet.nl/PET">NGI0 PET</a> and [NGI Zero Entrust](https://nlnet.nl/entrust) Fund, a fund established by <a href="https://nlnet.nl">NLnet</a> with financial support from the European Commission's <a href="https://ngi.eu">Next Generation Internet</a> programme, under the aegis of DG Communications Networks, Content and Technology under grant agreement N<sup>o</sup> 825310 and 101069594.
+
+## Local gate
+
+`.githooks/pre-push` is a no-op by default (D181, 2026-09-06): a landing is checked by targeted tests, and full gates run once at phase close; set `LANDING_GATE=1` for one push to re-arm the old detached `make gate GATE_SCOPE=branch` run.

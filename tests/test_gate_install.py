@@ -152,15 +152,12 @@ def _cleanup_evidence(id_):
 
 
 @pytest.mark.parametrize("case,remote_ref,expected_scope", SCOPE_CASES)
-def test_pre_push_scope_selection(tmp_path, case, remote_ref, expected_scope):
-    """Feed the real apicula pre-push hook the real git stdin protocol for
-    one remote ref, with `make` stubbed on PATH, and assert the observed
-    behaviour: a task-branch push never invokes the gate at all and the
-    hook exits immediately with no output; a main/dev/integration/*/epic/*
-    push spawns a detached `make gate GATE_SCOPE=branch` -- since the hook
-    returns before that background job necessarily finishes, this polls
-    briefly for the stub's log file rather than asserting on it right
-    away."""
+def test_pre_push_scope_selection_disabled_by_default(tmp_path, case, remote_ref, expected_scope):
+    """D181 (owner, 2026-09-06): no push runs a gate any more -- landings are
+    checked by targeted tests, full gates run once at phase close. Feed the
+    real apicula pre-push hook the real git stdin protocol for one remote
+    ref, with `make` stubbed on PATH and `LANDING_GATE` unset/`0`: every
+    ref, including main/dev/integration/*/epic/*, now gets zero gate."""
     repo = REPOS["apicula"]
     hook = os.path.join(repo, ".githooks", "pre-push")
 
@@ -172,6 +169,40 @@ def test_pre_push_scope_selection(tmp_path, case, remote_ref, expected_scope):
     env = dict(os.environ)
     env["PATH"] = f"{stub_dir}:{env['PATH']}"
     env["MAKE_CALLS_LOG"] = str(log_path)
+    env.pop("LANDING_GATE", None)
+
+    stdin = f"refs/heads/task refs/heads/task-sha {remote_ref} remote-sha\n"
+
+    proc = subprocess.run(["sh", hook], cwd=repo, input=stdin,
+                           capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", proc.stdout
+    time.sleep(0.3)  # generous: catch a stray background spawn
+    assert not log_path.exists(), (
+        f"{case}: make was invoked even though LANDING_GATE is unset: "
+        f"{log_path.read_text() if log_path.exists() else ''}")
+
+
+@pytest.mark.parametrize("case,remote_ref,expected_scope", SCOPE_CASES)
+def test_pre_push_scope_selection_with_landing_gate(tmp_path, case, remote_ref, expected_scope):
+    """With `LANDING_GATE=1` set for the push, the pre-D181 behaviour is
+    restored verbatim: a task-branch push still gets zero gate, and a
+    main/dev/integration/*/epic/* push spawns a detached
+    `make gate GATE_SCOPE=branch` -- since the hook returns before that
+    background job necessarily finishes, this polls briefly for the stub's
+    log file rather than asserting on it right away."""
+    repo = REPOS["apicula"]
+    hook = os.path.join(repo, ".githooks", "pre-push")
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    _stub_make(stub_dir)
+    log_path = tmp_path / "make-calls.log"
+
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env['PATH']}"
+    env["MAKE_CALLS_LOG"] = str(log_path)
+    env["LANDING_GATE"] = "1"
 
     stdin = f"refs/heads/task refs/heads/task-sha {remote_ref} remote-sha\n"
 
