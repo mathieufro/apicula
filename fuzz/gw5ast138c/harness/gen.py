@@ -125,7 +125,23 @@ def load_shape(name):
 # --------------------------------------------------------------------------
 # The unconditional .cst assertion
 # --------------------------------------------------------------------------
-def assert_cst_defaults(spec):
+def ins_loc_of(spec, sweep_value=None):
+    """The shape's vendor placement constraints for one sweep point.
+
+    `ShapeSpec.ins_loc` is a `{instance: site}` dict, or a callable
+    `(spec, sweep_value) -> dict` for a shape whose swept parameter **is** the
+    placement.  Without the callable form a placement sweep is impossible:
+    `ShapeSpec` is frozen and `gen.run` renders one `.cst` per sweep point from
+    one spec, so `P1.T15`'s four CLKDIV2 lanes would need four shape files
+    (measured while writing `shapes/clocking_clkdiv2.py`).
+    """
+    value = spec.ins_loc
+    if callable(value):
+        value = value(spec, sweep_value)
+    return dict(value or {})
+
+
+def assert_cst_defaults(spec, sweep_value=None):
     """Raise on the first violation; return `[]` when the spec is clean.
 
     Returned for symmetry with the Hardware Gate's collector: a clean spec
@@ -135,7 +151,7 @@ def assert_cst_defaults(spec):
         # (d) no config-role pin, ever -- checked before anything else so a
         # config pin never even gets a chance to look like a clean I/O.
         role = config_role_of_loc(pin.loc)
-        if role is not None:
+        if role is not None and not getattr(pin, "config_role_ack", ""):
             raise ConfigPinError(
                 "pin %r at %s is a config-role pin (%s) -- a shape must never "
                 "claim a config pin as plain I/O (measured, P0.T19/P0.T20)"
@@ -187,7 +203,7 @@ def assert_cst_defaults(spec):
                 )
     # (f) every INS_LOC instance path is the flat instance name -- gw_sh
     # resolves only that (CT1135, measured P0.T19).
-    for instance in spec.ins_loc:
+    for instance in ins_loc_of(spec, sweep_value):
         if "." in instance:
             raise InsLocError(
                 "INS_LOC instance %r is not a flat instance name -- gw_sh "
@@ -228,12 +244,22 @@ def render_verilog(spec, sweep_value=None):
     return spec.rtl(spec, sweep_value)
 
 
-def render_cst(spec, sweep_value=None):
-    """Render `top.cst`: one `IO_LOC`/`IO_PORT` pair per pin, then `INS_LOC`.
+def render_cst(spec, sweep_value=None, with_ins_loc=True):
+    """Render a `.cst`: one `IO_LOC`/`IO_PORT` pair per pin, then `INS_LOC`.
 
-    An `ins_loc` **value** may be a callable `(sweep_value) -> site`, for a
-    shape whose swept axis *is* the placement (`P1.T19` sweeps one PLLA over
-    the twelve `PLL_{L,R,B}[n]` sites). Plain strings, the only form Phase 0
+    `with_ins_loc=False` renders the **open-flow** copy (`top-open.cst`).
+    Measured on this device (`nextpnr-himbaechel` `cst.cc:130-140`): the reader
+    accepts only `{TOP,RIGHT,BOTTOM,LEFT}SIDE[0|1]`, so the 138C's own
+    `SIDE[0~7]` spelling (SUG1018-1.7E Table 2-2, row `GW5A(S)(T)-138`) falls
+    through to the placement-macro branch and `log_error`s the whole run with
+    `Unknown placement macro BOTTOMSIDE`.  The vendor needs the line and the
+    open flow cannot read it, so the two flows get two files; the open flow is
+    pinned by the RTL `(* BEL = ... *)` attribute instead, which nextpnr does
+    honour.  Fixing the reader is a nextpnr change and is not this task's.
+
+    An `ins_loc` **value** may also be a callable `(sweep_value) -> site`, for
+    a shape whose swept axis *is* the placement (`P1.T19` sweeps one PLL over
+    the twelve `PLL_{L,R,B}[n]` sites).  Plain strings, the only form Phase 0
     used, are passed through unchanged, so this is additive.
     """
     lines = [
@@ -241,8 +267,15 @@ def render_cst(spec, sweep_value=None):
         % spec.name,
         "// Every line below passed the unconditional generation-time .cst",
         "// assertion (spec.md 7.10(5)-(6), D20a-D20c).",
-        "",
     ]
+    for port in spec.pins:
+        ack = getattr(spec.pins[port], "config_role_ack", "")
+        if ack:
+            lines.append("// config-role pin %s (%s) claimed on MEASURED "
+                         "evidence: %s"
+                         % (spec.pins[port].loc,
+                            config_role_of_loc(spec.pins[port].loc), ack))
+    lines.append("")
     for port in spec.pins:
         pin = spec.pins[port]
         attrs = ["IO_TYPE=%s" % pin.io_type, "PULL_MODE=%s" % pin.pull_mode]
@@ -254,10 +287,11 @@ def render_cst(spec, sweep_value=None):
         attrs.extend("%s=%s" % (k, v) for k, v in pin.extra)
         lines.append('IO_LOC  "%s" %s;' % (port, pin.loc))
         lines.append('IO_PORT "%s" %s;' % (port, " ".join(attrs)))
-    if spec.ins_loc:
+    ins_loc = ins_loc_of(spec, sweep_value) if with_ins_loc else {}
+    if ins_loc:
         lines.append("")
-        for instance in spec.ins_loc:
-            site = spec.ins_loc[instance]
+        for instance in ins_loc:
+            site = ins_loc[instance]
             if callable(site):
                 site = site(sweep_value)
             lines.append('INS_LOC "%s" %s;' % (instance, site))
@@ -289,18 +323,20 @@ def run(spec, design_dir, sweep_value=None):
     The `.cst` assertion runs **first**: on a violation nothing is written and
     `design_dir` is not even created.
     """
-    assert_cst_defaults(spec)
     if sweep_value is None and spec.sweep_values:
         sweep_value = spec.baseline_value
+    assert_cst_defaults(spec, sweep_value)
 
     verilog = render_verilog(spec, sweep_value)
     cst = render_cst(spec, sweep_value)
+    open_cst = render_cst(spec, sweep_value, with_ins_loc=False)
     sdc = render_sdc(spec)
 
     design_dir = Path(design_dir)
     design_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    for name, text in (("top.v", verilog), ("top.cst", cst), ("top.sdc", sdc)):
+    for name, text in (("top.v", verilog), ("top.cst", cst),
+                       ("top-open.cst", open_cst), ("top.sdc", sdc)):
         path = design_dir / name
         path.write_text(text)
         written.append(path)
