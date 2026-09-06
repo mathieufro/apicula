@@ -2916,7 +2916,7 @@ def fse_iologic(device, fse, ttyp):
         return bels
     if device in {'GW5A-25A'} and ttyp in {48, 51, 263, 392, 399}:
         return bels
-    if device in {'GW5AST-138AC'}:
+    if device in {'GW5AST-138C'}:
         return bels
     if 'shortval' in fse[ttyp].keys():
         if 21 in fse[ttyp]['shortval'].keys():
