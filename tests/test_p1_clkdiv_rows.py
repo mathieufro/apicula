@@ -81,19 +81,30 @@ def _status_cell(primitive):
     pytest.fail(f"no section-1 row for {primitive!r} in {SPEC_PRIMITIVES}")
 
 
-def _check_rows(path, rows, expected):
+def _check_rows(path, rows, expected, control_shapes=()):
+    """The shared row assertions.
+
+    `control_shapes` names the unpinned control shapes, whose verdict is
+    `diff` **by construction** -- neither placer is told where to put the
+    primitive.  Naming them is what keeps the exemption narrow: a `diff` on
+    any other shape still fails, and a control that stopped being `diff`
+    would mean the control had stopped controlling for anything.
+    """
     assert len(rows) == expected, f"{path}: {len(rows)} rows, expected {expected}"
     masks = set()
     for row in rows:
         evidence.validate_row(row)
         assert row["device"] == DEVICE, row["run_id"]
         assert row["part"].startswith(PART), row["run_id"]
-        assert row["verdict"] in ("ok", "refused"), (row["run_id"], row["verdict"])
         masks.add(row["mask_sha256"])
-        if row["level"] == "E1":
-            for key in ("cells", "attrs", "conns"):
-                assert row["diff_count"][key] == 0, (row["run_id"], key,
-                                                     row["diff_count"])
+        if row["shape"] in control_shapes:
+            assert row["verdict"] == "diff", (row["run_id"], row["verdict"])
+            assert row["diff_count"]["cells"] > 0, row["run_id"]
+            continue
+        assert row["verdict"] in ("ok", "refused"), (row["run_id"], row["verdict"])
+        for key in ("cells", "attrs", "conns"):
+            assert row["diff_count"][key] == 0, (row["run_id"], key,
+                                                 row["diff_count"])
         if row["level"] == "E0":
             assert row["notes"].strip(), row["run_id"]
         unexplained = row["unexplained_bits"]
@@ -158,13 +169,22 @@ def test_clkdiv_row_closes():
 # --------------------------------------------------------------------------
 def test_clkdiv2_sweep_rows_complete():
     path, rows = _rows("clkdiv2")
-    _check_rows(path, rows, 8)
+    _check_rows(path, rows, 8, control_shapes=("clocking_clkdiv2_free",))
     swept = [r["sweep"] for r in rows if r["shape"] == "clocking_clkdiv2"]
     paths = {s.get("input_path") for s in swept}
     assert "HCLK_BUF_BO" in paths, paths   # even lane: the fuseless node
     assert "CLKDIV2_I" in paths, paths     # odd lane: the pip
     assert len({json.dumps(s, sort_keys=True) for s in swept}) == len(swept)
     assert sum(1 for r in rows if r["shape"] == "clocking_clkdiv2_free") == 1
+    # A CLKDIV2 writes no fuse, so `gowin_unpack` cannot recover it from the
+    # vendor bitstream and `E1` is unattainable for this primitive.  The rows
+    # must SAY that rather than close silently at `E0`.
+    for row in rows:
+        if row["shape"] != "clocking_clkdiv2":
+            continue
+        assert row["level"] == "E0", (row["run_id"], row["level"])
+        assert "EC9/HCLK" in row["notes"], row["run_id"]
+        assert "CLKDIV2" in row["notes"], row["run_id"]
 
 
 def test_clkdiv2_row_closes():
