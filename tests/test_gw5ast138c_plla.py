@@ -509,9 +509,12 @@ def test_pll_attrids_138c_reconciled():
         assert not (set(unnamed_rows) & named), (
             'an id listed as nameless now has a name; refresh the artefact')
 
-    # (c) The two MEASURED appends are present and are the only new ids.
+    # (c) The MEASURED appends are present and are the only new ids: the
+    # `P1.T22` pair, plus the pair `P1.T42`'s DYN sweep measured afterwards.
     assert attrids.pll_attrids['A_DYN_IDIV_SEL'] == 125
     assert attrids.pll_attrids['A_DYN_ODIV0_SEL'] == 132
+    assert attrids.pll_attrids['A_DYN_FBDIV_SEL'] == 124
+    assert attrids.pll_attrids['A_DYN_MDIV_SEL'] == 131
 
     # (d) No pre-existing entry was renamed, renumbered or removed.
     import subprocess
@@ -527,7 +530,8 @@ def test_pll_attrids_138c_reconciled():
     now = attrids.pll_attrids
     modified = {k: (v, now.get(k)) for k, v in base.items() if now.get(k) != v}
     assert modified == {}, f'pre-existing pll_attrids entries changed: {modified}'
-    assert set(now) - set(base) == {'A_DYN_IDIV_SEL', 'A_DYN_ODIV0_SEL'}
+    assert set(now) - set(base) == {'A_DYN_IDIV_SEL', 'A_DYN_ODIV0_SEL',
+                                   'A_DYN_FBDIV_SEL', 'A_DYN_MDIV_SEL'}
 
 
 def test_pll_attrmap_138c_artefact_is_complete():
