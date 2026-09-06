@@ -50,3 +50,25 @@ nothing, if the shape fails the `.cst` assertion.
 | Shape | Primitive under test | Scope tiles | Sweep |
 |---|---|---|---|
 | `smoke` | `DFF` (`INS_LOC "dut_dff" R2C3[0][A]`) | `[(2, 1)]` | none (single point) |
+| `clocking_clkdiv` | `CLKDIV`, HCLK block 5, lane 0 (`INS_LOC "div0" BOTTOMSIDE[4]` + `(* BEL = "X117Y108/CLKDIV_0" *)`) | `[(117, 108)]` | `DIV_MODE` over the nine UG306E p.25 values |
+| `clocking_clkdiv_baseline` | `CLKDIV`, same pinning, documented default `DIV_MODE="2"` | `[(117, 108)]` | none (the sweep's own baseline run) |
+| `clocking_clkdiv_free` | `CLKDIV`, placement free on both flows | `[(117, 108)]` | none (the `E0` control of `clocking_clkdiv`; `diff` by construction) |
+| `clocking_clkdiv2` | `CLKDIV2` -> `CLKDIV` chain, HCLK block 5 | `[(117, 108)]` | `(lane, RESETN)`; lane parity selects the CLKDIV2 input path |
+| `clocking_clkdiv2_free` | same chain, placement free on both flows | `[(117, 108)]` | none (the `E0` control of `clocking_clkdiv2`) |
+
+## Two rules the P1 clocking shapes added
+
+* **`ShapeSpec.ins_loc` may be a callable** `(spec, sweep_value) -> dict`, so a
+  shape can sweep the placement itself (`clocking_clkdiv2` sweeps the four
+  CLKDIV2 lanes of one HCLK block).  A plain dict is unchanged.
+* **`gen.run` writes two `.cst` files**: `top.cst` for the vendor and
+  `top-open.cst`, identical minus the `INS_LOC` block, for the open flow.
+  MEASURED: `nextpnr-himbaechel`'s reader (`cst.cc:130-140`) accepts only
+  `{TOP,RIGHT,BOTTOM,LEFT}SIDE[0|1]`, so the 138C's own `SIDE[0~7]` spelling
+  (SUG1018-1.7E Table 2-2) reaches the placement-macro branch and `log_error`s
+  the run.  The open flow is pinned by the RTL `(* BEL = ... *)` attribute
+  instead.  `openflow.run_openflow` prefers `top-open.cst` when it exists.
+* **A config-role pin needs `PinSpec.config_role_ack`**, a MEASURED
+  justification string, or `gen.py` still refuses it.  The refusal is not
+  weakened: it now takes evidence to lift, and the evidence is printed into
+  the `.cst`.

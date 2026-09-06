@@ -62,6 +62,13 @@ class PinSpec:
     drive: Optional[int] = 8
     direction: str = "input"                   # "input" | "output" (D37/F-CT1108)
     extra: tuple = ()                          # ((key, value), ...) verbatim
+    #: A MEASURED justification for claiming a package location that
+    #: `gen.config_role_of_loc` calls a config-role pin.  Empty (the default)
+    #: keeps the refusal absolute.  A non-empty string means: this exact pin
+    #: has been run through the vendor on this device and the config role did
+    #: not fire -- the string says which runs measured it, so the exemption is
+    #: evidence, not an opt-out flag.  `gen.py` prints it into the `.cst`.
+    config_role_ack: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,7 +103,12 @@ class ShapeSpec:
     scope: ScopeSpec
     rtl: Callable                              # (spec, sweep_value) -> Verilog
     top_module: str = "top"
-    ins_loc: dict = field(default_factory=dict)  # instance path -> site
+    #: Vendor placement constraints: `{flat instance name: site}`, rendered as
+    #: `INS_LOC` lines into the **vendor** `.cst` only.  May also be a callable
+    #: `(spec, sweep_value) -> dict`, which is what lets a shape sweep the
+    #: placement itself (`P1.T15` sweeps the four CLKDIV2 lanes of one HCLK
+    #: block); a plain dict is unchanged.
+    ins_loc: object = field(default_factory=dict)
     clocks: dict = field(default_factory=dict)   # port -> period in ns
     extra_gwsh_options: list = field(default_factory=list)
     extra_pack_flags: list = field(default_factory=list)

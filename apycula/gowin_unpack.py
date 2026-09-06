@@ -415,6 +415,213 @@ def get_dsp_main_cell(db, row, col, typ):
             col = 1 + (col - 1) // 9
     return row, col
 
+# ---------------------------------------------------------------------------
+# HCLK blocks: CLKDIV / CLKDIV2 and the block's own mux state  (P1.T08c)
+#
+# `gowin_pack` writes these through exactly two chipdb structures:
+#
+#   * the per-ttyp `HCLK` **shortval** table -- `Device.get_CLKDIV_fuses` and
+#     `get_CLKDIV2_fuses` build an attribute/value set with
+#     `ChipDB.get_hclk_attr_val` and turn it into bits with
+#     `chipdb.get_shortval_fuses(db, ttyp, av, 'HCLK')`;
+#   * `db.hclk_pips[(row, col)]` -- `get_all_hclk_pip_fuses`.
+#
+# The decoder below is driven by those same two tables and by
+# `db.extra_func[(row, col)]['clkdiv'|'clkdiv2']` (which is what tells nextpnr
+# how many CLKDIV/CLKDIV2 slots a block has and what their ports are). No fuse
+# coordinate and no per-device bel literal appears here.
+#
+# Device-gated on purpose. `GW5A-25A` and the pre-5A families are NOT decoded
+# here: their HCLK tables have never been measured against a bitstream in this
+# tree, and claiming a decode that has not been checked would corrupt both
+# sides of every diff. Extend `_hclk_block_devices` when a device is measured;
+# never widen it speculatively.
+_hclk_block_devices = {'GW5AST-138C'}
+
+# { device: {attr_name: attr_code} }
+_hclk_attrname_tables = {}
+
+def hclk_attrname_table(db, device=None):
+    """`attrids.hclk_attrids`, completed from the device's own HCLK logicinfo.
+
+    A `.fse` HCLK table can carry attribute ids `attrids` has no name for (the
+    GW5AST-138C carries 23 of them). Naming them `HCLK_UNK_ATTR<id>` keeps them
+    *decoded and reported* instead of silently dropped, and keeps
+    `get_attr_name` from printing "Unknown attr name" on every unpack.
+    `attrids` itself is not edited: the extension is computed from the chipdb.
+    """
+    device = device or _device
+    table = _hclk_attrname_tables.get(device)
+    if table is not None:
+        return table
+    table = dict(attrids.hclk_attrids)
+    named = set(table.values())
+    for attr, _val in db.logicinfo.get('HCLK', {}).keys():
+        if attr not in named:
+            table[f'HCLK_UNK_ATTR{attr}'] = attr
+            named.add(attr)
+    _hclk_attrname_tables[device] = table
+    return table
+
+_hclk_attrval_names = {code: name for name, code in attrids.hclk_attrvals.items()}
+
+def hclk_val_name(val):
+    return _hclk_attrval_names.get(val, f'HCLK_UNK_VAL{val}')
+
+# `HCLKDIV<n>_DIV` is the ONLY attribute `gowin_pack.get_CLKDIV_fuses` writes
+# on the GW5A families (`GW5A_25A.get_CLKDIV_fuses`: one
+# `AttrVal(f"HCLKDIV{hclk_idx}_DIV", ...)`, with `hclk_idx` the CLKDIV slot
+# index taken from the bel name). So it is the only one turned back into a
+# CLKDIV cell attribute here -- the attribute list is the packer's, not a
+# datasheet's.
+_hclk_clkdiv_div_re = re.compile(r'^HCLKDIV(\d+)_DIV$')
+# `Device.get_CLKDIV2_fuses` (the pre-5A path) writes
+# `BK<section>MUX<hclk>_OUTSEL = DIV2`. The GW5A override writes nothing, and
+# the GW5AST-138C `.fse` carries no such entry at any block ttyp -- see
+# `hclk_decode_completeness`. Kept table-driven so a device whose table does
+# carry it decodes without new code.
+_hclk_clkdiv2_re = re.compile(r'^BK(\d)MUX(\d)_OUTSEL$')
+
+def _hclk_block_pips(db, row, col, tile):
+    """The block's configured mux state, from `db.hclk_pips` (fuse-bearing only).
+
+    Same rule `parse_tile_` uses for an ordinary pip: a source is taken when
+    the set bits inside that destination's own fuse union are exactly that
+    source's bits, so a source whose fuses are a strict subset of another's is
+    not reported alongside it.
+    """
+    out = {}
+    for dest, srcs in db.hclk_pips.get((row, col), {}).items():
+        pip_bits = set()
+        for bits in srcs.values():
+            pip_bits |= set(bits)
+        if not pip_bits:
+            continue
+        used_bits = {(r, c) for r, c in pip_bits if tile[r][c] == 1}
+        if not used_bits:
+            continue
+        for src, bits in srcs.items():
+            if bits and set(bits) == used_bits:
+                out[dest] = src
+    return out
+
+def parse_hclk_block(db, row, col, tile):
+    """Decode one HCLK block cell into `{bel_name: {flags}}`.
+
+    Bel names are the ones nextpnr places on (`CLKDIV_<n>`, `CLKDIV2_<n>`),
+    plus `HCLK<block>` for the block itself, so a decoded cell lines up with a
+    placed cell without a translation table.
+    """
+    bels = {}
+    if _device not in _hclk_block_devices:
+        return bels
+    extra = db.extra_func.get((row, col))
+    if not extra or 'clkdiv' not in extra:
+        return bels
+
+    ttyp = db[row, col].ttyp
+    hclk_idx = extra['clkdiv']['hclk_idx']
+    clkdiv_slots = {str(k) for k in extra['clkdiv']['bels']}
+    clkdiv2_slots = {str(k) for k in extra.get('clkdiv2', {}).get('bels', {})}
+
+    block = set()
+    attrvals = {}
+    if 'HCLK' in db.shortval.get(ttyp, {}):
+        attrvals = parse_attrvals(tile, db.rev_logicinfo('HCLK'),
+                                  db.shortval[ttyp]['HCLK'],
+                                  hclk_attrname_table(db), 'HCLK')
+    for attr, val in sorted(attrvals.items()):
+        name = hclk_val_name(val)
+        match = _hclk_clkdiv_div_re.match(attr)
+        if match and match.group(1) in clkdiv_slots:
+            bels.setdefault(f'CLKDIV_{match.group(1)}', set()).add(f'DIV_MODE="{name}"')
+            continue
+        match = _hclk_clkdiv2_re.match(attr)
+        if match and name == 'DIV2' and match.group(2) in clkdiv2_slots:
+            bels.setdefault(f'CLKDIV2_{match.group(2)}', set()).add(
+                    f'SECTION="{match.group(1)}"')
+            continue
+        # decoded, named, but not an attribute of a CLKDIV cell: it belongs to
+        # the block. Never dropped.
+        block.add(f'{attr}="{name}"')
+
+    for dest, src in sorted(_hclk_block_pips(db, row, col, tile).items()):
+        block.add(f'{dest}="{src}"')
+
+    if block:
+        bels[f'HCLK{hclk_idx}'] = block
+    return bels
+
+def hclk_decode_completeness(db, device):
+    """`S6b` for the HCLK primitives: what of the HCLK fuse space is decoded.
+
+    Counts, per HCLK block cell, the configuration entries a bitstream can
+    carry at that cell -- every `HCLK` shortval table entry plus every
+    fuse-bearing `hclk_pips` source -- and splits them into what
+    `parse_hclk_block` turns into output and what it does not. Everything it
+    does not must appear in `known_undecoded` with a reason.
+    """
+    locs = chipdb._gw5a_hclk_locs.get(device, {})
+    attrname = None
+    total = decoded = 0
+    clkdiv_div_entries = clkdiv2_entries = pip_fuses = 0
+    revli = db.rev_logicinfo('HCLK')
+    if device in _hclk_block_devices:
+        attrname = hclk_attrname_table(db, device)
+    for (row, col) in sorted(locs.values()):
+        ttyp = db[row, col].ttyp
+        for key in db.shortval.get(ttyp, {}).get('HCLK', {}):
+            total += 1
+            names = set()
+            for code in key:
+                if not code:
+                    continue
+                attr, _val = revli[abs(code)]
+                names.add(get_attr_name(attrname, attr, 'HCLK') if attrname else '')
+            if any(_hclk_clkdiv_div_re.match(n) for n in names):
+                clkdiv_div_entries += 1
+            if any(_hclk_clkdiv2_re.match(n) for n in names):
+                clkdiv2_entries += 1
+            # every named entry is emitted: onto a CLKDIV cell when it is a
+            # CLKDIV attribute, onto the HCLK block cell otherwise
+            if attrname and names:
+                decoded += 1
+        for dest, srcs in db.hclk_pips.get((row, col), {}).items():
+            for src, bits in srcs.items():
+                if not bits:
+                    continue
+                pip_fuses += 1
+                total += 1
+                if attrname:
+                    decoded += 1
+    return {
+        'device': device,
+        'blocks': len(locs),
+        'total': total,
+        'decoded': decoded,
+        'undecoded': total - decoded,
+        'clkdiv_div_entries': clkdiv_div_entries,
+        'clkdiv2_entries': clkdiv2_entries,
+        'pip_fuses': pip_fuses,
+        'known_undecoded': {
+            'CLKDIV2':
+                'MEASURED: the GW5AST-138C `.fse` HCLK shortval table carries '
+                '0 CLKDIV2 entries at every one of the six block ttyps '
+                '(272/273/275/276/274/379) -- no BK<s>MUX<h>_OUTSEL and no '
+                'BK<s><h>DIV2_RST. This mirrors gowin_pack, whose GW5A '
+                'get_CLKDIV2_fuses returns no fuses, so a placed CLKDIV2 '
+                'leaves nothing in the bitstream to decode. The decoder is '
+                'wired for the attribute and will fire on a device whose '
+                'table carries it.',
+            'block_default_bits':
+                'MEASURED: the vendor sets 5 bits at every HCLK block cell '
+                'that lie in NO chipdb table at all -- not the HCLK shortval '
+                'table, not hclk_pips, not the tile pips, not any bel. They '
+                'are outside the fuse space this report counts and cannot be '
+                'attributed without a fuzz that isolates them.',
+        },
+    }
+
 # noiostd --- this is the case when the function is called
 # with iostd by default, e.g. from the clock fuzzer
 # With normal gowin_unpack io standard is determined first and it is known.
@@ -461,6 +668,18 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                     modes.add(attrval)
             if modes:
                 bels[f'{name}{idx}'] = modes
+            continue
+        if name == "PLL":
+            # The GW5A `PLL` (D96: the GW5AST-138C has no `PLLA`) keeps its
+            # fuses in the site's own three tiles' `shortval['PLL']` table, not
+            # in a DRP slot, so it decodes exactly like a pre-5A PLL does --
+            # the only difference is that it is addressed by its tile and never
+            # by a slot number.
+            attrvals = pll_attrs_refine(parse_attrvals(tile, db.rev_logicinfo('PLL'), db.shortval[tiledata.ttyp]['PLL'], attrids.pll_attrids, "PLL"))
+            modes = { f'DEVICE="{_device}"' }
+            for attrval in attrvals:
+                modes.add(attrval)
+            bels[name] = modes
             continue
         if name == "PLLVR":
             idx = _pll_cells.setdefault(get_pll_A(db, row, col, 'A'), len(_pll_cells))
@@ -712,6 +931,10 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 old_mode = bel_a.intersection({'IBUF', 'OBUF', 'IOBUF', 'TBUF'})
                 bel_a -= old_mode
                 bel_a.update(mode)
+
+    # HCLK block cells (CLKDIV / CLKDIV2 / the block mux state). Device-gated;
+    # `parse_hclk_block` returns {} for every device but the measured ones.
+    bels.update(parse_hclk_block(db, row, col, tile))
 
     return {name: bel for name, bel in bels.items() if name not in skip_bels}, pips, clock_pips
 
@@ -1005,7 +1228,9 @@ def tile2verilog(dbrow, dbcol, bels, pips, clock_pips, mod, cst, db):
         mod.wires.update({srcg, destg})
         mod.assigns.append((destg, srcg))
 
-    belre = re.compile(r"(IOB|LUT|DFF|BANK|CFG|ALU|RAM16|ODDR|OSC[ZFHWO]?|BUFS|RPLL[AB]|PLLVR|IOLOGIC|BSRAM|DSP)(\w*)")
+    # CLKDIV2 before CLKDIV, HCLK last: alternation is first-match, so
+    # "CLKDIV2_0" must not be read as "CLKDIV" + "2_0".
+    belre = re.compile(r"(IOB|LUT|DFF|BANK|CFG|ALU|RAM16|ODDR|OSC[ZFHWO]?|BUFS|RPLL[AB]|PLLVR|IOLOGIC|BSRAM|DSP|CLKDIV2_|CLKDIV_|HCLK)(\w*)")
     bels_items = move_iologic(bels)
 
     iologic_detected = set()
@@ -1183,6 +1408,32 @@ def tile2verilog(dbrow, dbcol, bels, pips, clock_pips, mod, cst, db):
             ram16.portmap['DO'] = [f"R{row}C{col}_F{x}" for x in range(4, -1, -1)]
             mod.wires.update(chain.from_iterable([x if isinstance(x, list) else [x] for x in ram16.portmap.values()]))
             mod.primitives[name] = ram16
+        elif typ in {"CLKDIV_", "CLKDIV2_"}:
+            # HCLK block primitives (P1.T08c). The portmap is the chipdb's own
+            # `extra_func` entry -- the same one nextpnr builds the bel from.
+            kind = typ[:-1]
+            slot = str(idx)
+            name = f"R{row}C{col}_{kind}_{slot}"
+            prim = codegen.Primitive(kind, name)
+            for paramval in sorted(flags):
+                param, _, val = paramval.partition('=')
+                prim.params[param] = val
+            slots = db.extra_func[(dbrow, dbcol)][kind.lower()]['bels']
+            # a freshly built chipdb keys the slots by int, one round-tripped
+            # through msgpack by str
+            portmap = slots.get(slot, slots.get(int(slot), {}))
+            for direction in ('inputs', 'outputs'):
+                for port, wname in portmap.get(direction, {}).items():
+                    prim.portmap[port] = f"R{row}C{col}_{wname}"
+            mod.wires.update(prim.portmap.values())
+            mod.primitives[name] = prim
+        elif typ == "HCLK":
+            # the block's own decoded state: no primitive, it is the state of
+            # the muxes the CLKDIV bels hang off. Emitted as a comment-only
+            # cell would be noise, so it is dropped from the Verilog and kept
+            # in the parse_tile_ output, which is what the equivalence
+            # harness reads.
+            continue
         elif typ in {"OSC", "OSCZ", "OSCF", "OSCH", "OSCW", "OSCO"}:
             name = f"R{row}C{col}_{typ}"
             osc = codegen.Primitive(typ, name)

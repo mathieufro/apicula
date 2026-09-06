@@ -52,6 +52,11 @@ DEVICE = "GW5AST-138C"
 PART = "GW5AST-LV138PG484AC1/I0"
 FAMILY = "gw5a"
 
+#: `gen.py`'s two `.cst` files: the vendor one and the open-flow copy with the
+#: `INS_LOC` block removed (see `run_openflow`).
+OPEN_CST_DEFAULT = "top.cst"
+OPEN_CST = "top-open.cst"
+
 #: The one chipdb name (F47). There is no per-family `chipdb-gw5a.bin`.
 CHIPDB_BASENAME = f"chipdb-{DEVICE}.bin"
 
@@ -330,6 +335,14 @@ def run_openflow(design_dir, top_module="top", verilog="top.v", cst="top.cst",
     design_dir = os.path.abspath(design_dir)
     if not os.path.isdir(design_dir):
         raise OpenFlowError(f"no design directory {design_dir}")
+    # `gen.run` writes a second, open-flow-only `.cst` for any shape that
+    # carries vendor `INS_LOC` lines nextpnr's reader cannot parse (the 138C's
+    # `{...}SIDE[0~7]` spelling: `cst.cc:130-140` accepts only `[0|1]` and
+    # `log_error`s everything else).  When it exists it is authoritative for
+    # this side; an explicitly passed `cst` is never overridden.
+    if cst == OPEN_CST_DEFAULT and os.path.isfile(
+            os.path.join(design_dir, OPEN_CST)):
+        cst = OPEN_CST
     for name in (verilog, cst):
         if not os.path.isfile(os.path.join(design_dir, name)):
             raise OpenFlowError(f"{design_dir}: no {name}")

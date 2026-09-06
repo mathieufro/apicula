@@ -7,12 +7,14 @@ import math
 import re
 
 from apycula import attrids
+from apycula import gw5ast138c_pll_pump as pll_pump
 from apycula import bitmatrix
 from apycula import bslib
 from apycula import chipdb
 from apycula import wirenames as wnames
 from apycula.chipdb import add_attr_val, get_shortval_fuses, get_longval_fuses, \
-                           get_bank_fuses, get_bank_io_fuses, get_long_fuses, load_chipdb, Tile, Coord
+                           get_bank_fuses, get_bank_io_fuses, get_long_fuses, load_chipdb, Tile, Coord, \
+                           gw5a_dhce_gate_fuses
 from collections.abc import Iterator
 from dataclasses import dataclass
 from types import FunctionType
@@ -544,6 +546,25 @@ class ChipDB:
     def get_dhcen_wire_side(self, x: int, y: int, idx_int) -> tuple[str, str]:
         _, wire, _, side = self.db.extra_func[y, x]['dhcen'][idx_int]['pip']
         return (wire, side)
+
+    def is_gw5a_dhcen(self, x: int, y: int, idx_int) -> bool:
+        """ True for the GW5A `DHCE` model: per-block sites, no HCLK attrs. """
+        return bool(self.db.extra_func[y, x]['dhcen'][idx_int].get('gw5a'))
+
+    def get_gw5a_dhce_gate_fuses(self, x: int, y: int, idx_int) -> set[Coord]:
+        """ The gate fuse of the HCLK input multiplexer a GW5A DHCE sits on.
+
+        On this family the enable is not an `HCLK` shortval attribute -- the
+        GW5AST-138C `HCLK` table carries no `*_HSTOP`/`*_BRGSTOP` row at all --
+        but the multiplexer's own output-enable bit, i.e. the fuse every one of
+        its sources has in common. MEASURED, `P1.T26`.
+
+        The multiplexer is `'gate'`, never `'pip'`: `'pip'` names the lane wire
+        nextpnr matches a routed clock against (`P1.T27`), which carries no
+        fuse of the gate.
+        """
+        dest = self.db.extra_func[y, x]['dhcen'][idx_int]['gate']
+        return gw5a_dhce_gate_fuses(self.db.hclk_pips[y, x], dest)
 
     def get_dcs_spine(self, x: int, y: int, idx_int) -> str:
         return self.db.extra_func[y, x]['dcs'][idx_int]['clkout']
@@ -2315,6 +2336,24 @@ class Device:
     def get_permitted_pll_freqs(self) -> tuple[float, float, float, float, float]:
         raise Exception("get_permitted_pll_freqs is not implemented.")
 
+    def compute_pll_fvco(self, fclkin: float, idiv: int, fbdiv: int, mdiv: int) -> float:
+        """VCO frequency of a GW5A `PLL`/`PLLA`, internal feedback.
+
+        `UG306-1.0.9E` section 5.1: `Fpfd = Fclkin/IDIV`, `Fclkfb = Fpfd*FBDIV`,
+        internal feedback `Fvco = Fclkfb*MDIV`.  One function so the packer and
+        `gowin_pll.plla_freqs` cannot drift apart again (apicula issue #427).
+        """
+        return fclkin / idiv * fbdiv * mdiv
+
+    def check_pll_fvco(self, fvco: float) -> None:
+        """Device hook: reject a VCO frequency the part cannot reach.
+
+        The base class has no opinion -- a device that publishes a VCO band in
+        its datasheet overrides this.  This is deliberately NOT the `FCLKIN`
+        range check below, which is about the *input* pin.
+        """
+        return
+
     def get_pll_attrvals(self, bel: BelDesc) -> set[int]:
         """ rPLL attributes - the most common type of PLL in the GW1N and GW2A series """
         av = set()
@@ -2530,7 +2569,6 @@ class Device:
         name_pattern = r'^_HCLK([0,1])_SECT([0,1])$'
         pattern_match = re.findall(name_pattern, bel.idx_str)
         if (not pattern_match):
-            import ipdb; ipdb.set_trace()
             raise Exception (f"Unknown HCLK Bel/HCLK Section: {bel.cell.typ}{bel.idx_str}")
         return pattern_match[0]
 
@@ -5166,6 +5204,25 @@ class GW2A_18C(GW2A):
         return super().__repr__() + ""
 
 ################################################################
+#: The GW5A `PLL` dynamic-reconfiguration selects, in attribute-id order.
+#: Each is a plain boolean cell parameter naming the port that replaces a
+#: static divider value: `DYN_IDIV_SEL` reads `IDSEL`, `DYN_FBDIV_SEL`
+#: `FBDSEL`, `DYN_MDIV_SEL` `MDSEL`, `DYN_ODIV0_SEL` `ODSEL0`, and
+#: `DYN_DPA_EN` the dynamic phase-adjust ports.  Ids 124/125/131/132/190 are
+#: MEASURED one-parameter sightings on the GW5AST-138C (`P1.T22`, `P1.T42`);
+#: `A_DYN_ICP_SEL` and `A_DYN_LPF_SEL` have no measured sighting yet and are
+#: listed here so a design that sets them is encoded rather than ignored.
+DYN_SELECT_ATTRS = (
+    'A_DYN_FBDIV_SEL',
+    'A_DYN_IDIV_SEL',
+    'A_DYN_ICP_SEL',
+    'A_DYN_LPF_SEL',
+    'A_DYN_MDIV_SEL',
+    'A_DYN_ODIV0_SEL',
+    'A_DYN_DPA_EN',
+)
+
+
 class GW5A(Device):
     """ GW5A series """
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
@@ -5451,7 +5508,29 @@ class GW5A(Device):
     #========== Clocks
     #==============================
     def get_DCS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        # Not every GW5A die has a traced DCS model; the ones that do override
+        # this with `gw5a_dcs_fuses`.
         self.error_not_supported_cell_type(bel)
+
+    def gw5a_dcs_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ A GW5A DCS's fuses are scattered across the die rather than held
+        in the bel's own cell, so every cell is asked for them.  Which cells
+        answer is a property of the device's long-fuse tables, not of the
+        placement.  """
+        # DCSs without DCS_MODE are unused
+        if 'DCS_MODE' not in bel.cell.attrs:
+            return []
+        spine = self.chipdb.get_dcs_spine(bel.x, bel.y, bel.idx_int)
+
+        av = self.get_dcs_attrvals(bel, spine)
+        _, dcs_str = self.dcs_spine2quadrant_idx[spine]
+
+        fuses = []
+        for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
+            bits = self.chipdb.get_dcs_fuses(x, y, av, dcs_str)
+            if bits:
+                fuses.append(CellFuseBits(x, y, bits))
+        return fuses
 
     def get_pll_attrvals(self, bel: BelDesc) -> set[int]:
         """ PLLA attributes """
@@ -5554,24 +5633,23 @@ class GW5A(Device):
             val = int(cell_parms.get(attr, '0'), 2)
             self.chipdb.get_pll_attr_val(AttrVal(attr, val), av)
 
-        # XXX only static
-        self.chipdb.get_pll_attr_val(AttrVal('A_DYN_DPA_EN', 'FALSE'), av)
-        self.chipdb.get_pll_attr_val(AttrVal('A_DYN_ICP_SEL', 'FALSE'), av)
-        self.chipdb.get_pll_attr_val(AttrVal('A_DYN_LPF_SEL', 'FALSE'), av)
+        # The DYN_* selects are cell parameters like any other divider
+        # setting: each one replaces a static `#(...)` value with the matching
+        # dynamic-reconfiguration port, and the vendor writes it as the plain
+        # boolean attribute (`pll_attrvals['TRUE'] == 50`).  Forcing them all
+        # FALSE here silently dropped every dynamic mode from the bitstream.
+        for attr in DYN_SELECT_ATTRS:
+            val = cell_parms.get(attr, 'FALSE')
+            self.chipdb.get_pll_attr_val(AttrVal(attr, val), av)
         self.chipdb.get_pll_attr_val(AttrVal('A_LPF_CAP_SEL', '0'), av)
         self.chipdb.get_pll_attr_val(AttrVal('A_SSC_EN', '0'), av)
 
         fref = fclkin / idiv
         fclkfb = fref * fbdiv
         # XXX internal feedback for now
-        fvco = fclkfb * mdiv
-        fclkin_idx, icp, r_idx = self.get_pll_pump(fref, fvco)
-        self.chipdb.get_pll_attr_val(AttrVal('KVCO', fclkin_idx // 16), av)
-        if fvco > 1400.0:
-            fclkin_idx += 1
-        self.chipdb.get_pll_attr_val(AttrVal('A_ICP_SEL', int(icp)), av)
-        self.chipdb.get_pll_attr_val(AttrVal('A_LPF_RES_SEL', f'R{r_idx}'), av)
-        self.chipdb.get_pll_attr_val(AttrVal('FLDCOUNT', fclkin_idx), av)
+        fvco = self.compute_pll_fvco(fclkin, idiv, fbdiv, mdiv)
+        self.check_pll_fvco(fvco)
+        self.set_pll_pump_attrvals(av, fref, fvco)
 
         # set other attributes
         attr = 'A_RESET_I_EN'
@@ -5598,6 +5676,24 @@ class GW5A(Device):
 
         return av
 
+    def set_pll_pump_attrvals(self, av: set[int], fref: float, fvco: float):
+        """ Add the four charge-pump / loop-filter attributes to `av`.
+
+        `KVCO`, `FLDCOUNT`, `A_ICP_SEL` and `A_LPF_RES_SEL` are the only
+        attributes the vendor *derives* rather than reads off the cell, and the
+        derivation is per device: the GW5AST-138C ties `KVCO` to neither
+        `FLDCOUNT` nor the VCO, and its VCO band tops out below the 1400MHz
+        step this method takes.  Kept as one overridable step so a device with
+        a different pump changes this and nothing else.
+        """
+        fclkin_idx, icp, r_idx = self.get_pll_pump(fref, fvco)
+        self.chipdb.get_pll_attr_val(AttrVal('KVCO', fclkin_idx // 16), av)
+        if fvco > 1400.0:
+            fclkin_idx += 1
+        self.chipdb.get_pll_attr_val(AttrVal('A_ICP_SEL', int(icp)), av)
+        self.chipdb.get_pll_attr_val(AttrVal('A_LPF_RES_SEL', f'R{r_idx}'), av)
+        self.chipdb.get_pll_attr_val(AttrVal('FLDCOUNT', fclkin_idx), av)
+
     def rename_plla_attrs(self, bel: BelDesc) -> BelDesc:
         cell = bel.cell
         cell_parms = cell.parms
@@ -5616,6 +5712,31 @@ class GW5A(Device):
 
         slot_idx = self.chipdb.get_slot_idx(bel.x, bel.y, 'pll')
         self.set_pll_slot_fuses(slot_idx, av)
+        return []
+
+    # The GW5A HCLK block indexes its CLKDIV by the bel's own index, not by the
+    # pre-5A "_HCLK<n>_SECT<n>" name, and it has no DCS section select.  This
+    # lived in GW5A_25A, so GW5AT-60B and GW5AST-138C inherited the pre-5A
+    # implementation and died in get_hclk_sections on the first CLKDIV
+    # (P1.T08d, measured: that method's stray `import ipdb` raised
+    # ModuleNotFoundError instead of its own Exception).  Moved up unchanged --
+    # GW5A_25A now inherits exactly what it used to define, bit for bit.
+    def get_CLKDIV_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        hclk_idx = bel.idx_str[-1]
+
+        av = set()
+        self.chipdb.get_hclk_attr_val(AttrVal(f"HCLKDIV{hclk_idx}_DIV", self.get_clkdiv_divmode(bel)), av)
+
+        fuses = []
+        bels_x_y = self.get_clkdiv_bels(bel)
+        for x_y in bels_x_y:
+            x, y = x_y
+            bits = self.chipdb.get_hclk_fuses(x, y, av)
+            if bits:
+                fuses.append(CellFuseBits(x, y, bits))
+        return fuses
+
+    def get_CLKDIV2_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         return []
 
     def get_default_clkdiv_divmode(self) -> str:
@@ -6303,38 +6424,7 @@ class GW5A_25A(GW5A):
         return (K1, C1)
 
     def get_DCS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        # DCSs without DCS_MODE are unused
-        if 'DCS_MODE' not in bel.cell.attrs:
-            return []
-        spine = self.chipdb.get_dcs_spine(bel.x, bel.y, bel.idx_int)
-
-        av = self.get_dcs_attrvals(bel, spine)
-        _, dcs_str = self.dcs_spine2quadrant_idx[spine]
-
-        fuses = []
-        for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
-            bits = self.chipdb.get_dcs_fuses(x, y, av, dcs_str)
-            if bits:
-                fuses.append(CellFuseBits(x, y, bits))
-        return fuses
-
-    def get_CLKDIV_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        hclk_idx = bel.idx_str[-1]
-
-        av = set()
-        self.chipdb.get_hclk_attr_val(AttrVal(f"HCLKDIV{hclk_idx}_DIV", self.get_clkdiv_divmode(bel)), av)
-
-        fuses = []
-        bels_x_y = self.get_clkdiv_bels(bel)
-        for x_y in bels_x_y:
-            x, y = x_y
-            bits = self.chipdb.get_hclk_fuses(x, y, av)
-            if bits:
-                fuses.append(CellFuseBits(x, y, bits))
-        return fuses
-
-    def get_CLKDIV2_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        return []
+        return self.gw5a_dcs_fuses(bel)
 
     #==============================
     #========== DSP
@@ -6719,6 +6809,46 @@ class GW5AT_60B(GW5A):
 ################################################################
 class GW5AST_138C(GW5A):
     """ GW5AST-138C chip. Tangmega138k board """
+    #==============================
+    #========== Clocks
+    #==============================
+    def get_DCS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ MEASURED (`P1.T31`, `$OTC/evidence/dcs/ports-138c.md`): this die
+        has four DCS, two in each of the two clock-bridge cells that carry a
+        spine multiplexer, and their fuses are scattered the same way the 25A's
+        are. """
+        return self.gw5a_dcs_fuses(bel)
+
+    #==============================
+    #========== DHCE
+    #==============================
+    def get_DHCEN_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ GW5A `DHCE`: one gate fuse, in the site's own HCLK block cell.
+
+        Three things differ from the pre-5A model this overrides:
+
+        * the enable is a fuse of the HCLK input multiplexer itself, not an
+          `HCLK` shortval attribute -- this device's `HCLK` table has no
+          `*_HSTOP`/`*_BRGSTOP` row for the wire names that path keys on;
+        * the fuse belongs to the *block cell*, so it is emitted there and
+          nowhere else.  The pre-5A path sweeps a whole die edge because those
+          devices have one HCLK block per side; this die has two blocks on each
+          of `L`, `R` and `B`, and writing the fuse along the edge would gate
+          the neighbouring block as well;
+        * the site index is per block, and there are exactly four of them, so
+          there is no `HCLK_BANK_OUT` (interbank) half of the rule.
+
+        MEASURED, `P1.T26`, `$OTC/evidence/dhcen/fuse-138c.md`.
+        """
+        if 'DHCEN_USED' not in bel.cell.attrs:
+            return []
+        if not self.chipdb.is_gw5a_dhcen(bel.x, bel.y, bel.idx_int):
+            return super().get_DHCEN_fuses(bel)
+        bits = self.chipdb.get_gw5a_dhce_gate_fuses(bel.x, bel.y, bel.idx_int)
+        if not bits:
+            return []
+        return [CellFuseBits(bel.x, bel.y, bits)]
+
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         super().__init__(cli_args, pnr)
         self.used_clock_spines = set()
@@ -6728,6 +6858,110 @@ class GW5AST_138C(GW5A):
         for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
             if self.chipdb.get_ttyp(x, y) in self.clock_bridge_ttypes:
                 self.clock_bridge_xy.add((x, y))
+
+    def reject_iologic_unsupported(self):
+        """ D39 state (1): named refusal for any IOLOGIC cell on GW5AST-138C.
+        No IOLOGIC bel exists for this device until Phase 3 lands the HCLK
+        row and deletes the fse_iologic guard (chipdb.py) that this refusal
+        mirrors. """
+        raise Exception("IOLOGIC on GW5AST-138C requires HCLK: no IOLOGIC bel exists for this device yet")
+
+    #==============================
+    #========== Clocks
+    #==============================
+    def get_permitted_pll_freqs(self) -> tuple[float, float, float, float, float]:
+        """ (max_in, max_out, min_out, max_vco, min_vco)
+
+        DS1239-1.0.3E Table 3-18 "PLL Switching Characteristics", GW5AST-138,
+        speed grade C1/I0 -- the only grade this device is supported at:
+
+            FINMAX   Maximum Input Clock Frequency      800    MHz
+            FOUTMAX  PLL Maximum Output Frequency      1000    MHz
+            FOUTMIN  PLL Minimum Output Frequency         5.079 MHz
+            FVCOMAX  Maximum PLL VCO Frequency         1300    MHz
+            FVCOMIN  Minimum PLL VCO Frequency          650    MHz
+
+        Only FINMAX is shared with the GW5A-25A override; the other four
+        differ, so inheriting or copying the 25A's
+        `(800., 1600., 6.25, 1600., 800.)` would let the packer emit divider
+        settings whose VCO frequency the part cannot reach.
+        """
+        return (800., 1000., 5.079, 1300., 650.)
+
+    def check_pll_fvco(self, fvco: float) -> None:
+        """Reject a `PLL` VCO frequency outside DS1239E Table 3-18's band.
+
+        `FVCOMIN` 650 MHz .. `FVCOMAX` 1300 MHz, **inclusive at both ends**:
+        the datasheet limits are attainable values, not open bounds.  This is
+        the `S7` check; the base class's `FCLKIN` 3..`FINMAX` range check is a
+        different thing about a different pin and is left exactly as it is.
+        """
+        min_vco = self.get_permitted_pll_freqs()[4]
+        max_vco = self.get_permitted_pll_freqs()[3]
+        if fvco < min_vco or fvco > max_vco:
+            raise Exception(
+                f"FVCO {fvco:.1f} MHz is outside the GW5AST-138C permitted "
+                f"range [{min_vco}, {max_vco}] MHz")
+
+    def get_pll_bels(self, bel: BelDesc) -> Iterator[tuple[int, int]]:
+        """ The site's three tiles, in ascending column order.
+
+        This device has no PLL slot and no `drpfuse` table (`P1.T17`,
+        MEASURED: no pseudo-ttyp >= 1024 exists on it), so a `PLL`'s fuses are
+        ordinary `shortval[ttyp]['PLL']` fuses of the three horizontally
+        adjacent tiles the site spans, and `bel.x` is the lowest column of the
+        three (`$OTC/evidence/plla/sites-138c.md` §3).
+        """
+        for off in range(3):
+            yield (bel.x + off, bel.y)
+
+    def set_pll_pump_attrvals(self, av: set[int], fref: float, fvco: float):
+        """ The MEASURED charge pump of this device.
+
+        `gw5ast138c_pll_pump` documents where each constant comes from.  Two
+        things differ from the inherited GW5A derivation and both are measured
+        rather than assumed: `KVCO` is a constant here instead of a function of
+        `FLDCOUNT`, and the `FVCO > 1400 MHz` `FLDCOUNT` step cannot be reached
+        at all, because this part's `FVCOMAX` is 1300 MHz.
+        """
+        fldcount, icp, r_idx = self.get_pll_pump(fref, fvco)
+        self.chipdb.get_pll_attr_val(AttrVal('KVCO', pll_pump.KVCO), av)
+        self.chipdb.get_pll_attr_val(AttrVal('A_ICP_SEL', int(icp)), av)
+        self.chipdb.get_pll_attr_val(AttrVal('A_LPF_RES_SEL', f'R{r_idx}'), av)
+        self.chipdb.get_pll_attr_val(AttrVal('FLDCOUNT', fldcount), av)
+
+    def get_pll_pump(self, fref: float, fvco: float) -> tuple[int, int, int]:
+        """ `(FLDCOUNT, A_ICP_SEL, r_idx)` from the measured 138C fit. """
+        return pll_pump.pump(fref, fvco)
+
+    def get_pll_attrvals(self, bel: BelDesc) -> set[int]:
+        """ GW5A attributes, with this device's one unsupported divider value.
+
+        `MDIV_SEL 1` is refused rather than encoded: the vendor accepts it,
+        validates `FVCO` with it, and then writes its own default
+        `A_MDIV_SEL 8` plus a charge pump consistent with neither
+        (`gw5ast138c_pll_pump.MDIV_SEL_MIN`, MEASURED over three runs).  No
+        bitstream built from it can agree with the vendor's, so emitting one
+        would be worse than refusing.
+        """
+        mdiv = int(bel.cell.parms.get('A_MDIV_SEL', bin(8)), 2)
+        if mdiv < pll_pump.MDIV_SEL_MIN:
+            raise Exception(
+                f"MDIV_SEL {mdiv} is not supported on the GW5AST-138C: the "
+                f"vendor silently substitutes its default 8 for it "
+                f"(cell '{bel.cell.name}')")
+        return super().get_pll_attrvals(bel)
+
+    def get_PLL_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ `PLL`, this device's primitive (`D96`) -- ordinary tile fuses.
+
+        `GW5A.common_pll_handler` writes through a DRP slot, which this device
+        does not have; `Device.common_pll_handler` writes the site's own tiles,
+        which is what `P1.T17`-`P1.T23` measured the fuses to be.  The cell's
+        parameters carry no `A_` prefix, so they are renamed exactly the way
+        `get_PLLA_fuses` renames the 25A's.
+        """
+        return Device.common_pll_handler(self, self.rename_plla_attrs(bel))
 
     #==============================
     #========== Pips

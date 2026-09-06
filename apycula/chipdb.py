@@ -534,6 +534,13 @@ def fse_clock_pips_138(fse, ttyp, device):
 
                 pips.setdefault(dest, {})[src] = fuses
 
+    # Table 38 is the device's CENTRAL CLOCK MUX -- cells (54,88) and (54,93)
+    # (fse ttyp 80 and 85) plus their neighbours.  The wires by which the six
+    # HCLK blocks reach a SPINE land inside the two spans this loop otherwise
+    # discards as "longwires" and "unknown", so the measured escape wires are
+    # let through by name and nothing else is (P1.T08d,
+    # $OTC/evidence/hclk/mux38-138c.md).
+    hclk_clk_ids = gw5_hclk_clk_wire_ids(device)
     if _wire_tables['CLOCK_MUX'] in fse[ttyp]['wire']:
         for srcid, destid, *fuses in fse[ttyp]['wire'][_wire_tables['CLOCK_MUX']]:
             fuses = {fuse.fuse_lookup(fse, ttyp, f, device) for f in unpad(fuses)}
@@ -545,12 +552,13 @@ def fse_clock_pips_138(fse, ttyp, device):
             # XXX skip 6 and 7 for now
             if srcid in range(wnames.clknumbers['P16A'], wnames.clknumbers['P47D'] + 1):
                 continue
-            # XXX skip longwires
-            if srcid in range(164, 237):
-                continue
-            # XXX ignore unknown wires
-            if srcid in range(105, 129):
-                continue
+            if srcid not in hclk_clk_ids:
+                # XXX skip longwires
+                if srcid in range(164, 237):
+                    continue
+                # XXX ignore unknown wires
+                if srcid in range(105, 129):
+                    continue
             if srcid in range(253, 269):
                 continue
 
@@ -1200,6 +1208,23 @@ def fse_fill_logic_tables(dev, fse, device):
                 for f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, *fuses in fse[ttyp]['longval'][ltable]:
                     table[(f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15)] = {fuse.fuse_lookup(fse, ttyp, f, device) for f in unpad(fuses)}
 
+# Which HCLK block a cell belongs to, or -1 for "none".
+#
+# The 25A form below is a *region* classifier (every cell of the die is
+# assigned to one of the four blocks); it is kept verbatim because the GW5A-25A
+# chipdb is a Phase-0 family-regression baseline
+# (sha256 6311219d52b996b8431d573cd5c547426370db00852aed285033a19a5518c3ca)
+# and must stay byte-identical.
+#
+# Every other measured device is data-driven off _gw5a_hclk_locs: a cell is a
+# block cell iff it is one of the measured block locations.  Its only two
+# consumers -- gw5_make_hclk_pips' table-48 walk and legacy/gowin_pack.py's
+# do_gw5_ihclk -- only ever look at cells that carry table 48, and on the
+# GW5AST-138C the eleven table-48 cells are exactly the six blocks plus five
+# inter-HCLK *bridge* cells ((63,0) (63,181) (108,0) (108,118) (108,181),
+# MEASURED in $OTC/evidence/hclk/topology-138c.md section 4).  The bridge cells
+# carry inter-HCLK wires only (srcid >= gw5_hclk_wire_offset), which the walk's
+# intra-HCLK branches never touch, so leaving them at -1 loses nothing.
 def gw5_hclk_idx(dev, device, row, col):
     if device == 'GW5A-25A':
         if row == 0:
@@ -1213,6 +1238,9 @@ def gw5_hclk_idx(dev, device, row, col):
         if col == 0:
             return 2
         return 3
+    for hclk_idx, hclk_loc in _gw5a_hclk_locs.get(device, {}).items():
+        if hclk_loc == (row, col):
+            return hclk_idx
     return -1
 
 # Table 48 describes the HCLK wire connections, but the problem is that it also
@@ -1223,13 +1251,28 @@ def gw5_hclk_idx(dev, device, row, col):
 def gw5_hclk_wire_offset(device):
     return {'GW5A-25A': 187, 'GW5AST-138C': 187}[device]
 
+# The inter-HCLK wires occupy the band range(offset, offset + 4 * N) of the
+# same table 48 (see gw5_hclk_wire_offset above), so N is fixed by the highest
+# inter-HCLK source id that any HCLK cell's table 48 mentions:
+#     N = (max_inter_hclk_srcid - offset + 1) // 4
+# GW5AST-138C: max srcid 338 -> (338 - 187 + 1) // 4 == 38.
+# GW5A-25A:    max srcid 446 -> (446 - 187 + 1) // 4 == 65, which reproduces
+# the in-tree value with no residue, so the derivation is calibrated.
+# Measured in $OTC/evidence/hclk/topology-138c.md (P1.T04), sections 4 and 5.
+# No .get() default: a device nobody has measured must still raise.
 def gw5_ihclk_wire_num(device):
-    return {'GW5A-25A': 65}[device]
+    return {'GW5A-25A': 65, 'GW5AST-138C': 38}[device]
 
+# The number of HCLK blocks is whatever the device's measured block table
+# holds -- 4 on the GW5A-25A, 6 on the GW5AST-138C (MEASURED twice over, see
+# $OTC/evidence/hclk/topology-138c.md sections 1-3).  Devices nobody has
+# measured keep the historical optimistic 6 rather than raising, because this
+# is also called on the pre-5A path.
 def gw5_get_num_of_hclks(device):
-    if device == 'GW5A-25A':
-        return 4;
-    return 6
+    locs = _gw5a_hclk_locs.get(device)
+    if locs is None:
+        return 6
+    return len(locs)
 
 # These cells do contain IOLOGIC
 def gw5_create_hclk_iol_pip(dev, device, row, col):
@@ -1244,10 +1287,12 @@ def gw5_create_hclk_iol_pip(dev, device, row, col):
             return row not in {2, 10, 27}
     return False
 
+# The cell that carries a block's logic->HCLK entry wires is the block cell
+# itself, so this is _gw5a_hclk_locs -- the 25A literal it used to hold was a
+# duplicate of that table. Reading the one table keeps the 25A byte-identical
+# and gives every measured device its blocks for free.
 def gw5_logic_to_hclk_wires(device):
-    if device == 'GW5A-25A':
-        return {0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)}
-    return {}
+    return _gw5a_hclk_locs.get(device, {})
 
 def make_hclk_pip(dev, hclk_idx, row, col, src, dest, fuses = set()):
     dev.hclk_pips.setdefault((row, col), {}).setdefault(dest, {}).update({src: fuses})
@@ -1323,10 +1368,12 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
     # default PIPs - The tables for the GW5A series do not include
     # descriptions of the default PIPs. So we add them manually by placing
     # them in cell (0, 0) — this works because the default PIP has no fuse.
-    # XXX This section will need to be modified for the 138C—it has more HCLKs
+    # The block count comes from the device's measured block table, so a
+    # six-block device gets six sets of defaults, not four.
     row = 0
     col = 0
-    for hclk_idx in range(4):
+    num_hclks = gw5_get_num_of_hclks(device)
+    for hclk_idx in range(num_hclks):
         for j in range(4):
             # make pip HCLKxy <- HCLK_MUX_ALPHAxy
             src = f'HCLK_MUX_ALPHA{hclk_idx}{j}'
@@ -1366,7 +1413,7 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
 
 
     # Epsilon defaults
-    for i in range(4):
+    for i in range(num_hclks):
         mk_hclk_pip(i, row, col, f'HCLK_MUX_EPSILON{i}0', f'HCLK_BUF_AI{i}0')
         mk_hclk_pip(i, row, col, f'HCLK_MUX_EPSILON{i}2', f'HCLK_BUF_AI{i}1')
         mk_hclk_pip(i, row, col, f'HCLK_MUX_EPSILON{i}4', f'HCLK_BUF_AI{i}2')
@@ -1450,8 +1497,17 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
 # since it is unclear whether there is a table or whether it will be necessary
 # to experimentally connect the oscillator to the pins and see which route the
 # IDE chooses.
-def gw5_make_pin_to_hclk(dev):
-    pin_hclk_wire = [ {'row': 36, 'col': 11, 'wire': 'F5', 'hclk_idx': 1, 'hclk_wire_idx': 311} ]
+# The one entry is a GW5A-25A / TangPrimer25k board fact (cell (36,11), the pin
+# the external quartz is soldered to), so it is keyed by device: applying it to
+# any other die puts a node on a cell that has nothing to do with that die's
+# HCLK block 1.  On the GW5AST-138C (109x182) it produced exactly one spurious
+# HCLK1_* node and no pip; measuring the 138C's own pin->HCLK routes is Phase 3
+# (spec S10/S12), which is where a 'GW5AST-138C' key would be added.
+_gw5_pin_to_hclk = {
+    'GW5A-25A': [ {'row': 36, 'col': 11, 'wire': 'F5', 'hclk_idx': 1, 'hclk_wire_idx': 311} ],
+}
+def gw5_make_pin_to_hclk(dev, device):
+    pin_hclk_wire = _gw5_pin_to_hclk.get(device, [])
     for node_desc in pin_hclk_wire:
         row = node_desc['row']
         col = node_desc['col']
@@ -1475,6 +1531,95 @@ def gw5_make_pin_to_hclk(dev):
     row, col = 36, 27
     dev.hclk_pips.setdefault((row, col), {}).setdefault(wnames.hclknames[211], {}).update({wnames.hclknames[318]: set()})
     """
+
+
+# HCLK -> global-clock backbone wires, MEASURED per (device, hclk block, wire).
+#
+# On the GW5A-25A the backbone is the sixteen {T,B,R,L}BDHCLK{0..3} wires named
+# in clknames_5a25a, and four dedicated *gate cells* (ttyp 410/393/187/257, at
+# (0,59) (36,46) (27,91) (10,0)) carry the HCLK_TO_GCLK -> BDHCLK fuses in their
+# own table 48.  gw5_make_hclk_to_clk_gates below is written to that shape.
+#
+# The GW5AST-138C is NOT that shape.  Measured on this box (P1.T08c), from the
+# shipped .fse and from four vendor bitstreams:
+#
+#   1. No cell of the 138C has a table-48 row whose source is in {25,27,28,29}
+#      (HCLK_TO_GCLK0..3) and whose destination is a clock-network wire.  The
+#      only such rows are the six HCLK block cells' own {25,27,28,29} -> {34..37},
+#      which the 25A block cells have too.  There is no gate cell on this device
+#      and the HCLK-block -> clock-mux hop carries no fuse at all.
+#   2. The device therefore has no sixteen-wire BDHCLK band to name.  A block's
+#      four CLKDIV outputs surface on the central clock mux as four clock wires
+#      drawn from TWO separate bands, not one contiguous sixteen.
+#   3. The clock-mux pips that select them live in table 38 (cells (54,88) and
+#      (54,93)), which fse_clock_pips_138 does not read -- it reads only 90/91 --
+#      and in the 164..236 span that the same function discards as "longwires".
+#
+# MEASURED (P1.T08d), with the vendor's own placement handle: SUG1018 sec 2.9
+# "HCLK Primitive Constraints" -- `INS_LOC "<inst>" {LEFT,RIGHT,BOTTOM}SIDE[0~7]`
+# pins one CLKDIV to one lane of one block on the GW5A(S)(T)-138.  Twenty-four
+# positions, one single-CLKDIV vendor run each, decoded two ways per run: the
+# block cell's lit table-48 HCLK_MUX_BETA0i row names (block, lane), and the
+# central clock mux's lit table-38 row names the clock wire.  That fixes the
+# side/index convention too -- LEFTSIDE[0..3] = block 0, [4..7] = block 2;
+# RIGHTSIDE[0..3] = 1, [4..7] = 3; BOTTOMSIDE[0..3] = 4, [4..7] = 5 -- and it
+# reproduces P1.T08c's independently measured block-5 row exactly.
+#
+#   block 2 (81,0)    lanes 0..3 -> 105, 106, 220, 221
+#   block 4 (108,64)  lanes 0..3 -> 107, 108, 222, 223
+#   block 5 (108,117) lanes 0..3 -> 109, 110, 224, 225   (== P1.T08c)
+#   block 3 (81,181)  lanes 0..3 -> 111, 112, 226, 227
+#
+# Two wires per lane-pair from each of two disjoint bands, 105..112 and
+# 220..227, ordered by block as [2, 4, 5, 3].  Every one of them is discarded
+# by fse_clock_pips_138's "unknown wires" (105..128) or "longwires" (164..236)
+# filter, which is why no CLKDIV could route before -- see
+# gw5_hclk_clk_wire_ids.
+#
+# Blocks 0 (27,0) and 1 (27,181) -- the two TOP-half blocks -- are ABSENT, not
+# guessed.  Their eight lanes were run too (LEFTSIDE[0..3], RIGHTSIDE[0..3])
+# and every one of them lights exactly one central-mux row, the same one:
+# SPINE16 <= BRPLL0CLK0 (clknames 101).  A confirming staircase of 2, 3 and 4
+# CLKDIVs all pinned inside block 0 still lights only that single row, so the
+# top-half blocks do not surface per-lane on the central clock mux at all and
+# 101 cannot be a bijection.  Their escape mechanism is unidentified; a design
+# placed in block 0 or 1 therefore still has no modelled clock escape.
+_gw5a_hclk_to_clk = {
+    'GW5AST-138C': { 2: {0: 105, 1: 106, 2: 220, 3: 221},
+                     3: {0: 111, 1: 112, 2: 226, 3: 227},
+                     4: {0: 107, 1: 108, 2: 222, 3: 223},
+                     5: {0: 109, 1: 110, 2: 224, 3: 225} },
+}
+
+def gw5_hclk_clk_wire_ids(device):
+    """Every clock-network wire id an HCLK block of `device` escapes onto.
+
+    Used by fse_clock_pips_138 to let exactly the measured escape wires
+    through the two "longwire"/"unknown" source filters and nothing else, so a
+    device with no measured table (the GW5A-25A, every pre-5A part) keeps the
+    filters it had.
+    """
+    return {wid for lanes in _gw5a_hclk_to_clk.get(device, {}).values()
+            for wid in lanes.values()}
+
+
+def gw5_make_hclk_to_clk_nodes(dev, device):
+    """Join each block's CLKDIV output wire to its clock-network wire.
+
+    MEASURED (P1.T08d): on the GW5AST-138C the HCLK-block -> central-clock-mux
+    hop carries no fuse -- see the comment on _gw5a_hclk_to_clk -- so it is a
+    Himbaechel *node*, not a pip.  The clock wire is already a node of the same
+    name: fse_create_5a138_clocks creates it in the bridge cells (54,88)/(54,93)
+    where the table-38 pip muxes it onto a SPINE.  add_node merges the two.
+
+    Without this the CLKDIV output wire is an island and nextpnr reports
+    "Failed to route net ... from X..Y../CLKDIV_O.. using dedicated routing".
+    """
+    for hclk_idx, lanes in sorted(_gw5a_hclk_to_clk.get(device, {}).items()):
+        row, col = _gw5a_hclk_locs[device][hclk_idx]
+        for lane, clk_id in sorted(lanes.items()):
+            add_node(dev, wnames.clknames[clk_id], "GLOBAL_CLK", row, col,
+                     f'CLKDIV_O{hclk_idx}{lane}')
 
 
 # HCLK to global clock network gates
@@ -1538,8 +1683,55 @@ def gw5_make_hclk_to_clk_gates(dev, device, fse, dat: Datfile):
 # The GW5A series has a different CLKDIV/CLKDIV2 configuration—each of the four
 # wires in a single HCLK block has its own dedicated CLKDIV/CLKDIV2. The inputs
 # for CLKDIV2 are HCLK_BUF_BO.
-_gw5a_hclk_locs = { 'GW5A-25A': { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)} }
+# GW5AST-138C: six blocks, MEASURED (two independent instruments -- the .fse
+# table-48 classifier and a vendor presence diff) and recorded in
+# $OTC/evidence/hclk/topology-138c.md (P1.T04).  Indices are the measured
+# (row, col) sort order; the five inter-HCLK *bridge* cells that also carry
+# table 48 -- (63,0) (63,181) (108,0) (108,118) (108,181) -- are deliberately
+# NOT here: they hold no CLKDIV/CLKDIV2.
+_gw5a_hclk_locs = { 'GW5A-25A':    { 0: (0, 64), 1: (36, 27), 2: (1, 0), 3: (34, 91)},
+                    'GW5AST-138C': { 0: (27, 0), 1: (27, 181), 2: (81, 0),
+                                     3: (81, 181), 4: (108, 64), 5: (108, 117)} }
+# CLKDIV/CLKDIV2 control-pin wires, per device and per wire index within the
+# block.  These are ordinary fabric wires of the HCLK cell, not table-48 HCLK
+# wires, so they cannot be read out of the .fse; the 25A values are the ones
+# the maintainer traced.
+# GW5AST-138C: `clkdiv_resetn` and `clkdiv_calib` are MEASURED (P1.T27, six
+# vendor compiles of a single CLKDIV pinned lane by lane, `$OTC/evidence/
+# dhcen/lane-138c.md`): the vendor drives lane `i`'s RESETN over `D<4+i>` and
+# its CALIB over the assumed wire.  The `C4..C7` carried over from the 25A was
+# wrong, and not harmlessly so -- `C5` and `C7` are the CEN wires of DHCE
+# sites 1 and 2, so a design with both a CLKDIV and a DHCE on those lanes made
+# nextpnr fail with two arcs on one sink wire.  `clkdiv2_resetn` is still the
+# ASSUMED 25A row (no CLKDIV2 point in that campaign).
+_gw5a_hclk_ctrl_wires = {
+    'GW5A-25A':    {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
+                    'clkdiv_resetn':  ['C4', 'C5', 'C6', 'C7'],
+                    'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
+    'GW5AST-138C': {'clkdiv2_resetn': ['B2', 'B3', 'B4', 'B5'],
+                    'clkdiv_resetn':  ['D4', 'D5', 'D6', 'D7'],
+                    'clkdiv_calib':   ['B6', 'B7', 'C0', 'C1']},
+}
+
+# Which die half a block sits in -- the two-half half of the "N blocks x two
+# halves" model.  Derived from the block's own row against the grid the .fse
+# describes, so it needs no per-device literal: the 138C's six blocks come out
+# 2 top / 4 bottom (rows 27, 27, 81, 81, 108, 108 of 109), which is the
+# MEASURED partition -- the 3/3 split assumed by the roadmap is refuted
+# ($OTC/evidence/hclk/topology-138c.md section 6).
+#
+# It is deliberately NOT stored in extra_func: it is a pure function of data
+# the database already carries (the block's row and dev.rows), and writing it
+# into every GW5A device's extra_func would change the GW5A-25A chipdb, whose
+# sha256 6311219d52b996b8431d573cd5c547426370db00852aed285033a19a5518c3ca is a
+# Phase-0 family-regression baseline. Consumers call this instead.
+def gw5_hclk_half(dev, row):
+    return 'top' if row * 2 < dev.rows - 1 else 'bottom'
+
 def gw5_add_hclk_bels(dat, dev, device):
+    ctrl = _gw5a_hclk_ctrl_wires[device]
+    # The number of blocks is whatever the device's measured table holds --
+    # four on the 25A, six on the 138C.  Each block still has four wires.
     for hclk_idx, hclk_loc in _gw5a_hclk_locs[device].items():
         row, col = hclk_loc
         extra = dev.extra_func.setdefault((row, col), {})
@@ -1555,7 +1747,7 @@ def gw5_add_hclk_bels(dat, dev, device):
             # mechanism for pre-5A chips in nextpnr will not be triggered
             #dev[row, col].bels[f'CLKDIV2{i}'] = Bel()
             portmap = clkdiv2.setdefault('inputs', {})
-            portmap['RESETN'] = f'B{i + 2}'  # GW5A-25A 0-B2, 1-B3, 2-B4, 3-B5
+            portmap['RESETN'] = ctrl['clkdiv2_resetn'][i]
             portmap['HCLKIN'] = f'CLKDIV2_HCLKIN{hclk_idx}{i}'
             if i % 2 == 0:
                 src = f'HCLK_BUF_BO{hclk_idx}{i}'
@@ -1575,8 +1767,8 @@ def gw5_add_hclk_bels(dat, dev, device):
             clkdiv = extra_clkdiv.setdefault('bels', {}).setdefault(i, {})
             portmap = clkdiv.setdefault('inputs', {})
             portmap['HCLKIN'] = f'CLKDIV_I{hclk_idx}{i}'
-            portmap['RESETN'] = f'C{i + 4}'  # GW5A-25A 0-C4, 1-C5, 2-C6, 3-C7
-            portmap['CALIB']  = ['B6', 'B7', 'C0', 'C1'][i]  # GW5A-25A
+            portmap['RESETN'] = ctrl['clkdiv_resetn'][i]
+            portmap['CALIB']  = ctrl['clkdiv_calib'][i]
             make_hclk_pip(dev, hclk_idx, row, col, f'HCLK_MUX_ALPHA{hclk_idx}{i}', portmap['HCLKIN'])
 
             portmap = clkdiv.setdefault('outputs', {})
@@ -1584,6 +1776,10 @@ def gw5_add_hclk_bels(dat, dev, device):
             src = portmap['CLKOUT']
             add_node(dev, f'HCLK{hclk_idx}_{src}', "GLOBAL_CLK", row, col, src)
 
+    # The CLKDIV output wires exist now, so the fuseless hop onto the clock
+    # network can be joined to them (no-op for a device with no measured
+    # _gw5a_hclk_to_clk table, so the GW5A-25A is untouched).
+    gw5_make_hclk_to_clk_nodes(dev, device)
     return
 
 # HCLK for Himbaechel
@@ -1967,7 +2163,7 @@ def _iter_edge_coords(dev):
 
 def add_hclk_bels(dat, dev, device):
     #Stub for parts that don't have HCLK bel support yet
-    if device in {'GW5A-25A'}:
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
         gw5_add_hclk_bels(dat, dev, device)
         return
     if device not in ("GW2A-18", "GW2A-18C", "GW1N-9", "GW1N-9C", "GW1N-1", "GW1NZ-1", "GW1NS-4", "GW1N-4"):
@@ -2078,8 +2274,8 @@ def add_hclk_bels(dat, dev, device):
 _global_wire_prefixes = {'PCLK', 'TBDHCLK', 'BBDHCLK', 'RBDHCLK', 'LBDHCLK',
                          'TLPLL', 'TRPLL', 'BLPLL', 'BRPLL'}
 def fse_create_hclk_nodes(dev, device, fse, dat: Datfile):
-    if device in {'GW5A-25A'}:
-        gw5_make_pin_to_hclk(dev)
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
+        gw5_make_pin_to_hclk(dev, device)
         gw5_make_hclk_to_clk_gates(dev, device, fse, dat)
         gw5_make_hclk_pips(dev, device, fse, dat)
         return
@@ -2285,21 +2481,148 @@ def fse_create_adc(dev, device, fse, dat):
 # A slot with a specific number is responsible for a fixed primitive—for
 # example, slot 6 is the left PLL, slot 8 is the lower PLL.
 # Only the slots that are used are added to the binary image.
+# Per-device PLL site table, `{device: {(row, col, slot_idx, io_table)}}`.
+#
+# `GW5A-25A` is the original hardcoded literal, moved here unchanged (same set
+# contents, hence the same iteration order and a byte-identical chipdb).
+#
+# `GW5AST-138C` is NOT a bigger 25A, and the differences are measured, not
+# assumed (`$OTC/evidence/plla/sites-138c.md`, `P1.T17`):
+#
+#  * **there are no slots.** The `.fse` carries no pseudo-ttyp >= 1024 and no
+#    `drpfuse` header table -- the parse reaches EOF exactly, so this is an
+#    absence and not a mis-read. The PLL configuration fuses are ordinary
+#    `shortval[ttyp]['PLL']` entries in three horizontally adjacent grid tiles
+#    per site. `slot_idx` on this device is therefore a **site index**
+#    (0..11, row-major over the anchors), kept only because it is what
+#    `get_slot_idx`/`extra_func` already carry and what makes the twelve bels
+#    distinguishable. The packer's `get_pll_slot_fuses`/`set_pll_slot_fuses`
+#    path still needs a per-device branch before a 138C PLLA can be *packed*;
+#    this table gives nextpnr the twelve bels, which is what `V14` asserts.
+#  * **the `.dat` names no site.** All eight `Pll{L,R}{T,B}{Ins,Outs}` tables
+#    are entirely `0xffff`, against 36/32 populated rows each on the 25A, so
+#    every 138C entry is `old_style` and the port wires come from the
+#    position-relative `PllIn`/`PllInDlt` pair.
+#  * **that pair is partial.** The MDIO/DRP rows (`MDCLK`, `MDOPC*`,
+#    `MDAINC`, `MDWDI*`, `MDRDO*`) are `-1` on this device -- consistent with
+#    it having no DRP path at all -- so the lookup below skips absent rows
+#    instead of reaching `wirenames[-1]` and dying with a bare `KeyError`.
+#
+# The vendor cell type on this device is `PLL`, not `PLLA`: an actual `PLLA`
+# instantiation is refused with "ERROR (RP0008) : There is no PLLA resource in
+# current device" (P1.T19, run pll-trace-pilot-clocking_pll_trace-0000), and
+# UG306-1.0.1E Table 5-11 lists GW5A-25 as the only PLLA part. `PLL`
+# (prim_sim.v:13333) has no MDIO/DRP ports and adds the dynamic-divider ports
+# ENCLKn/FBDSEL/IDSEL/MDSEL/ODSELn/DTn, which is exactly the shape of this
+# device's `.dat`. The 23 inputs and 8 outputs built below are the subset of
+# `PLL`'s ports that `_plla_inputs`/`_plla_outputs` happen to index; the
+# dynamic-divider ports occupy the other ~108 populated `PllIn` rows at
+# indices apicula has no table for, and are a recorded gap, not a silent one.
+#
+# The anchor is the lowest-column tile of each three-tile run. Rows 27 and 81
+# start one column further in than rows 45 and 63 because column 0 of those
+# rows is taken by an HCLK block (`P1.T04`); the asymmetry is measured.
+_gw5a_pll_slots = {
+    'GW5A-25A': {(27, 0, 6, 'PllLB'), (27, 91, 2, 'PllRB'), (0, 0, 5, 'PllLT'), (0, 91, 3, 'PllRT'), (0, 45, 4, 'old_style'), (36, 45, 8, 'old_style')},
+    'GW5AST-138C': {
+        # slot_idx is the VENDOR SITE INDEX, traced one site per oracle run in
+        # P1.T19: a single hard PLL constrained with INS_LOC "dut_pll"
+        # PLL_<side>[<n>], whose .fs then carries fuses in exactly one of the
+        # twelve three-tile groups and none in the other eleven. The mapping
+        # below is that bijection, measured, not the row-major order P1.T17
+        # had to assume ($OTC/evidence/plla/sites-138c.md, section 8).
+        ( 27,   1,  0, 'old_style'),   # PLL_L[0]
+        ( 45,   0,  1, 'old_style'),   # PLL_L[1]
+        ( 63,   0,  2, 'old_style'),   # PLL_L[2]
+        ( 81,   1,  3, 'old_style'),   # PLL_L[3]
+        ( 27, 177,  4, 'old_style'),   # PLL_R[0]
+        ( 45, 178,  5, 'old_style'),   # PLL_R[1]
+        ( 63, 178,  6, 'old_style'),   # PLL_R[2]
+        ( 81, 177,  7, 'old_style'),   # PLL_R[3]
+        (108,  28,  8, 'old_style'),   # PLL_B[0]
+        (108,  32,  9, 'old_style'),   # PLL_B[1]
+        (108, 146, 10, 'old_style'),   # PLL_B[2]
+        (108, 150, 11, 'old_style'),   # PLL_B[3]
+    },
+}
+
+
+def _pll_old_style_present(dat, table, idx):
+    """True when the position-relative PLL port table describes port `idx`.
+
+    Only the **wire index** decides. The companion `...Dlt` entry is a signed
+    column offset and `-1` is a legal value for it: the GW5A-25A `.dat` gives
+    `MDRDO4`-`MDRDO7` `PllOut` wires 54/49/39/38 at `PllOutDlt == -1`, i.e.
+    one column to the left. Testing the delta would drop four real 25A ports
+    and change that device's chipdb.
+
+    The GW5AST-138C `.dat` sets **both** fields to `-1` for every MDIO/DRP
+    port (`MDCLK`, `MDOPC0-1`, `MDAINC`, `MDWDI0-7`, `MDRDO0-7`) -- that
+    device has no DRP path (`$OTC/evidence/plla/sites-138c.md` §4) -- and an
+    unguarded lookup reaches `wirenames[-1]`, a bare `KeyError`.
+    """
+    return dat.gw5aStuff[table][idx] != -1
+
+
+
+#: The primitive each device's PLL sites instantiate.  The GW5A-25A's is the
+#: `PLLA` this family was first modelled around; the GW5AST-138C has **no**
+#: `PLLA` at all and its primitive is `PLL`, with a different port set and a
+#: different VCO band (`D96`, vendor `RP0008` "There is no PLLA resource in
+#: current device").  It is carried in the database rather than inferred by
+#: the consumer, so nextpnr's bel type follows the device instead of the
+#: family.
+_gw5a_pll_primitive = {
+    'GW5A-25A': 'PLLA',
+    'GW5AST-138C': 'PLL',
+}
+
+#: The vendor's symbolic placement handle for each site, keyed by `slot_idx`.
+#: `INS_LOC "<inst>" PLL_L[0];` is how the vendor pins a hard PLL to a site
+#: (SUG1018 sec 2.9), and the bijection below is the one `P1.T19` MEASURED,
+#: one oracle run per site (`$OTC/evidence/plla/sites-138c.md` §8) -- not a
+#: row-major convention.  Devices absent here expose no such handle and their
+#: sites keep the plain `PLL` bel name.
+_gw5a_pll_macros = {
+    'GW5AST-138C': {
+        0: 'PLL_L[0]', 1: 'PLL_L[1]', 2: 'PLL_L[2]', 3: 'PLL_L[3]',
+        4: 'PLL_R[0]', 5: 'PLL_R[1]', 6: 'PLL_R[2]', 7: 'PLL_R[3]',
+        8: 'PLL_B[0]', 9: 'PLL_B[1]', 10: 'PLL_B[2]', 11: 'PLL_B[3]',
+    },
+}
+
+
 def fse_create_slot_plls(dev, device, fse, dat):
-    if device not in {"GW5A-25A"}:
+    if device not in _gw5a_pll_slots:
         return
-    for row, col, slot_idx, io_table in {(27, 0, 6, 'PllLB'), (27, 91, 2, 'PllRB'), (0, 0, 5, 'PllLT'), (0, 91, 3, 'PllRT'), (0, 45, 4, 'old_style'), (36, 45, 8, 'old_style')}:
+    for row, col, slot_idx, io_table in _gw5a_pll_slots[device]:
         extra = dev.extra_func.setdefault((row, col), {})
         pll = extra.setdefault('pll', {})
         pll['slot_idx'] = slot_idx
+        pll['primitive'] = _gw5a_pll_primitive.get(device, 'PLLA')
+        macro = _gw5a_pll_macros.get(device, {}).get(slot_idx)
+        if macro is not None:
+            pll['macro'] = macro
+        if 'PLL' in dev.shortval[dev.grid[row][col]]:
+            # The unpacker walks `tile.bels`, so a site with no bel there
+            # decodes to nothing at all -- which is what made a GW5A `PLL`
+            # invisible to `gowin_unpack` even though its fuses were in an
+            # ordinary `shortval['PLL']` table (`P1.T41`).  The three tiles of a
+            # site share their ttyp with no other function, so the bel belongs
+            # to the anchor's tile type and to nothing else.
+            dev[row, col].bels.setdefault('PLL', Bel())
         portmap = pll.setdefault('inputs', {})
         pll_idx = slot_idx
         # inputs
         wire_type = 'PLL_I'
         for idx, nam in _plla_inputs:
             if io_table == 'old_style':
+                if not _pll_old_style_present(dat, 'PllIn', idx):
+                    continue
                 wire_idx, wrow, wcol = dat.gw5aStuff['PllIn'][idx], row + 1, col + 1 + dat.gw5aStuff['PllInDlt'][idx]
             else:
+                if not _port_row_present(dat.gw5aStuff[io_table + 'Ins'][idx]):
+                    continue
                 wire_idx, wrow, wcol = dat.gw5aStuff[io_table + 'Ins'][idx]
             wrow -= 1
             wcol -= 1
@@ -2334,6 +2657,11 @@ def fse_create_slot_plls(dev, device, fse, dat):
         portmap = pll.setdefault('outputs', {})
         for idx, nam in _plla_outputs:
             wire_type = 'PLL_O'
+            if io_table == 'old_style':
+                if not _pll_old_style_present(dat, 'PllOut', idx):
+                    continue
+            elif not _port_row_present(dat.gw5aStuff[io_table + 'Outs'][idx]):
+                continue
             portmap[nam] = f'MPLL{nam}'
             dev.wire_delay[portmap[nam]] = 'X0'
             if io_table == 'old_style':
@@ -2410,10 +2738,136 @@ _dhcen_ce = {
          'B' : [(54, 27, 'A2'), (54, 27, 'A3'), (54, 27, 'D2'), (54, 27, 'D3'), (54, 27, 'D0'), (54, 27, 'D1')],
          'L' : [(27,  0, 'A2'), (27,  0, 'A3'), (27,  0, 'D2'), (27,  0, 'D3'), (27,  0, 'D0'), (27,  0, 'D1')],
          'T' : [( 0, 27, 'A2'), ( 0, 27, 'A3'), ( 0, 27, 'D2'), ( 0, 27, 'D3'), (  0,27, 'D0'), ( 0, 27, 'D1')]},
+        # GW5A is different in three ways that the table above cannot express,
+        # so it gets its own builder (`gw5a_create_dhce`) rather than a shape
+        # this loop can consume; all three are MEASURED, not assumed:
+        #  * the primitive is not called DHCEN.  GowinSynthesis answers
+        #    `ERROR (EX3937) : Instantiating unknown module 'DHCEN'` and
+        #    `IDE/ipcore/DHCEN/dhcen.ipspec` lists no GW5* device.  The GW5A
+        #    primitive table `IDE/bin/prim_syns/gw5a/primitive.xml` spells it
+        #    DHCE(CLKIN, CEN, CLKOUT) -- the enable port is CEN, not CE.
+        #  * the sites are per HCLK *block*, not per side.  The GW5AST-138C
+        #    has six HCLK blocks and no top-edge block, and the vendor's own
+        #    `Clock Resource Usage Summary` reads `DHCE 24/24` with a 25th
+        #    instance refused (`PA2017`): 6 blocks x 4, i.e. eight entries on
+        #    each of L/R/B and no 'T' key at all.
+        #  * there are no interbank (HCLK_BANK_OUT) entries: the vendor
+        #    allocates exactly four DHCE per block and refuses the fifth, so
+        #    the `idx >= 4` half of the pre-5A rule has nothing to bind to.
+        # `idx` here is the vendor's allocation order *within a block*, read
+        # off an incremental sweep, one instance at a time.
+        # Evidence: `$OTC/evidence/dhcen/ce-wires-138c.md` and `trace-138c.md`
+        # (P1.T25), 28 vendor compiles.
+        'GW5AST-138C':
+        {'R' : [( 27, 181, 'C2'), ( 27, 181, 'C5'), ( 27, 181, 'C7'), ( 27, 181, 'D2'),
+                ( 81, 181, 'C2'), ( 81, 181, 'C5'), ( 81, 181, 'C7'), ( 81, 181, 'D2')],
+         'B' : [(108,  64, 'C2'), (108,  64, 'C5'), (108,  64, 'C7'), (108,  64, 'D2'),
+                (108, 117, 'C2'), (108, 117, 'C5'), (108, 117, 'C7'), (108, 117, 'D2')],
+         'L' : [( 27,   0, 'C2'), ( 27,   0, 'C5'), ( 27,   0, 'C7'), ( 27,   0, 'D2'),
+                ( 81,   0, 'C2'), ( 81,   0, 'A5'), ( 81,   0, 'C7'), ( 81,   0, 'A4')]},
         }
+
+# Devices whose DHCEN table is the GW5A one (primitive `DHCE`, port `CEN`,
+# four sites per HCLK block).  Kept as a set rather than a family test so that
+# adding a GW5A device is a deliberate act with its own traced table.
+_gw5a_dhce_devices = {'GW5AST-138C'}
+#: Local table-48 destination id of the first of an HCLK block's four input
+#: multiplexers.  A block's multiplexers are the four consecutive ids
+#: `_GW5A_HCLK_IN_MUX0 .. +3`, offset per block by `gw5_hclk_wire_offset`, so
+#: on the GW5AST-138C block 0 is 64..67, block 1 251..254 ... block 5 999..1002.
+#: MEASURED (P1.T26, `$OTC/evidence/dhcen/fuse-138c.md`): each of those four
+#: destinations is a three-source mux whose three source fuse sets share
+#: exactly one fuse, and instantiating the block's n-th DHCE sets exactly that
+#: shared fuse of the n-th multiplexer and nothing else in the block.  That
+#: also *confirms* P1.T25's hypothesis that the vendor's allocation order
+#: inside a block is the multiplexer order.
+_GW5A_HCLK_IN_MUX0 = 64
+_GW5A_DHCE_PER_BLOCK = 4
+
+def gw5a_dhce_gate_mux(dev, device, row, col, idx):
+    """The HCLK input multiplexer whose enable fuse DHCE `idx` sets.
+
+    A destination of the block's table-48 pip set, `_GW5A_HCLK_IN_MUX0 + idx`
+    offset per block.  Its own sources are dangling -- nothing in the modelled
+    fabric drives them -- so it names a fuse and never a route.
+    """
+    hclk_idx = gw5_hclk_idx(dev, device, row, col)
+    return wnames.hclknames[_GW5A_HCLK_IN_MUX0 + idx
+                            + hclk_idx * gw5_hclk_wire_offset(device)]
+
+def gw5a_dhce_lane_pip(dev, device, row, col, idx):
+    """The pip a clock gated by DHCE `idx` is routed over: lane `idx`'s own mux.
+
+    Returns `(dest, src)` -- a real pip of `dev.hclk_pips[row, col]`.  nextpnr
+    resolves the DHCEN wire->bel map by walking the *routed* path and comparing
+    each pip's destination wire against this one (`get_dhcen_bel`), so the
+    destination has to be a wire a route can reach.  The gate multiplexer
+    cannot be it; `HCLK_MUX_BETA<block><lane>` is the wire every clock entering
+    that lane lands on, and P1.T08d already uses it as the lane's identity.
+    `src` is the lowest-named of its sources: which one is picked does not
+    matter, only that the pip exists and its destination is the lane mux.
+    """
+    hclk_idx = gw5_hclk_idx(dev, device, row, col)
+    dest = f'HCLK_MUX_BETA{hclk_idx}{idx}'
+    srcs = dev.hclk_pips[row, col][dest]
+    return dest, sorted(srcs)[0]
+
+def gw5a_dhce_gate_fuses(hclk_pips, dest):
+    """The gate fuse of one HCLK input multiplexer: what all its sources share.
+
+    A GW5A HCLK input multiplexer is fused as one output-enable bit plus a
+    per-source select; the enable is therefore the intersection of the source
+    fuse sets, and it is the bit -- the only bit -- that a DHCE sets.
+    """
+    srcs = hclk_pips[dest]
+    if not srcs:
+        return set()
+    return set.intersection(*(set(f) for f in srcs.values()))
+
+def gw5a_create_dhce(dev, device):
+    """Create the GW5A `DHCE` bels: four per HCLK block cell.
+
+    One `extra_func[(row, col)]['dhcen']` entry per site, in the vendor's own
+    allocation order inside the block, so entry `idx` of a block gates that
+    block's `idx`-th HCLK input multiplexer.  The dict shape is the one
+    `gowin_arch_gen.create_extra_funcs` and `gowin_pack.get_dhcen_wire_side`
+    already consume, plus one key of its own:
+
+        {'pip': [tile, lane_dest, lane_src, side], 'gate': mux_dest,
+         'ce': cen_wire}
+
+    `ce` is the measured `CEN` wire (`P1.T25`).  `gate` is the input
+    multiplexer whose enable bit the site sets (`P1.T26`), and `pip` is the
+    lane multiplexer a gated clock is routed over (`P1.T27`) -- two different
+    wires, because the fuse-bearing one is unreachable by any route and the
+    routed one carries no fuse of the gate.  Site index is lane index: measured
+    on six vendor compiles across two blocks, a lone DHCE on lane `i` sets the
+    fuse of multiplexer `i` (`$OTC/evidence/dhcen/lane-138c.md`).  `gw5a` marks
+    the entry as belonging to this family so the fuse path does not reach for
+    the pre-5A `HCLK` shortval attributes, which this device's HCLK table does
+    not carry at all.
+    """
+    for side, ces in _dhcen_ce[device].items():
+        idx_in_block = {}
+        for row, col, wire in ces:
+            idx = idx_in_block.get((row, col), 0)
+            idx_in_block[(row, col)] = idx + 1
+            assert idx < _GW5A_DHCE_PER_BLOCK, (
+                f'{device}: more than {_GW5A_DHCE_PER_BLOCK} DHCE in block '
+                f'({row}, {col}) -- the vendor refuses the fifth')
+            dest, src = gw5a_dhce_lane_pip(dev, device, row, col, idx)
+            extra = dev.extra_func.setdefault((row, col), {})
+            extra.setdefault('dhcen', []).append(
+                {'pip': [f'X{col}Y{row}', dest, src, side],
+                 'gate': gw5a_dhce_gate_mux(dev, device, row, col, idx),
+                 'ce': wire, 'gw5a': True})
+
 def fse_create_dhcen(dev, device, fse, dat: Datfile):
     if device not in _dhcen_ce:
         print(f'No DHCEN for {device} for now.')
+        return
+    if device in _gw5a_dhce_devices:
+        gw5a_create_dhce(dev, device)
         return
     for side, ces in _dhcen_ce[device].items():
         for idx, ce_wire in enumerate(ces):
@@ -2586,7 +3040,7 @@ def fse_iologic(device, fse, ttyp):
         return bels
     if device in {'GW5A-25A'} and ttyp in {48, 51, 263, 392, 399}:
         return bels
-    if device in {'GW5AST-138AC'}:
+    if device in {'GW5AST-138C'}:
         return bels
     if 'shortval' in fse[ttyp].keys():
         if 21 in fse[ttyp]['shortval'].keys():
@@ -2757,12 +3211,232 @@ def get_clock_ins(device, dat: Datfile):
               for i in range(wnames.clknumbers['PCLKT0'], wnames.clknumbers['PCLKR1'] + 1)
             }
 
+# The DQCE and DCS hosts are found by their `fse['header']['grid'][61]` tile
+# type.  According to the Gowin Clock User Guide, the DQCE primitives sit
+# between the "spine" wires (in our terminology) and the central MUX which
+# selects the clock source for that spine.  The cells were found by
+# instantiating the primitive with its CE input on a button and tracing the
+# wires in the images the Gowin IDE generates; the CE pin turned out to depend
+# only on the spine number, and the cell only on the tile type.  On the pre-5A
+# dies the four types sit one per quadrant:
+#                          |
+#   quadrant 2   type 80   |   type 85  quadrant 1
+#  ------------------------+--------------------------
+#   quadrant 3   type 81   |   type 84  quadrant 4
+#                          |
+#: Quadrant -> tile type, the pre-5A arrangement.  Index is the quadrant.
+_dqce_quadrant_types = (85, 80, 81, 84)
+
+#: Devices that carry all four DQCE quadrants under the pre-5A arrangement.
+#: Every other pre-5A die has only the two `q >= 2` quadrants.
+_dqce_four_quadrant_devices = {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C'}
+
+#: MEASURED per-device `{quadrant: tile type}`, for dies whose clock plane is
+#: not the pre-5A 2x2 and whose quadrant set therefore cannot be derived from
+#: `_dqce_quadrant_types` at all.
+#:
+#: `GW5AST-138C` (P1.T28/T29, `$OTC/evidence/dqce/tiletypes-138c.md`): the six
+#: bridge tile types 80..85 all occur exactly once, at (54, 88)..(54, 93), but
+#: only two of those cells carry any SPINE multiplexer -- type 85 at (54, 93)
+#: drives SPINE8..13 and type 84 at (54, 88) drives SPINE16..21.  Those are
+#: exactly the six `dqce[j]` slots of quadrants 1 and 2 under the pre-5A spine
+#: formula `SPINE(q * 8 + j)`, and this die's clock plane is two halves, not
+#: four quadrants (`fse_create_5a138_clocks`): quadrant 1 is the top half and
+#: quadrant 2 the bottom.  Types 81, 82, 83 and 84 host no spine multiplexer,
+#: so a naive un-gating of the pre-5A loop would attach quadrants 2 and 3 to
+#: cells with nothing in them -- the silent mis-attachment `S9` guards against.
+_dqce_quadrants = {
+    'GW5AST-138C': {1: 85, 2: 80},
+}
+
+
+def dqce_quadrant_types(device):
+    """`{quadrant: tile type}` for every DQCE quadrant `device` really has."""
+    if device in _dqce_quadrants:
+        return _dqce_quadrants[device]
+    return {q: ttyp for q, ttyp in enumerate(_dqce_quadrant_types)
+            if q >= 2 or device in _dqce_four_quadrant_devices}
+
+
+# The DCS are hosted by the same cells, but their relationship with the
+# quadrants is different.  Generating images with the button on the clock
+# selection inputs (CLK0-3) and on SELFORCE gave the wire correspondence:
+#                                   |
+#   quadrant 2, spine14 dcs type 80 | quadrant 1, spine 6 dcs type 85
+#               spine15 dcs type 81 |             spine 7 dcs type 84
+#  -------------------------------------------------------------------
+#   quadrant 3, spine22 dcs type 80 | quadrant 4, spine 30 dcs type 85
+#               spine23 dcs type 81 |             spine 31 dcs type 84
+#                                   |
+#: Quadrant -> the tile types of its two DCS, in `dcs_idx` order.
+_dcs_quadrant_types = ((85, 84), (80, 81), (80, 81), (85, 84))
+
+#: Devices that carry all four DCS quadrants under the pre-5A arrangement.
+_dcs_four_quadrant_devices = {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C',
+                              'GW5A-25A'}
+
+#: MEASURED per-device `{quadrant: (tile type, tile type)}`.
+#:
+#: `GW5AST-138C` (P1.T31, `$OTC/evidence/dcs/ports-138c.md`): both DCS of a
+#: quadrant live in the SAME cell on this die -- (54, 93) carries P26A-D and
+#: P27A-D, (54, 88) carries P36A-D and P37A-D -- which is why the quadrants
+#: whose two types are equal index their `extra_func['dcs']` sub-entries by
+#: `dcs_idx` rather than by `q // 2` (see `fse_create_dcs`).
+_dcs_quadrants = {
+    'GW5AST-138C': {1: (85, 85), 2: (80, 80)},
+}
+
+
+def dcs_quadrant_types(device):
+    """`{quadrant: (tile type, tile type)}` for `device`'s DCS quadrants."""
+    if device in _dcs_quadrants:
+        return _dcs_quadrants[device]
+    return {q: types for q, types in enumerate(_dcs_quadrant_types)
+            if q >= 2 or device in _dcs_four_quadrant_devices}
+
+
+def _first_cell_of_type(dev, fse, ttyp):
+    """The first `(row, col)` whose grid-61 tile type is `ttyp`, or `None`."""
+    grid = fse['header']['grid'][61]
+    for row in range(dev.rows):
+        for col in range(dev.cols):
+            if ttyp == grid[row][col]:
+                return row, col
+    return None
+
+
+def fse_create_dqce(dev, device, fse):
+    """Create this device's DQCE sites, six per quadrant it actually has."""
+    if device in {'GW5A-25A'}:
+        return
+    for q, ttyp in dqce_quadrant_types(device).items():
+        cell = _first_cell_of_type(dev, fse, ttyp)
+        if cell is None:
+            continue
+        extra_func = dev.extra_func.setdefault(cell, {})
+        dqce_block = extra_func.setdefault('dqce', {})
+        for j in range(6):
+            dqce = dqce_block.setdefault(j, {})
+            dqce['clkin'] = f'SPINE{q * 8 + j}'
+            dqce['ce'] = ['A0', 'B0', 'C0', 'D0', 'A1', 'B1'][j]
+
+
+# GW5A series: tracing the wires showed that there is no system in their
+# arrangement; the inputs of one DCS can be strictly in one cell, or they can
+# be in five different ones.  And, as is traditional for this series, fuses can
+# be fragmented across many cells.  We solve the fuse issue simply by going
+# through all the cells and installing them where we find them in gowin_pack.
+# The wires are traced and compiled into a single table.  The location of the
+# Bels is no longer important, so they are assigned to the same place as in the
+# previous series.
+#: `{(quadrant, dcs_idx): [(col, wire), ...]}` -- row is always 18.  The first
+#: entry is SELFORCE, the remaining four are CLKSEL[0..3].
+gw5_dcs_inputs = {
+        (0, 0) : [(48, 'D7'), (44, 'D4'), (45, 'D7'), (46, 'D7'), (47, 'D7')],
+        (0, 1) : [(47, 'D2'), (47, 'D3'), (47, 'C3'), (47, 'B3'), (47, 'A3')],
+        (1, 0) : [(48, 'D6'), (44, 'C3'), (45, 'D6'), (46, 'D6'), (47, 'D6')],
+        (1, 1) : [(47, 'C1'), (47, 'C2'), (47, 'B2'), (47, 'A2'), (47, 'D1')],
+        (2, 0) : [(48, 'C6'), (44, 'A1'), (45, 'C6'), (46, 'C6'), (47, 'C6')],
+        (2, 1) : [(44, 'A5'), (47, 'A0'), (44, 'D5'), (44, 'C5'), (44, 'B5')],
+        (3, 0) : [(48, 'C7'), (44, 'B2'), (45, 'C7'), (46, 'C7'), (47, 'C7')],
+        (3, 1) : [(47, 'B0'), (47, 'B1'), (47, 'A1'), (47, 'D0'), (47, 'C0')],
+}
+
+
+def dcs_clkout_node(device, spine_idx):
+    """The clock-network node a DCS output joins.
+
+    On the pre-5A dies the spine wire *is* the node.  On a die whose clock
+    plane is split into halves fed from a bridge (`fse_create_5a138_clocks`),
+    the bridge cell's spine wires are not the network -- the half's
+    `CBRIDGEOUT_<half><n>` node is, and the DQCE-gated spines already belong to
+    theirs because they are multiplexer destinations the fse tables name.  A
+    DCS output is not a multiplexer destination, so joining it to a node of its
+    own would leave it an island: nextpnr packs and places the DCS and then
+    reports `Can't route the <clkout> network` (MEASURED, `p1t31-dcs-e1`).
+    """
+    if device not in _dcs_quadrants:
+        return spine_idx
+    spine = int(spine_idx[len('SPINE'):])
+    half, base = ('TOP', 8) if spine < 16 else ('BOTTOM', 16)
+    return f'CBRIDGEOUT_{half}{spine - base}'
+
+
+def fse_create_dcs(dev, device, fse):
+    """Create this device's DCS sites, two per quadrant it actually has."""
+    for q, types in dcs_quadrant_types(device).items():
+        # When a quadrant's two DCS share one cell the `(q, dcs_idx)` identity
+        # cannot be carried by the cell coordinate, so the sub-entry is keyed
+        # by `dcs_idx`; when they sit in two cells it is keyed the pre-5A way.
+        same_cell = types[0] == types[1]
+        for j in range(2):
+            cell = _first_cell_of_type(dev, fse, types[j])
+            if cell is None:
+                continue
+            row, col = cell
+            extra_func = dev.extra_func.setdefault(cell, {})
+            dcs_block = extra_func.setdefault('dcs', {})
+            dcs = dcs_block.setdefault(j if same_cell else q // 2, {})
+            spine_idx = f'SPINE{q * 8 + j + 6}'
+            dcs['clkout'] = spine_idx
+            clkout_node = dcs_clkout_node(device, spine_idx)
+            dev.nodes.setdefault(clkout_node, ("GLOBAL_CLK", set()))[1].add((row, col, spine_idx))
+            dcs['clk'] = []
+            for port in "ABCD":
+                wire_name = f'P{q + 1}{j + 6}{port}'
+                dcs['clk'].append(wire_name)
+                dev.nodes.setdefault(wire_name, ("GLOBAL_CLK", set()))[1].add((row, col, wire_name))
+            if device in {'GW5A-25A'}:
+                dcs['input_prefix'] = 'CLKIN'
+                w_col, wire = gw5_dcs_inputs[(q, j)][0]
+                if row == 18 and col == w_col:
+                    dcs['selforce'] = wire
+                else:
+                    # not our cell, make an alias
+                    dcs['selforce'] = f'DCS{q}{j}{wire}'
+                    # Himbaechel node
+                    dev.nodes.setdefault(f'X{col}Y{row}/DCS{q}{j}{wire}', ("DCS_I", {(row, col, dcs['selforce'])}))[1].add((row, w_col, wire))
+                dcs['clksel'] = []
+                for i, w_desc in enumerate(gw5_dcs_inputs[(q, j)][1:]):
+                    w_col, wire = w_desc
+                    if row == 18 and col == w_col:
+                        dcs['clksel'].append(wire)
+                    else:
+                        # not our cell, make an alias
+                        w_name = f'DCS{q}{j}{i}{wire}'
+                        dcs['clksel'].append(w_name)
+                        # Himbaechel node
+                        dev.nodes.setdefault(f'X{col}Y{row}/{w_name}', ("DCS_I", {(row, col, w_name)}))[1].add((row, w_col, wire))
+            else:
+                if device in _dcs_quadrants:
+                    dcs['input_prefix'] = 'CLKIN'
+                # Two DCS that share a cell cannot share their control wires,
+                # so the second takes the other pre-5A wire set.  UNVERIFIED on
+                # the 138C: five vendor compiles (P1.T31) route no external net
+                # into either bridge cell for CLKSEL or SELFORCE, so the die's
+                # real control wires are not yet traced and these are the
+                # pre-5A names, chosen only so that the two DCS of a cell name
+                # different wires.  A design that drives CLKSEL dynamically on
+                # this device is not yet modelled -- see
+                # `$OTC/evidence/dcs/ports-138c.md`.
+                if (q < 2) != (same_cell and j == 1):
+                    dcs['selforce'] = 'C2'
+                    dcs['clksel'] = ['C1', 'D1', 'A2', 'B2']
+                else:
+                    dcs['selforce'] = 'D3'
+                    dcs['clksel'] = ['D2', 'A3', 'B3', 'C3']
+
 def fse_create_clocks(dev, device, dat: Datfile, fse):
     # The 138 chip has a more complex clock system than other chips. To
     # facilitate experimentation with it, we will separate the creation of the
     # clock into a separate function.
     if device in {'GW5AST-138C'}:
         fse_create_5a138_clocks(dev, device, dat, fse)
+        # MEASURED (P1.T29): this early return used to skip the DQCE and DCS
+        # builders entirely, so the 138C chipdb carried zero of either -- not
+        # the "two of four quadrants" the pre-5A allow-lists suggest.
+        fse_create_dqce(dev, device, fse)
+        fse_create_dcs(dev, device, fse)
         return
 
     if device not in _clock_data:
@@ -2875,129 +3549,8 @@ def fse_create_clocks(dev, device, dat: Datfile, fse):
                             dev.nodes.setdefault(node0_name, ("GLOBAL_CLK", set()))[1].add((row, col, 'GT00'))
                             dev.nodes.setdefault(node1_name, ("GLOBAL_CLK", set()))[1].add((row, col, 'GT10'))
 
-    # According to the Gowin Clock User Guide, the DQCE primitives are located
-    # between the "spine" wires (in our terminology) and the central MUX, which
-    # selects the clock source for that spine. We detect cells with DQCE by
-    # instantiating this primitive and connecting the CE input to the button -
-    # in the images generated by the Gowin IDE, it is easy to trace the wires
-    # from the button to the cell and pin being used.
-    # It was found that the CE pin depends only on the "spine" number and does
-    # not depend on the quadrant or chip. The cells used also do not depend on
-    # the chip, but only on the cell type: here is the correspondence of the
-    # types to the quadrants for which the corresponding DQCEs are responsible:
-    #                          |
-    #   quadrant 2   type 80   |   type 85  quadrant 1
-    #  ------------------------+--------------------------
-    #   quadrant 3   type 81   |   type 84  quadrant 4
-    #                          |
-
-    if device not in {'GW5A-25A'}:
-        for q, ttyp in enumerate([85, 80, 81, 84]):
-            # stop if chip has only 2 quadrants
-            if q < 2 and device not in {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C'}:
-                continue
-            for row in range(dev.rows):
-                for col in range(dev.cols):
-                    if ttyp == fse['header']['grid'][61][row][col]:
-                        break
-                else:
-                    continue
-                break
-            extra_func = dev.extra_func.setdefault((row, col), {})
-            dqce_block = extra_func.setdefault('dqce', {})
-            for j in range(6):
-                dqce = dqce_block.setdefault(j, {})
-                dqce[f'clkin'] = f'SPINE{q * 8 + j}'
-                dqce[f'ce'] = ['A0', 'B0', 'C0', 'D0', 'A1', 'B1'][j]
-
-    # As it turned out, the DCS are located in the same cells, but their
-    # relationship with the quadrants is different.
-    # By generating images where the button was connected to the clock
-    # selection inputs (CLK0-3) as well as to the SELFORCE input, it was
-    # possible to determine the correspondence of the wires in these cells.
-    #                                   |
-    #   quadrant 2, spine14 dcs type 80 | quadrant 1, spine 6 dcs type 85
-    #               spine15 dcs type 81 |             spine 7 dcs type 84
-    #  -------------------------------------------------------------------
-    #   quadrant 3, spine22 dcs type 80 | quadrant 4, spine 30 dcs type 85
-    #               spine23 dcs type 81 |             spine 31 dcs type 84
-    #                                   |
-    # At the moment we will organize the description of DCS as:
-    # 'dcs':
-    #        0 /* first DCS */ : its ports
-    #        1 /* second DCS*/ : its ports
-    # GW5A series:
-    # Here, tracing the wires showed that there is no system in their
-    # arrangement; the inputs of one DCS can be strictly in one cell, or they
-    # can be in five different ones. And, as is traditional for this series,
-    # fuses can be fragmented across many cells.
-    # We will solve the fuse issue simply by going through all the cells and
-    # installing them where we find them in gowin_pack.
-    # We will trace the wires and compile them into a single table. The
-    # location of the Bels is no longer important, so we will assign them to
-    # the same place as in the previous series.
-    # {(quandrant, dcs_idx): [(col, wire)]} // row is always 18
-    gw5_dcs_inputs = {
-            (0, 0) : [(48, 'D7'), (44, 'D4'), (45, 'D7'), (46, 'D7'), (47, 'D7')],
-            (0, 1) : [(47, 'D2'), (47, 'D3'), (47, 'C3'), (47, 'B3'), (47, 'A3')],
-            (1, 0) : [(48, 'D6'), (44, 'C3'), (45, 'D6'), (46, 'D6'), (47, 'D6')],
-            (1, 1) : [(47, 'C1'), (47, 'C2'), (47, 'B2'), (47, 'A2'), (47, 'D1')],
-            (2, 0) : [(48, 'C6'), (44, 'A1'), (45, 'C6'), (46, 'C6'), (47, 'C6')],
-            (2, 1) : [(44, 'A5'), (47, 'A0'), (44, 'D5'), (44, 'C5'), (44, 'B5')],
-            (3, 0) : [(48, 'C7'), (44, 'B2'), (45, 'C7'), (46, 'C7'), (47, 'C7')],
-            (3, 1) : [(47, 'B0'), (47, 'B1'), (47, 'A1'), (47, 'D0'), (47, 'C0')],
-    }
-    for q, types in enumerate([(85, 84), (80, 81), (80, 81), (85, 84)]):
-        # stop if chip has only 2 quadrants
-        if q < 2 and device not in {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C', 'GW5A-25A'}:
-            continue
-        for j in range(2):
-            for row in range(dev.rows):
-                for col in range(dev.cols):
-                    if types[j] == fse['header']['grid'][61][row][col]:
-                        break
-                else:
-                    continue
-                break
-            extra_func = dev.extra_func.setdefault((row, col), {})
-            dcs_block = extra_func.setdefault('dcs', {})
-            dcs = dcs_block.setdefault(q // 2, {})
-            spine_idx = f'SPINE{q * 8 + j + 6}'
-            dcs['clkout'] = spine_idx
-            dev.nodes.setdefault(spine_idx, ("GLOBAL_CLK", set()))[1].add((row, col, spine_idx))
-            dcs['clk'] = []
-            for port in "ABCD":
-                wire_name = f'P{q + 1}{j + 6}{port}'
-                dcs['clk'].append(wire_name)
-                dev.nodes.setdefault(wire_name, ("GLOBAL_CLK", set()))[1].add((row, col, wire_name))
-            if device in {'GW5A-25A'}:
-                dcs['input_prefix'] = 'CLKIN'
-                w_col, wire = gw5_dcs_inputs[(q, j)][0]
-                if row == 18 and col == w_col:
-                    dcs['selforce'] = wire
-                else:
-                    # not our cell, make an alias
-                    dcs['selforce'] = f'DCS{q}{j}{wire}'
-                    # Himbaechel node
-                    dev.nodes.setdefault(f'X{col}Y{row}/DCS{q}{j}{wire}', ("DCS_I", {(row, col, dcs['selforce'])}))[1].add((row, w_col, wire))
-                dcs['clksel'] = []
-                for i, w_desc in enumerate(gw5_dcs_inputs[(q, j)][1:]):
-                    w_col, wire = w_desc
-                    if row == 18 and col == w_col:
-                        dcs['clksel'].append(wire)
-                    else:
-                        # not our cell, make an alias
-                        w_name = f'DCS{q}{j}{i}{wire}'
-                        dcs['clksel'].append(w_name)
-                        # Himbaechel node
-                        dev.nodes.setdefault(f'X{col}Y{row}/{w_name}', ("DCS_I", {(row, col, w_name)}))[1].add((row, w_col, wire))
-            else:
-                if q < 2:
-                    dcs['selforce'] = 'C2'
-                    dcs['clksel'] = ['C1', 'D1', 'A2', 'B2']
-                else:
-                    dcs[f'selforce'] = 'D3'
-                    dcs['clksel'] = ['D2', 'A3', 'B3', 'C3']
+    fse_create_dqce(dev, device, fse)
+    fse_create_dcs(dev, device, fse)
 
 # As can be seen from the diagram in ‘UG306-1.0.6E_Arora V Clock User
 # Guide.pdf’, the clock wires are divided into upper and lower halves.
@@ -4183,8 +4736,14 @@ def set_chip_flags(dev, device):
         dev.chip_flags.append("NEED_BSRAM_RESET_FIX")
         dev.chip_flags.append("NEED_CFGPINS_INVERSION")
         dev.chip_flags.append("HAS_5A_DSP")
+        # The 138C HCLK network is the GW5A one (six measured blocks, see
+        # _gw5a_hclk_locs), so nextpnr must take the GW5A HCLK path:
+        # CHIP_HAS_5A_HCLK = 0x10000 (gowin_arch_gen.py:39), GowinUtils::has_5A_HCLK().
+        dev.chip_flags.append("HAS_5A_HCLK")
 
-    if device in {'GW5A-25A'}:
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
+        # The GW5A family renames the DCS clock inputs CLK<n> -> CLKIN<n>
+        # (`examples/gw5a/dcs.v`, `UG306-1.0.1E` S3.2).
         dev.dcs_prefix = "CLKIN"
     if device in {'GW5AT-60B'}:
         dev.empty_cell_row = 28;
