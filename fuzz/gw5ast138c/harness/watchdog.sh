@@ -45,6 +45,11 @@ MARKER="BATCH_COMPLETE ${BATCH_ID}"
 TICK=2
 [ "$POLL" -lt "$TICK" ] && TICK=$POLL
 
+# Seconds to keep re-reading the batch log after its pid is gone, before
+# calling the run dead: the completion marker is the last thing written and
+# its write can outlive the process by a tick.
+EXIT_GRACE=${EXIT_GRACE:-10}
+
 LOG_DIR=$(dirname "$BATCH_LOG")
 mkdir -p "$(dirname "$WD_LOG")"
 
@@ -88,8 +93,16 @@ while true; do
 
   marker_seen && finish
   if ! kill -0 "$BPID" 2>/dev/null; then
-    # Give a just-exited batch a moment to have its last write land.
-    sleep 1
+    # A just-exited batch writes its completion marker last, and that write
+    # can land after the pid is already gone: four Phase-1 batches were
+    # reported DEAD one to three seconds after their own BATCH_COMPLETE.
+    # Re-read the log through a grace window before calling a death.
+    GRACE=0
+    while [ "$GRACE" -lt "$EXIT_GRACE" ]; do
+      marker_seen && finish
+      sleep 1
+      GRACE=$(( GRACE + 1 ))
+    done
     finish "batch pid ${BPID} exited"
   fi
 

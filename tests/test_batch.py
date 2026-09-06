@@ -237,6 +237,37 @@ def test_batch_watchdog_detects_death(tmp_path):
         proc.wait()
 
 
+@pytest.mark.heavy  # slow: real subprocesses and the watchdog's exit grace
+def test_batch_watchdog_waits_for_a_late_completion_marker(tmp_path):
+    """A marker written as the batch exits is a clean exit, not a death.
+
+    Four Phase-1 batches were reported `WATCHDOG_DEAD` one to three seconds
+    after writing their own `BATCH_COMPLETE`: the marker is the last write and
+    it can land after the pid is gone.
+    """
+    proc, paths = _arm_watchdog(tmp_path, "wd-late", 5, 100)
+    fake = _fake_batch(paths, seconds=30, complete=False)
+    batch_id = "wd-late"
+    try:
+        assert _wait_for(lambda: "tick 1" in _read(paths["log"]), timeout=30)
+        os.killpg(os.getpgid(fake.pid), signal.SIGKILL)
+        fake.wait()
+        with open(paths["log"], "a") as fh:
+            fh.write(f"BATCH_COMPLETE {batch_id} runs=1 ok=1 diff=0 "
+                     "aborted=0\n")
+        assert _wait_for(
+            lambda: _terminal_lines(_read(paths["watchdog_log"])), timeout=60), \
+            f"watchdog log had no terminal line:\n{_read(paths['watchdog_log'])}"
+        text = _read(paths["watchdog_log"])
+        assert len(_terminal_lines(text)) == 1, text
+        assert "WATCHDOG_COMPLETE" in _terminal_lines(text)[0], text
+    finally:
+        for p in (fake, proc):
+            if p.poll() is None:
+                p.kill()
+        proc.wait()
+
+
 # --------------------------------------------------------------------------
 # 5/6. the published CLI surface and its README guard
 # --------------------------------------------------------------------------
