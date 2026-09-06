@@ -5489,7 +5489,29 @@ class GW5A(Device):
     #========== Clocks
     #==============================
     def get_DCS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        # Not every GW5A die has a traced DCS model; the ones that do override
+        # this with `gw5a_dcs_fuses`.
         self.error_not_supported_cell_type(bel)
+
+    def gw5a_dcs_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ A GW5A DCS's fuses are scattered across the die rather than held
+        in the bel's own cell, so every cell is asked for them.  Which cells
+        answer is a property of the device's long-fuse tables, not of the
+        placement.  """
+        # DCSs without DCS_MODE are unused
+        if 'DCS_MODE' not in bel.cell.attrs:
+            return []
+        spine = self.chipdb.get_dcs_spine(bel.x, bel.y, bel.idx_int)
+
+        av = self.get_dcs_attrvals(bel, spine)
+        _, dcs_str = self.dcs_spine2quadrant_idx[spine]
+
+        fuses = []
+        for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
+            bits = self.chipdb.get_dcs_fuses(x, y, av, dcs_str)
+            if bits:
+                fuses.append(CellFuseBits(x, y, bits))
+        return fuses
 
     def get_pll_attrvals(self, bel: BelDesc) -> set[int]:
         """ PLLA attributes """
@@ -6379,20 +6401,7 @@ class GW5A_25A(GW5A):
         return (K1, C1)
 
     def get_DCS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        # DCSs without DCS_MODE are unused
-        if 'DCS_MODE' not in bel.cell.attrs:
-            return []
-        spine = self.chipdb.get_dcs_spine(bel.x, bel.y, bel.idx_int)
-
-        av = self.get_dcs_attrvals(bel, spine)
-        _, dcs_str = self.dcs_spine2quadrant_idx[spine]
-
-        fuses = []
-        for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
-            bits = self.chipdb.get_dcs_fuses(x, y, av, dcs_str)
-            if bits:
-                fuses.append(CellFuseBits(x, y, bits))
-        return fuses
+        return self.gw5a_dcs_fuses(bel)
 
     #==============================
     #========== DSP
@@ -6777,6 +6786,16 @@ class GW5AT_60B(GW5A):
 ################################################################
 class GW5AST_138C(GW5A):
     """ GW5AST-138C chip. Tangmega138k board """
+    #==============================
+    #========== Clocks
+    #==============================
+    def get_DCS_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ MEASURED (`P1.T31`, `$OTC/evidence/dcs/ports-138c.md`): this die
+        has four DCS, two in each of the two clock-bridge cells that carry a
+        spine multiplexer, and their fuses are scattered the same way the 25A's
+        are. """
+        return self.gw5a_dcs_fuses(bel)
+
     #==============================
     #========== DHCE
     #==============================

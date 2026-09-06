@@ -3211,12 +3211,232 @@ def get_clock_ins(device, dat: Datfile):
               for i in range(wnames.clknumbers['PCLKT0'], wnames.clknumbers['PCLKR1'] + 1)
             }
 
+# The DQCE and DCS hosts are found by their `fse['header']['grid'][61]` tile
+# type.  According to the Gowin Clock User Guide, the DQCE primitives sit
+# between the "spine" wires (in our terminology) and the central MUX which
+# selects the clock source for that spine.  The cells were found by
+# instantiating the primitive with its CE input on a button and tracing the
+# wires in the images the Gowin IDE generates; the CE pin turned out to depend
+# only on the spine number, and the cell only on the tile type.  On the pre-5A
+# dies the four types sit one per quadrant:
+#                          |
+#   quadrant 2   type 80   |   type 85  quadrant 1
+#  ------------------------+--------------------------
+#   quadrant 3   type 81   |   type 84  quadrant 4
+#                          |
+#: Quadrant -> tile type, the pre-5A arrangement.  Index is the quadrant.
+_dqce_quadrant_types = (85, 80, 81, 84)
+
+#: Devices that carry all four DQCE quadrants under the pre-5A arrangement.
+#: Every other pre-5A die has only the two `q >= 2` quadrants.
+_dqce_four_quadrant_devices = {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C'}
+
+#: MEASURED per-device `{quadrant: tile type}`, for dies whose clock plane is
+#: not the pre-5A 2x2 and whose quadrant set therefore cannot be derived from
+#: `_dqce_quadrant_types` at all.
+#:
+#: `GW5AST-138C` (P1.T28/T29, `$OTC/evidence/dqce/tiletypes-138c.md`): the six
+#: bridge tile types 80..85 all occur exactly once, at (54, 88)..(54, 93), but
+#: only two of those cells carry any SPINE multiplexer -- type 85 at (54, 93)
+#: drives SPINE8..13 and type 84 at (54, 88) drives SPINE16..21.  Those are
+#: exactly the six `dqce[j]` slots of quadrants 1 and 2 under the pre-5A spine
+#: formula `SPINE(q * 8 + j)`, and this die's clock plane is two halves, not
+#: four quadrants (`fse_create_5a138_clocks`): quadrant 1 is the top half and
+#: quadrant 2 the bottom.  Types 81, 82, 83 and 84 host no spine multiplexer,
+#: so a naive un-gating of the pre-5A loop would attach quadrants 2 and 3 to
+#: cells with nothing in them -- the silent mis-attachment `S9` guards against.
+_dqce_quadrants = {
+    'GW5AST-138C': {1: 85, 2: 80},
+}
+
+
+def dqce_quadrant_types(device):
+    """`{quadrant: tile type}` for every DQCE quadrant `device` really has."""
+    if device in _dqce_quadrants:
+        return _dqce_quadrants[device]
+    return {q: ttyp for q, ttyp in enumerate(_dqce_quadrant_types)
+            if q >= 2 or device in _dqce_four_quadrant_devices}
+
+
+# The DCS are hosted by the same cells, but their relationship with the
+# quadrants is different.  Generating images with the button on the clock
+# selection inputs (CLK0-3) and on SELFORCE gave the wire correspondence:
+#                                   |
+#   quadrant 2, spine14 dcs type 80 | quadrant 1, spine 6 dcs type 85
+#               spine15 dcs type 81 |             spine 7 dcs type 84
+#  -------------------------------------------------------------------
+#   quadrant 3, spine22 dcs type 80 | quadrant 4, spine 30 dcs type 85
+#               spine23 dcs type 81 |             spine 31 dcs type 84
+#                                   |
+#: Quadrant -> the tile types of its two DCS, in `dcs_idx` order.
+_dcs_quadrant_types = ((85, 84), (80, 81), (80, 81), (85, 84))
+
+#: Devices that carry all four DCS quadrants under the pre-5A arrangement.
+_dcs_four_quadrant_devices = {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C',
+                              'GW5A-25A'}
+
+#: MEASURED per-device `{quadrant: (tile type, tile type)}`.
+#:
+#: `GW5AST-138C` (P1.T31, `$OTC/evidence/dcs/ports-138c.md`): both DCS of a
+#: quadrant live in the SAME cell on this die -- (54, 93) carries P26A-D and
+#: P27A-D, (54, 88) carries P36A-D and P37A-D -- which is why the quadrants
+#: whose two types are equal index their `extra_func['dcs']` sub-entries by
+#: `dcs_idx` rather than by `q // 2` (see `fse_create_dcs`).
+_dcs_quadrants = {
+    'GW5AST-138C': {1: (85, 85), 2: (80, 80)},
+}
+
+
+def dcs_quadrant_types(device):
+    """`{quadrant: (tile type, tile type)}` for `device`'s DCS quadrants."""
+    if device in _dcs_quadrants:
+        return _dcs_quadrants[device]
+    return {q: types for q, types in enumerate(_dcs_quadrant_types)
+            if q >= 2 or device in _dcs_four_quadrant_devices}
+
+
+def _first_cell_of_type(dev, fse, ttyp):
+    """The first `(row, col)` whose grid-61 tile type is `ttyp`, or `None`."""
+    grid = fse['header']['grid'][61]
+    for row in range(dev.rows):
+        for col in range(dev.cols):
+            if ttyp == grid[row][col]:
+                return row, col
+    return None
+
+
+def fse_create_dqce(dev, device, fse):
+    """Create this device's DQCE sites, six per quadrant it actually has."""
+    if device in {'GW5A-25A'}:
+        return
+    for q, ttyp in dqce_quadrant_types(device).items():
+        cell = _first_cell_of_type(dev, fse, ttyp)
+        if cell is None:
+            continue
+        extra_func = dev.extra_func.setdefault(cell, {})
+        dqce_block = extra_func.setdefault('dqce', {})
+        for j in range(6):
+            dqce = dqce_block.setdefault(j, {})
+            dqce['clkin'] = f'SPINE{q * 8 + j}'
+            dqce['ce'] = ['A0', 'B0', 'C0', 'D0', 'A1', 'B1'][j]
+
+
+# GW5A series: tracing the wires showed that there is no system in their
+# arrangement; the inputs of one DCS can be strictly in one cell, or they can
+# be in five different ones.  And, as is traditional for this series, fuses can
+# be fragmented across many cells.  We solve the fuse issue simply by going
+# through all the cells and installing them where we find them in gowin_pack.
+# The wires are traced and compiled into a single table.  The location of the
+# Bels is no longer important, so they are assigned to the same place as in the
+# previous series.
+#: `{(quadrant, dcs_idx): [(col, wire), ...]}` -- row is always 18.  The first
+#: entry is SELFORCE, the remaining four are CLKSEL[0..3].
+gw5_dcs_inputs = {
+        (0, 0) : [(48, 'D7'), (44, 'D4'), (45, 'D7'), (46, 'D7'), (47, 'D7')],
+        (0, 1) : [(47, 'D2'), (47, 'D3'), (47, 'C3'), (47, 'B3'), (47, 'A3')],
+        (1, 0) : [(48, 'D6'), (44, 'C3'), (45, 'D6'), (46, 'D6'), (47, 'D6')],
+        (1, 1) : [(47, 'C1'), (47, 'C2'), (47, 'B2'), (47, 'A2'), (47, 'D1')],
+        (2, 0) : [(48, 'C6'), (44, 'A1'), (45, 'C6'), (46, 'C6'), (47, 'C6')],
+        (2, 1) : [(44, 'A5'), (47, 'A0'), (44, 'D5'), (44, 'C5'), (44, 'B5')],
+        (3, 0) : [(48, 'C7'), (44, 'B2'), (45, 'C7'), (46, 'C7'), (47, 'C7')],
+        (3, 1) : [(47, 'B0'), (47, 'B1'), (47, 'A1'), (47, 'D0'), (47, 'C0')],
+}
+
+
+def dcs_clkout_node(device, spine_idx):
+    """The clock-network node a DCS output joins.
+
+    On the pre-5A dies the spine wire *is* the node.  On a die whose clock
+    plane is split into halves fed from a bridge (`fse_create_5a138_clocks`),
+    the bridge cell's spine wires are not the network -- the half's
+    `CBRIDGEOUT_<half><n>` node is, and the DQCE-gated spines already belong to
+    theirs because they are multiplexer destinations the fse tables name.  A
+    DCS output is not a multiplexer destination, so joining it to a node of its
+    own would leave it an island: nextpnr packs and places the DCS and then
+    reports `Can't route the <clkout> network` (MEASURED, `p1t31-dcs-e1`).
+    """
+    if device not in _dcs_quadrants:
+        return spine_idx
+    spine = int(spine_idx[len('SPINE'):])
+    half, base = ('TOP', 8) if spine < 16 else ('BOTTOM', 16)
+    return f'CBRIDGEOUT_{half}{spine - base}'
+
+
+def fse_create_dcs(dev, device, fse):
+    """Create this device's DCS sites, two per quadrant it actually has."""
+    for q, types in dcs_quadrant_types(device).items():
+        # When a quadrant's two DCS share one cell the `(q, dcs_idx)` identity
+        # cannot be carried by the cell coordinate, so the sub-entry is keyed
+        # by `dcs_idx`; when they sit in two cells it is keyed the pre-5A way.
+        same_cell = types[0] == types[1]
+        for j in range(2):
+            cell = _first_cell_of_type(dev, fse, types[j])
+            if cell is None:
+                continue
+            row, col = cell
+            extra_func = dev.extra_func.setdefault(cell, {})
+            dcs_block = extra_func.setdefault('dcs', {})
+            dcs = dcs_block.setdefault(j if same_cell else q // 2, {})
+            spine_idx = f'SPINE{q * 8 + j + 6}'
+            dcs['clkout'] = spine_idx
+            clkout_node = dcs_clkout_node(device, spine_idx)
+            dev.nodes.setdefault(clkout_node, ("GLOBAL_CLK", set()))[1].add((row, col, spine_idx))
+            dcs['clk'] = []
+            for port in "ABCD":
+                wire_name = f'P{q + 1}{j + 6}{port}'
+                dcs['clk'].append(wire_name)
+                dev.nodes.setdefault(wire_name, ("GLOBAL_CLK", set()))[1].add((row, col, wire_name))
+            if device in {'GW5A-25A'}:
+                dcs['input_prefix'] = 'CLKIN'
+                w_col, wire = gw5_dcs_inputs[(q, j)][0]
+                if row == 18 and col == w_col:
+                    dcs['selforce'] = wire
+                else:
+                    # not our cell, make an alias
+                    dcs['selforce'] = f'DCS{q}{j}{wire}'
+                    # Himbaechel node
+                    dev.nodes.setdefault(f'X{col}Y{row}/DCS{q}{j}{wire}', ("DCS_I", {(row, col, dcs['selforce'])}))[1].add((row, w_col, wire))
+                dcs['clksel'] = []
+                for i, w_desc in enumerate(gw5_dcs_inputs[(q, j)][1:]):
+                    w_col, wire = w_desc
+                    if row == 18 and col == w_col:
+                        dcs['clksel'].append(wire)
+                    else:
+                        # not our cell, make an alias
+                        w_name = f'DCS{q}{j}{i}{wire}'
+                        dcs['clksel'].append(w_name)
+                        # Himbaechel node
+                        dev.nodes.setdefault(f'X{col}Y{row}/{w_name}', ("DCS_I", {(row, col, w_name)}))[1].add((row, w_col, wire))
+            else:
+                if device in _dcs_quadrants:
+                    dcs['input_prefix'] = 'CLKIN'
+                # Two DCS that share a cell cannot share their control wires,
+                # so the second takes the other pre-5A wire set.  UNVERIFIED on
+                # the 138C: five vendor compiles (P1.T31) route no external net
+                # into either bridge cell for CLKSEL or SELFORCE, so the die's
+                # real control wires are not yet traced and these are the
+                # pre-5A names, chosen only so that the two DCS of a cell name
+                # different wires.  A design that drives CLKSEL dynamically on
+                # this device is not yet modelled -- see
+                # `$OTC/evidence/dcs/ports-138c.md`.
+                if (q < 2) != (same_cell and j == 1):
+                    dcs['selforce'] = 'C2'
+                    dcs['clksel'] = ['C1', 'D1', 'A2', 'B2']
+                else:
+                    dcs['selforce'] = 'D3'
+                    dcs['clksel'] = ['D2', 'A3', 'B3', 'C3']
+
 def fse_create_clocks(dev, device, dat: Datfile, fse):
     # The 138 chip has a more complex clock system than other chips. To
     # facilitate experimentation with it, we will separate the creation of the
     # clock into a separate function.
     if device in {'GW5AST-138C'}:
         fse_create_5a138_clocks(dev, device, dat, fse)
+        # MEASURED (P1.T29): this early return used to skip the DQCE and DCS
+        # builders entirely, so the 138C chipdb carried zero of either -- not
+        # the "two of four quadrants" the pre-5A allow-lists suggest.
+        fse_create_dqce(dev, device, fse)
+        fse_create_dcs(dev, device, fse)
         return
 
     if device not in _clock_data:
@@ -3329,129 +3549,8 @@ def fse_create_clocks(dev, device, dat: Datfile, fse):
                             dev.nodes.setdefault(node0_name, ("GLOBAL_CLK", set()))[1].add((row, col, 'GT00'))
                             dev.nodes.setdefault(node1_name, ("GLOBAL_CLK", set()))[1].add((row, col, 'GT10'))
 
-    # According to the Gowin Clock User Guide, the DQCE primitives are located
-    # between the "spine" wires (in our terminology) and the central MUX, which
-    # selects the clock source for that spine. We detect cells with DQCE by
-    # instantiating this primitive and connecting the CE input to the button -
-    # in the images generated by the Gowin IDE, it is easy to trace the wires
-    # from the button to the cell and pin being used.
-    # It was found that the CE pin depends only on the "spine" number and does
-    # not depend on the quadrant or chip. The cells used also do not depend on
-    # the chip, but only on the cell type: here is the correspondence of the
-    # types to the quadrants for which the corresponding DQCEs are responsible:
-    #                          |
-    #   quadrant 2   type 80   |   type 85  quadrant 1
-    #  ------------------------+--------------------------
-    #   quadrant 3   type 81   |   type 84  quadrant 4
-    #                          |
-
-    if device not in {'GW5A-25A'}:
-        for q, ttyp in enumerate([85, 80, 81, 84]):
-            # stop if chip has only 2 quadrants
-            if q < 2 and device not in {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C'}:
-                continue
-            for row in range(dev.rows):
-                for col in range(dev.cols):
-                    if ttyp == fse['header']['grid'][61][row][col]:
-                        break
-                else:
-                    continue
-                break
-            extra_func = dev.extra_func.setdefault((row, col), {})
-            dqce_block = extra_func.setdefault('dqce', {})
-            for j in range(6):
-                dqce = dqce_block.setdefault(j, {})
-                dqce[f'clkin'] = f'SPINE{q * 8 + j}'
-                dqce[f'ce'] = ['A0', 'B0', 'C0', 'D0', 'A1', 'B1'][j]
-
-    # As it turned out, the DCS are located in the same cells, but their
-    # relationship with the quadrants is different.
-    # By generating images where the button was connected to the clock
-    # selection inputs (CLK0-3) as well as to the SELFORCE input, it was
-    # possible to determine the correspondence of the wires in these cells.
-    #                                   |
-    #   quadrant 2, spine14 dcs type 80 | quadrant 1, spine 6 dcs type 85
-    #               spine15 dcs type 81 |             spine 7 dcs type 84
-    #  -------------------------------------------------------------------
-    #   quadrant 3, spine22 dcs type 80 | quadrant 4, spine 30 dcs type 85
-    #               spine23 dcs type 81 |             spine 31 dcs type 84
-    #                                   |
-    # At the moment we will organize the description of DCS as:
-    # 'dcs':
-    #        0 /* first DCS */ : its ports
-    #        1 /* second DCS*/ : its ports
-    # GW5A series:
-    # Here, tracing the wires showed that there is no system in their
-    # arrangement; the inputs of one DCS can be strictly in one cell, or they
-    # can be in five different ones. And, as is traditional for this series,
-    # fuses can be fragmented across many cells.
-    # We will solve the fuse issue simply by going through all the cells and
-    # installing them where we find them in gowin_pack.
-    # We will trace the wires and compile them into a single table. The
-    # location of the Bels is no longer important, so we will assign them to
-    # the same place as in the previous series.
-    # {(quandrant, dcs_idx): [(col, wire)]} // row is always 18
-    gw5_dcs_inputs = {
-            (0, 0) : [(48, 'D7'), (44, 'D4'), (45, 'D7'), (46, 'D7'), (47, 'D7')],
-            (0, 1) : [(47, 'D2'), (47, 'D3'), (47, 'C3'), (47, 'B3'), (47, 'A3')],
-            (1, 0) : [(48, 'D6'), (44, 'C3'), (45, 'D6'), (46, 'D6'), (47, 'D6')],
-            (1, 1) : [(47, 'C1'), (47, 'C2'), (47, 'B2'), (47, 'A2'), (47, 'D1')],
-            (2, 0) : [(48, 'C6'), (44, 'A1'), (45, 'C6'), (46, 'C6'), (47, 'C6')],
-            (2, 1) : [(44, 'A5'), (47, 'A0'), (44, 'D5'), (44, 'C5'), (44, 'B5')],
-            (3, 0) : [(48, 'C7'), (44, 'B2'), (45, 'C7'), (46, 'C7'), (47, 'C7')],
-            (3, 1) : [(47, 'B0'), (47, 'B1'), (47, 'A1'), (47, 'D0'), (47, 'C0')],
-    }
-    for q, types in enumerate([(85, 84), (80, 81), (80, 81), (85, 84)]):
-        # stop if chip has only 2 quadrants
-        if q < 2 and device not in {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C', 'GW5A-25A'}:
-            continue
-        for j in range(2):
-            for row in range(dev.rows):
-                for col in range(dev.cols):
-                    if types[j] == fse['header']['grid'][61][row][col]:
-                        break
-                else:
-                    continue
-                break
-            extra_func = dev.extra_func.setdefault((row, col), {})
-            dcs_block = extra_func.setdefault('dcs', {})
-            dcs = dcs_block.setdefault(q // 2, {})
-            spine_idx = f'SPINE{q * 8 + j + 6}'
-            dcs['clkout'] = spine_idx
-            dev.nodes.setdefault(spine_idx, ("GLOBAL_CLK", set()))[1].add((row, col, spine_idx))
-            dcs['clk'] = []
-            for port in "ABCD":
-                wire_name = f'P{q + 1}{j + 6}{port}'
-                dcs['clk'].append(wire_name)
-                dev.nodes.setdefault(wire_name, ("GLOBAL_CLK", set()))[1].add((row, col, wire_name))
-            if device in {'GW5A-25A'}:
-                dcs['input_prefix'] = 'CLKIN'
-                w_col, wire = gw5_dcs_inputs[(q, j)][0]
-                if row == 18 and col == w_col:
-                    dcs['selforce'] = wire
-                else:
-                    # not our cell, make an alias
-                    dcs['selforce'] = f'DCS{q}{j}{wire}'
-                    # Himbaechel node
-                    dev.nodes.setdefault(f'X{col}Y{row}/DCS{q}{j}{wire}', ("DCS_I", {(row, col, dcs['selforce'])}))[1].add((row, w_col, wire))
-                dcs['clksel'] = []
-                for i, w_desc in enumerate(gw5_dcs_inputs[(q, j)][1:]):
-                    w_col, wire = w_desc
-                    if row == 18 and col == w_col:
-                        dcs['clksel'].append(wire)
-                    else:
-                        # not our cell, make an alias
-                        w_name = f'DCS{q}{j}{i}{wire}'
-                        dcs['clksel'].append(w_name)
-                        # Himbaechel node
-                        dev.nodes.setdefault(f'X{col}Y{row}/{w_name}', ("DCS_I", {(row, col, w_name)}))[1].add((row, w_col, wire))
-            else:
-                if q < 2:
-                    dcs['selforce'] = 'C2'
-                    dcs['clksel'] = ['C1', 'D1', 'A2', 'B2']
-                else:
-                    dcs[f'selforce'] = 'D3'
-                    dcs['clksel'] = ['D2', 'A3', 'B3', 'C3']
+    fse_create_dqce(dev, device, fse)
+    fse_create_dcs(dev, device, fse)
 
 # As can be seen from the diagram in ‘UG306-1.0.6E_Arora V Clock User
 # Guide.pdf’, the clock wires are divided into upper and lower halves.
@@ -4642,7 +4741,9 @@ def set_chip_flags(dev, device):
         # CHIP_HAS_5A_HCLK = 0x10000 (gowin_arch_gen.py:39), GowinUtils::has_5A_HCLK().
         dev.chip_flags.append("HAS_5A_HCLK")
 
-    if device in {'GW5A-25A'}:
+    if device in {'GW5A-25A', 'GW5AST-138C'}:
+        # The GW5A family renames the DCS clock inputs CLK<n> -> CLKIN<n>
+        # (`examples/gw5a/dcs.v`, `UG306-1.0.1E` S3.2).
         dev.dcs_prefix = "CLKIN"
     if device in {'GW5AT-60B'}:
         dev.empty_cell_row = 28;

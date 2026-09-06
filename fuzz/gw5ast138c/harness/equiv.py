@@ -873,6 +873,58 @@ NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG", "CLKDIV2")
 #: from the design keeps its own name and stays required.
 PACKER_DHCEN_PREFIX = "$PACKER_DHCEN_"
 
+#: Cell-name prefixes of nextpnr's `DQCE` and `DCS` placeholders.  `pack.cc`
+#: binds one `$PACKER_DQCE_SPINE<n>` / `$PACKER_DCS_SPINE<n>` cell to **every**
+#: such bel on the device as soon as the design holds one primitive, and only
+#: `globals.cc route_dqce_net` / `route_dcs_net` gives the few the route needs
+#: their `DQCE_PIP` / `DCS_MODE` attribute.  `gowin_pack` keys on exactly those
+#: attributes (`Device.get_DQCE_fuses` and `get_DCS_fuses` return no fuses
+#: without them), so a placeholder that never got one writes nothing and `c1`
+#: must not demand it back -- the same rule as `PACKER_DHCEN_PREFIX`, and
+#: narrower: the placeholder that *was* used keeps its attribute and stays
+#: required.  MEASURED on the `clocking_dqce` E1 run (`p1t29-dqce-e1c`), where
+#: eleven unused DQCE placeholders in the two clock-bridge cells made `c1`
+#: report a mismatch on a bitstream whose cells, attrs and conns all matched.
+PACKER_CLOCK_MUX_PLACEHOLDERS = {
+    "$PACKER_DQCE_": ("DQCE_PIP", "route_dqce_net"),
+    "$PACKER_DCS_": ("DCS_MODE", "route_dcs_net"),
+}
+
+
+#: `X<x>Y<y>/<dest>/<src>`, the spelling `gowin_pack.PipDesc` parses.
+DQCE_PIP_RE = re.compile(r"X(\d+)Y(\d+)/([\w_]+)/([\w_]+)")
+
+
+def dqce_recovered_via_pip(cell, netlist):
+    """`None` if this used DQCE is in the decoded bitstream, else why not.
+
+    A used DQCE's whole signature is the select fuse of one spine
+    multiplexer, and `gowin_unpack` recovers that as a **pip**: there is no
+    DQCE cell in the unpacker's model, on any device.  Asking `c1` for a cell
+    would assert something the bitstream format cannot carry, so it asks
+    instead for the very pip the packer wrote -- `DQCE_PIP`, the attribute
+    `gowin_pack.Device.get_DQCE_fuses` keys on.
+    """
+    pip = str(cell["attrs"].get("DQCE_PIP", ""))
+    match = DQCE_PIP_RE.fullmatch(pip)
+    if match is None:
+        return f"DQCE_PIP {pip!r} is not a pip name"
+    x, y, dest, src = int(match[1]), int(match[2]), match[3], match[4]
+    tile = f"R{y + 1}C{x + 1}_"
+    if netlist.raw_pips.get((y, x), {}).get(tile + dest) == tile + src:
+        return None
+    return f"DQCE_PIP {pip} is not in the decoded bitstream"
+
+
+def unused_clock_mux_placeholder(cell):
+    """Why this clock-mux placeholder writes no fuse, or `None` if it does."""
+    for prefix, (attr, router) in PACKER_CLOCK_MUX_PLACEHOLDERS.items():
+        if cell["name"].startswith(prefix) and attr not in cell["attrs"]:
+            kind = prefix[len("$PACKER_"):-1]
+            return (f"nextpnr {kind} placeholder; writes a fuse only when "
+                    f"{router} gives it {attr}")
+    return None
+
 
 #: Which residual category a chipdb fuse group hands its bits to.  The group
 #: names are the chipdb's own (`db.longval[ttyp]` / `db.shortval[ttyp]` keys
@@ -1677,6 +1729,23 @@ def decode_check_c1(pnr_cells, netlist):
                             "why": "nextpnr DHCEN placeholder; writes a fuse "
                                    "only when route_dhcen_net marks it "
                                    "DHCEN_USED"})
+            continue
+        why_unused = unused_clock_mux_placeholder(cell)
+        if why_unused:
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "why": why_unused})
+            continue
+        if cell["type"] == "DQCE":
+            why_not = dqce_recovered_via_pip(cell, netlist)
+            if why_not is None:
+                skipped.append({"name": cell["name"], "type": cell["type"],
+                                "bel": cell["bel"],
+                                "why": "used DQCE; recovered as the spine "
+                                       "multiplexer pip it names in DQCE_PIP"})
+                continue
+            missing.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "site": list(cell["site"]),
+                            "why": why_not})
             continue
         base, z = split_bel_name(cell["bel"])
         if _bitstream_cell_type(base) == "CLKDIV2":
