@@ -85,11 +85,19 @@ def test_ae350_outs_records_land_in_the_measured_fabric_footprint(gw5ast138c):
 
 
 def test_ae350_input_taps_and_output_drives_share_one_column_band(gw5ast138c):
-    """A hard block reads the left of its band and drives the right of it."""
+    """The block reads and drives the same tiles, over disjoint wire classes.
+
+    An earlier reading had the two halves of the band split between the
+    directions; the input table that reading found covers 256 of 416 input
+    bits, and five of its columns show no change at all in the vendor
+    bitstream that instantiates the block, so the band is shared, not split.
+    """
     stuff = gw5ast138c.gw5aStuff
     tapped = {r[1] for r in _live(stuff['Ae350SocIns'])}
     driven = {r[1] for r in _live(stuff['Ae350SocOuts'])}
-    assert max(c for c in tapped if c - 1 in FOOTPRINT_COLS) + 1 in driven
+    band = {c for c in driven if (c - 1) in FOOTPRINT_COLS}
+    assert tapped <= set(range(min(band), max(band) + 1))
+    assert tapped & driven, "one band, read and driven over disjoint wires"
 
 
 def test_ae350_input_taps_are_tile_output_wires(gw5ast138c):
@@ -100,8 +108,11 @@ def test_ae350_input_taps_are_tile_output_wires(gw5ast138c):
     assert all(32 <= wire < 56 for _row, _col, wire in in_band)
 
 
-def test_ae350_ins_base_candidates_reject_the_stale_base(gw5ast138c):
-    """The historical base names another block's table and must lose."""
-    stale = dat_parser.Datfile.AE350_SOC_INS_BASES[0]
+def test_ae350_ins_search_rejects_the_historical_base(gw5ast138c):
+    """The historical base names another block's table and must lose.
+
+    It decodes columns 51-139 -- nowhere near the block the vendor placed.
+    """
+    stale = dat_parser.Datfile.AE350_SOC_INS_FALLBACK_BASE
     stale_grid = gw5ast138c.read_packed_grid16(0x1b1, 3, stale)
     assert gw5ast138c.gw5aStuff['Ae350SocIns'] != stale_grid
