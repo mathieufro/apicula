@@ -15,7 +15,7 @@ The three commands are `spec-harness.md` §4 verbatim:
     nextpnr-himbaechel --device GW5AST-LV138PG484AC1/I0 \\
         --chipdb <path>/chipdb-GW5AST-138C.bin --vopt cst=top.cst \\
         --json top.json --write top_pnr.json --top <module> --timing-allow-fail
-    gowin_pack -d GW5AST-138C --cpu_as_gpio -o top.fs top_pnr.json
+    gowin_pack -d GW5AST-138C -o top.fs top_pnr.json
 
 Binding behaviours implemented here:
 
@@ -181,20 +181,20 @@ def nextpnr_command(nextpnr, chipdb, cst="top.cst", json_in="top.json",
 
 
 #: The dual-purpose-pin flags a shape that states none of its own inherits.
-#: Every shape landed before the `dualpin` sweep was packed with `cpu_as_gpio`
-#: on, so it stays the default: dropping it would silently move those shapes'
-#: bitstreams.  A shape that computes its flags per sweep point overrides it
-#: with the empty set, because such a shape owns its option set completely --
-#: an all-off baseline is unreachable otherwise.
-DEFAULT_PACK_GPIO = ("--cpu_as_gpio",)
+#: Empty: `--cpu_as_gpio` was the historical default, and MEASURED
+#: (`$OTC/evidence/dualpin/diff/cpu.json`) it moves no bit the vendor moves on
+#: this device, so the packer no longer emits anything for it and carrying it
+#: would only assert an option that does nothing.
+DEFAULT_PACK_GPIO = ()
 
 
 def pack_command(gowin_pack, json_in="top_pnr.json", fs_out="top.fs",
                  device=DEVICE, extra_gpio=(), base_gpio=DEFAULT_PACK_GPIO):
-    """`gowin_pack -d <device> --cpu_as_gpio -o top.fs top_pnr.json`.
+    """`gowin_pack -d <device> [--<opt>_as_gpio ...] -o top.fs top_pnr.json`.
 
-    `--cpu_as_gpio` is the **packer** namespace (`gowin_pack.py:36`); the
-    `gw_sh` Tcl spelling `-use_cpu_as_gpio` is never emitted here.
+    The dual-purpose-pin flags are the **packer** namespace
+    (`gowin_pack.py:36`); the `gw_sh` Tcl spellings `-use_*_as_gpio` are never
+    emitted here.
     `extra_gpio` carries a shape's additional dual-purpose-pin flags (the
     AE350 shape passes `sspi_as_gpio` and `mspi_as_gpio`).
     """

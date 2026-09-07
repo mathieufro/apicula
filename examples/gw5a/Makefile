@@ -75,7 +75,7 @@ attosoc-primer25k-synth.json: attosoc/attosoc.v attosoc/picorv32.v
 # ============================================================
 # TangMega138k
 %-tangmega138k.fs: %-tangmega138k.json
-	gowin_pack --cpu_as_gpio -d GW5AST-138C -o $@ $<
+	gowin_pack -d GW5AST-138C -o $@ $<
 
 %-tangmega138k.json: %-tangmega138k-synth.json tangmega138k.cst
 	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tangmega138k.cst
@@ -118,12 +118,12 @@ dualpin-tangmega138k.json: dualpin-tangmega138k-synth.json tangmega138k.cst
 	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tangmega138k.cst --vopt sspi_as_gpio
 
 dualpin-tangmega138k.fs: dualpin-tangmega138k.json
-	gowin_pack --jtag_as_gpio --sspi_as_gpio --mspi_as_gpio --ready_as_gpio --done_as_gpio --cpu_as_gpio -d GW5AST-138C -o $@ $<
+	gowin_pack --jtag_as_gpio --sspi_as_gpio --mspi_as_gpio --ready_as_gpio --done_as_gpio -d GW5AST-138C -o $@ $<
 
 # ============================================================
 # TangConsole138k
 %-tangconsole138k.fs: %-tangconsole138k.json
-	gowin_pack --cpu_as_gpio -d GW5AST-138C -o $@ $<
+	gowin_pack -d GW5AST-138C -o $@ $<
 
 %-tangconsole138k.json: %-tangconsole138k-synth.json tangconsole138k.cst
 	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tangconsole138k.cst

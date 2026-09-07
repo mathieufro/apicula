@@ -81,15 +81,16 @@ def test_dualpin_shape_owns_its_packer_flag_set():
     assert cmd.count("--cpu_as_gpio") == 1
 
 
-def test_landed_shapes_keep_the_inherited_packer_flag():
-    """A shape with a plain flag list still packs exactly as it did before."""
+def test_landed_shapes_pack_with_only_the_flags_they_ask_for():
+    """The inherited `--cpu_as_gpio` is gone: it moved no bit on this device."""
     from fuzz.gw5ast138c.harness import openflow
     from fuzz.gw5ast138c.shapes import ae350_soc, smoke
 
     assert not gen.pack_flags_are_complete(smoke.SPEC)
     assert not gen.pack_flags_are_complete(ae350_soc.SPEC)
+    assert openflow.DEFAULT_PACK_GPIO == ()
     cmd = openflow.pack_command(
         ["gowin_pack"], extra_gpio=gen.pack_flags_of(ae350_soc.SPEC))
-    assert cmd == ["gowin_pack", "-d", openflow.DEVICE, "--cpu_as_gpio",
+    assert cmd == ["gowin_pack", "-d", openflow.DEVICE,
                    "--sspi_as_gpio", "--mspi_as_gpio",
                    "-o", "top.fs", "top_pnr.json"]

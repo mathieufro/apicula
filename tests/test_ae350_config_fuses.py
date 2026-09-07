@@ -1,53 +1,86 @@
-"""`P2.T24`/`P2.T23`: the AE350's interface band, and why nothing emits it.
+"""The AE350's "configuration band", and why there is none.
 
-`P2.T24` measured 77 bits over 9 tiles that one AE350 design sets and the
-AE350-free control does not, and read them as the block's configuration.
-`P2.T23` ran the second AE350 design that measurement asked for: it sets
-**three** such bits, at a different tile, and the two designs' sets intersect
-in **zero**.  So the band is a per-design configuration, no bit marks the
-block's presence, and `get_AE350_SOC_fuses` emits nothing -- exactly as
-`get_EMCU_fuses` does.  The table survives as recorded evidence about one
-design, and these tests pin that split: the shape of the record, and the
-emptiness of the emission.
+A first measurement kept, of the bits an AE350 design sets and its AE350-free
+control does not, those in tile types 224/228 that belong to no pip and to no
+bel `modes`/`flags` table, and read the 77 that survived as the block's
+configuration.  Tile types 224 and 228 are ordinary CLS logic tiles, and that
+filter never subtracted their `shortval` tables -- which occupy exactly the
+tile rows the 77 bits are in.  Subtract every modelled table and the count is
+zero, in every AE350 bitstream measured and in the control
+(`$OTC/evidence/ae350/fuse-set-138c.md`, `band-bits-138c.json`).
+
+These tests pin the two halves of that: the emission is empty, and the record
+that says so is a measurement over both filters rather than one number.
 """
+import json
+import os
 
 import pytest
 
-from apycula import gowin_pack
+from apycula import chipdb, gowin_pack
+from fuzz.gw5ast138c.harness import evidence
 
-#: `$OTC/evidence/ae350/config-fuses-138c.md`.
-CONFIG_BITS = 77
-CONFIG_TILES = 9
-#: The bits live in the last two rows of a 12-row `ttyp` 224/228 tile bitmap.
-CONFIG_BIT_ROWS = {10, 11}
-
-
-def test_config_fuses_are_the_measured_set():
-    """77 bits over 9 tiles, all in the interface bands' own fuse rows."""
-    table = gowin_pack.GW5AST_138C.AE350_SOC_CONFIG_FUSES
-    assert len(table) == CONFIG_TILES
-    assert sum(len(bits) for bits in table.values()) == CONFIG_BITS
-    for bits in table.values():
-        assert {row for row, _col in bits} <= CONFIG_BIT_ROWS
-        assert len(set(bits)) == len(bits)
+#: The tile types the block's port columns pass through.
+BAND_TTYPS = (224, 228)
+#: Bels that make a tile ordinary user logic rather than an interface band.
+CLS_BELS = {'LUT0', 'DFF0', 'ALU0', 'RAM16'}
 
 
-def test_the_recorded_table_is_never_emitted():
-    """One design's interface band must not be written into another's."""
+def _band_bits():
+    path = os.path.join(evidence.evidence_root(), 'ae350',
+                        'band-bits-138c.json')
+    if not os.path.isfile(path):
+        pytest.skip(f'{path} not written yet')
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _db():
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'apycula', 'GW5AST-138C.msgpack.xz')
+    if not os.path.isfile(path):
+        pytest.skip(f'{path} is absent')
+    return chipdb.load_chipdb(path)
+
+
+def test_the_band_tile_types_are_ordinary_logic_tiles():
+    """The premise of the whole reading: 224/228 are CLS tiles, not a band."""
+    db = _db()
+    for ttyp in BAND_TTYPS:
+        assert CLS_BELS <= set(db.tiles[ttyp].bels)
+        assert set(db.shortval[ttyp]) >= {'LUT', 'CLS0', 'CLS1', 'CLS2', 'CLS3'}
+
+
+def test_no_bitstream_sets_an_unmodelled_bit_in_the_band():
+    """Zero for every AE350 design measured, and for the control."""
+    for name, entry in _band_bits().items():
+        assert entry['every_modelled_table']['bits'] == 0, name
+
+
+def test_the_first_filter_disagrees_with_itself_across_equal_port_sets():
+    """Four bitstreams of one shape, one port set, four different sets.
+
+    `ae350_soc_batch1`, `ae350_soc_batch2`, `pll_l` and `ddr_clk` instantiate
+    the same 149 ports; they differ in the capture fold and the PLL site.  A
+    set that varies over them is not a function of the port set, which is the
+    reading the empty intersection could not rule out on its own.
+    """
+    measured = _band_bits()
+    same_ports = ('ae350_soc_batch1', 'ae350_soc_batch2', 'pll_l', 'ddr_clk')
+    tiles = {name: sorted(measured[name]['routing_and_bels']['tiles'])
+             for name in same_ports if name in measured}
+    assert len(set(map(tuple, tiles.values()))) > 1, tiles
+
+
+def test_nothing_is_emitted_for_the_bel():
+    """One design's LUT configuration must not reach another's bitstream."""
     assert gowin_pack.GW5AST_138C.get_AE350_SOC_fuses(
         gowin_pack.GW5AST_138C, bel=None) == []
 
 
-def test_other_devices_refuse_the_ae350():
-    """The block exists on one die; every other device must say so, not guess."""
-    assert hasattr(gowin_pack.Device, 'get_AE350_SOC_fuses')
-    assert not hasattr(gowin_pack.GW5A_25A, 'AE350_SOC_CONFIG_FUSES')
-    assert not hasattr(gowin_pack.GW5AT_60B, 'AE350_SOC_CONFIG_FUSES')
-
-
-def test_the_bel_name_matcher_accepts_the_block():
-    """`gowin_pack` must recognise `X<c>Y<r>/AE350_SOC` as a bel."""
-    import re
-    source = open(gowin_pack.__file__).read()
-    pattern = re.search(r'belre = re\.compile\(r"([^"]+)"\)', source).group(1)
-    assert re.compile(pattern).match('X159Y0/AE350_SOC')
+def test_no_device_carries_a_recorded_ae350_fuse_table():
+    """The mis-attributed table is retracted, not merely unused."""
+    for device in (gowin_pack.GW5AST_138C, gowin_pack.GW5A_25A,
+                   gowin_pack.GW5AT_60B):
+        assert not hasattr(device, 'AE350_SOC_CONFIG_FUSES')

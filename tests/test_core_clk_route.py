@@ -6,14 +6,11 @@ not device data.  These tests guard the measurement's record: exactly one
 verdict line each, and a chipdb whose model of the core-clock tap agrees with
 what the vendor was seen to do.
 
-The blueprint's assumed spelling for the model, `fixed_clk['CORE_CLK'][:3]`,
-does not exist on this device and never did: the chipdb carries no fixed-edge
-table for the block.  What it carries is one tap wire per clock port in
-`extra_func[(0, 159)]['ae350']['ins']`, and `P2.T23` measured that the vendor
-does not route `CORE_CLK` through it at all -- it takes the dedicated PLL
-route, leaving the tap as a fabric alternative.  So the agreement these tests
-assert is between the recorded route line and the tap the model still offers,
-which is the assertion the missing table was standing in for.
+The model of record is `extra_func[(0, 159)]['ae350']['core_clk']`: one
+fuseless pip per PLL site into a wire of the anchor tile that belongs to no
+fabric line.  The fabric tap the `.dat` record names for the port is kept
+beside it, unbound, because the vendor never routes through it -- a port with
+a fabric alternative is not a fixed connection.
 """
 import os
 import re
@@ -55,29 +52,49 @@ def test_ddr_clk_route_line_present_exactly_once():
     assert len(hits) == 1
 
 
-def test_core_clk_model_matches_measurement():
-    """The model must not claim an exclusivity the measurement denies.
-
-    Today the chipdb models no PLL edge for `CORE_CLK` at all -- only the
-    fabric tap `P2.T23` measured the vendor never taking -- so there is nothing
-    to contradict.  The moment `P2.T10` adds the dedicated edge this row is
-    about, it has to add one **per PLL site**: a `fixed_clk`-style entry that
-    names `PLL_R[0]` alone while the measurement says `PLL_L[0]` is legal too
-    fails here, which is the entire point of measuring.
-    """
-    verdict = CORE_LINE.findall(_read('core-clock.md'))[0]
-    db = chipdb.load_chipdb(
+def _db():
+    return chipdb.load_chipdb(
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      'apycula', f'{DEVICE}.msgpack.xz'))
-    ae350 = db.extra_func[(0, 159)]['ae350']
-    assert ae350['ins']['CORE_CLK'] == 'AE350_SOCCORE_CLKCLK1'
 
-    modelled = getattr(db, 'fixed_clk', None) or ae350.get('fixed_clk') or {}
-    edge = str(modelled.get('CORE_CLK', ''))
-    if verdict == 'PLL_L[0] also legal' and 'PLL_R[0]' in edge:
-        assert 'PLL_L[0]' in edge, (
+
+def test_core_clk_model_matches_measurement():
+    """The model owes one dedicated edge per PLL site the measurement found."""
+    verdict = CORE_LINE.findall(_read('core-clock.md'))[0]
+    ae350 = _db().extra_func[(0, 159)]['ae350']
+    sources = set(ae350['core_clk']['sources'])
+    assert 'PLL_R[0]' in sources
+    if verdict == 'PLL_L[0] also legal':
+        assert 'PLL_L[0]' in sources, (
             'the chipdb models the core clock as PLL_R[0]-only, but the vendor '
             'built it from PLL_L[0] over the same zero-delay route')
+
+
+def test_core_clk_is_bound_to_the_dedicated_wire_not_the_fabric_tap():
+    """The port has no fabric route: the tap is recorded, never offered."""
+    db = _db()
+    ae350 = db.extra_func[(0, 159)]['ae350']
+    edge = ae350['core_clk']
+    assert ae350['ins']['CORE_CLK'] == edge['wire']
+    assert edge['routable'] is False
+    assert edge['fabric_tap'] is not None
+    fabric = [name for name, (_kind, wires) in db.nodes.items()
+              if (0, 159, edge['wire']) in wires and (0, 87, 'CLK1') in wires]
+    assert fabric == []
+
+
+def test_each_dedicated_hop_is_one_fuseless_pip_from_its_pll():
+    """A fixed connection costs no bit and has exactly one source per site."""
+    db = _db()
+    edge = db.extra_func[(0, 159)]['ae350']['core_clk']
+    pips = db.tiles[db.grid[0][159]].pips[edge['wire']]
+    assert set(pips) == {src['alias'] for src in edge['sources'].values()}
+    for site, source in edge['sources'].items():
+        assert pips[source['alias']] == set(), site
+        prow, pcol, pwire = source['pll_wire']
+        assert any((0, 159, source['alias']) in wires
+                   and (prow, pcol, pwire) in wires
+                   for _kind, wires in db.nodes.values()), site
 
 
 def test_pll_placement_run_count_at_most_two():

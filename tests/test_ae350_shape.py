@@ -1,7 +1,7 @@
-"""`P2.T20` -- the `AE350_SOC` vehicle as a `ShapeSpec`.
+"""The `AE350_SOC` vehicle as a `ShapeSpec`.
 
 The blueprint wrote these tests against the `Emb_TCM` subset and a design
-whose clocks were *ports*.  The `P2.T26` rescope replaced that vehicle with
+whose clocks were *ports*.  A later rescope replaced that vehicle with
 the full 149-port one (the vendor places and routes all of it in 15 s), so the
 properties are the same and their subjects moved: there is one clock **pin**
 and six internal clock **nets**, and the placement constraint pins the `PLL`
@@ -81,7 +81,7 @@ def test_ae350_shape_sspi_setting_reaches_nextpnr_and_the_packer(spec):
 
 
 def test_ae350_shape_six_clock_ports_have_six_distinct_nets(design):
-    """The head-order defect `P2.T22` recorded: one net for six taps."""
+    """The head-order defect an earlier vehicle had: one net for six taps."""
     text = (design / "top.v").read_text()
     nets = {}
     for port in ae350_soc.NAMED_CLOCKS:

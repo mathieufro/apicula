@@ -1,17 +1,18 @@
 """`ae350_soc` -- the `AE350_SOC` fabric-tap vehicle as a harness shape.
 
-`P2.T20`, re-targeted by the `P2.T26` rescope: the blueprint's `Emb_TCM`
-subset is *not* the vehicle, because run `p2t26-tilewires` showed the vendor
+The `Emb_TCM` subset the blueprint originally scoped is *not* the vehicle,
+because run `p2t26-tilewires` showed the vendor
 places and routes **all 149 ports at once in 15 seconds**, so the full port
 set is cheaper than the subset and strictly more informative.  What was
-missing after `P2.T22` was not a smaller design -- it was a `ShapeSpec`, and
+missing from the earlier hand-written vehicle was not a smaller design --
+it was a `ShapeSpec`, and
 without one `equiv` has no `ScopeSpec` and can only run the whole-device
 calibration (`D32`, F6).  This file is that `ShapeSpec`.
 
-Four things this shape fixes that the hand-written `P2.T22` vehicle could not
+Four things this shape fixes that the earlier hand-written vehicle could not
 express:
 
-1. **Six distinct clock nets.**  The `P2.T22` vehicle drove `CORE_CLK`,
+1. **Six distinct clock nets.**  The earlier vehicle drove `CORE_CLK`,
    `DDR_CLK`, `AHB_CLK`, `APB_CLK`, `RTC_CLK` and `DBG_TCK` from one fabric
    net, so the six `CLK`-class taps in the block's band were
    indistinguishable and the *head order* -- which tap belongs to which clock
@@ -44,7 +45,7 @@ import re
 
 from . import PinSpec, ScopeSpec, ShapeSpec
 
-#: The bel's own tile (`P2.T10`/`P2.T22`: die row 0, column 159).
+#: The bel's own tile: die row 0, column 159 (MEASURED, `evidence/ae350/portmap-138c.md`).
 AE350_ANCHOR = (0, 159)
 
 #: The block's measured footprint in die row 0 (`wire-map-138c.md` §3): the
@@ -54,7 +55,7 @@ BAND_ROW = 0
 BAND_COLS = range(145, 182)
 
 #: `PLL_R[0]`'s anchor `(row, col)` and the three tiles of the site
-#: (`shapes/clocking_pll.py`, `P1.T19` MEASURED).
+#: (`shapes/clocking_pll.py`, MEASURED, `evidence/plla/`).
 PLL_SITE = "PLL_R[0]"
 PLL_ANCHOR = (27, 177)
 
@@ -64,7 +65,8 @@ PLL_ANCHOR = (27, 177)
 #: taps cannot be met by placing a cell "at" them.
 FLOP_TILE = (1, 160)
 
-#: `PLL` parameters: the `P1.T22` operating point, with `CLKOUT1` enabled
+#: `PLL` parameters: the operating point MEASURED in `evidence/plla/`, with
+#: `CLKOUT1` enabled
 #: because that is the output MUG1031 routes to `CORE_CLK`.
 PLL_PARAMS = (
     ("FCLKIN", '"100.0"'),
@@ -150,7 +152,7 @@ def _load_map():
         raise PortMapError(
             f"the chipdb has no extra_func[{AE350_ANCHOR}]['ae350']: this "
             "shape is only meaningful against a database that carries the "
-            "AE350 bel (P2.T07/P2.T08)")
+            "AE350 bel")
     return extra["ins"], extra["outs"], extra.get("unmapped", {})
 
 
@@ -266,7 +268,7 @@ def _divider():
     """Five ripple stages: five distinct clock nets, and no ALU cell.
 
     A counter would pack into `ALU` bels, which the `c1` decode check unpacks
-    with `noalu=True` and therefore reports missing (MEASURED, `P1.T14`); a
+    with `noalu=True` and therefore reports missing (MEASURED, `evidence/clkdiv/`); a
     toggle chain is LUT+DFF only and does not step on that.
     """
     lines = ["    // Five ripple stages -- one distinct clock net per AE350",
@@ -421,7 +423,7 @@ def scope_tiles():
     * the 216 `ae350_config` tiles -- ordinary fabric tiles that also carry
       the block's interface band.  The vendor fills them with the design's own
       LUTs and flops, so comparing them at `E0` compares free placement, which
-      `D32` excludes by definition (MEASURED, `P2.T23`: including them turns
+      `D32` excludes by definition (MEASURED, `evidence/ae350/e1-138c.md`: including them turns
       0 in-scope cell differences into 1 515).  Their bits are covered by the
       raw residual of §5.1b, which is where a configuration difference
       belongs.
@@ -430,7 +432,7 @@ def scope_tiles():
       `INS_LOC` evidence, and it also carries the one thing the two flows
       spell differently: GowinSynthesis realises a bare `DFF` primitive as the
       `DFFR` mode with `LSR` tied to `VCC`, yosys and nextpnr as plain `DFF`
-      (MEASURED, `P2.T23`: 16 attribute items over the 8 flops).  That is the
+      (MEASURED, `evidence/ae350/e1-138c.md`: 16 attribute items over the 8 flops).  That is the
       two synthesisers' flop decomposition (`S6`, `D32`, §5.1d), a property of
       neither the AE350 nor this shape, and §5.3 forbids masking it.
     """

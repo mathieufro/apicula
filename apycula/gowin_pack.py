@@ -6860,53 +6860,19 @@ class GW5AT_60B(GW5A):
 ################################################################
 class GW5AST_138C(GW5A):
     """ GW5AST-138C chip. Tangmega138k board """
-    #: MEASURED (`P2.T24`, `$OTC/evidence/ae350/config-fuses-138c.md`): the bits
-    #: the vendor sets in the AE350's interface bands and that no pip and no bel
-    #: fuse of those tile types accounts for. Keyed `(x, y)`, i.e. `(col, row)`,
-    #: values `(bit_row, bit_col)` inside the tile.
-    #:
-    #: `P2.T23` settled the question `P2.T24` left open, with a second AE350
-    #: design: the band is a **per-design** configuration. That design's
-    #: vendor bitstream carries 3 such bits, at tile `(145, 10)`, in the same
-    #: `[(10, 24), (10, 31), (11, 31)]` pattern this table has at `(156, 10)`
-    #: -- and the intersection of the two designs' sets is empty. So this is
-    #: recorded evidence about one design, never a fuse set to emit:
-    #: `get_AE350_SOC_fuses` returns `[]`.
-    AE350_SOC_CONFIG_FUSES = {
-        (156, 10): [(10, 24), (10, 31), (11, 31)],
-        (157, 10): [(10, 24), (10, 27), (10, 31), (10, 56), (10, 63), (10, 85),
-                    (10, 93), (10, 112), (10, 118), (11, 31), (11, 63),
-                    (11, 93), (11, 118)],
-        (158, 10): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
-                    (11, 31), (11, 63), (11, 93)],
-        (159, 10): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
-                    (11, 31), (11, 63), (11, 93)],
-        (160, 10): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
-                    (11, 31), (11, 63), (11, 93)],
-        (158, 28): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
-                    (10, 112), (10, 118), (11, 31), (11, 63), (11, 93),
-                    (11, 113), (11, 118)],
-        (159, 28): [(10, 24), (10, 27), (10, 31), (10, 56), (10, 63), (10, 85),
-                    (10, 93), (10, 112), (10, 118), (11, 31), (11, 63),
-                    (11, 93), (11, 118)],
-        (159, 46): [(10, 31), (10, 118), (11, 31), (11, 114), (11, 118)],
-        (159, 64): [(10, 118), (11, 114), (11, 118)],
-    }
-
     #==============================
     #========== AE350 SoC
     #==============================
     def get_AE350_SOC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        """ No fuse, as for the `EMCU` -- MEASURED on two AE350 designs.
+        """ No fuse, as for the `EMCU` -- MEASURED, not assumed.
 
-        `AE350_SOC_CONFIG_FUSES` records the interface-band bits one design
-        sets; a second AE350 design (`P2.T23`, the `ae350_soc` shape) sets
-        **three** bits, in a different tile, and shares not one bit with it.
-        No bit of either set is therefore attributable to the block being
-        present, and emitting the table would write one design's interface
-        configuration into every other design's bitstream. The band is a
-        per-design configuration this flow does not model yet, recorded as a
-        named gap rather than approximated by a constant.
+        `$OTC/evidence/ae350/fuse-set-138c.md`: over five AE350 bitstreams and
+        one AE350-free control, no bit of tile types 224/228 that some chipdb
+        table does not already model is set. Those tile types are ordinary CLS
+        logic tiles, and the bits once read as an interface band are their
+        `LUT`/`CLS*` configuration. The block's whole footprint in the
+        bitstream is the routing of its port taps, which is why
+        `gowin_unpack.parse_ae350` recovers it from a pip and not from a fuse.
         """
         return []
 
@@ -7156,13 +7122,12 @@ class GW5AST_138C(GW5A):
             attrvals.append(AttrVal('RECONFIG_AS_GPIO', 'YES'))
         if self.cli_args.args.i2c_as_gpio:
             attrvals.append(AttrVal('I2C_AS_GPIO', 'YES'))
-        if self.cli_args.args.cpu_as_gpio:
-            attrvals.append(AttrVal('CPU_AS_GPIO_0', 'YES'))
-            attrvals.append(AttrVal('CPU_AS_GPIO_1', 'YES'))
-            # CPU_AS_GPIO_2 (attrids handle 37) is defined for this device and
-            # deliberately not emitted: MEASURED (P2.T29, evidence/dualpin) that
-            # neither it nor CPU_AS_GPIO_0/1 moves a bit the vendor also moves,
-            # and a used pin's configuration is the class PR #423 fixed.
+        # `--cpu_as_gpio` sets no bit on this device. MEASURED
+        # (`$OTC/evidence/dualpin/diff/cpu.json`): the vendor moves no bit for
+        # the option, while `CPU_AS_GPIO_0`/`_1` move two -- an IO setting the
+        # silicon's own tool does not make, which is the class PR #423 fixed.
+        # `CPU_AS_GPIO_2` (attrids handle 37) is defined for the device and is
+        # not emitted either, for the same measurement.
         return attrvals
 
     #==============================

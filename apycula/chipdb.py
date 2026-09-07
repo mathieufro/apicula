@@ -4816,17 +4816,17 @@ def fse_create_emcu(dev, device, dat):
 # triples are all-sentinel on every GW5 device measured, so there is nothing to
 # slice there (`tests/test_ae350_dat_tables.py` pins that as a control).
 #
-# Geometry, measured (`evidence/ae350/e0-138c.md` SS5): every live record names
-# die row 0, and both directions live in **one** band. Row 0 is a row of
-# routing tiles with no bels of their own, so a tap is an ordinary local wire
-# and its direction follows the routing graph, not the table it was read from:
-# `F`/`Q`/`OF` are the destination of no pip, so only the block can drive them
-# and they are its *outputs*; `A`-`D`, `CE`, `CLK` and `LSR` are pip
-# destinations and dead ends unless the block reads them, so they are its
-# *inputs*. The vendor bitstream for the 149-port vehicle agrees bit for bit:
-# it drives 415 of the 416 `A`-class wires and sources 418 pips from `F`/`Q`/
-# `OF`, and the `CE`, `LSR` and `CLK` tap counts are exactly the block's 13
-# clock-enable, 2 reset and 6 clock inputs.
+# Geometry, MEASURED (`evidence/ae350/portmap-reconciled-138c.md`, the map of
+# record): every live record names die row 0, and both directions live in
+# **one** band. Row 0 is a row of routing tiles with no bels of their own, so a
+# tap is an ordinary local wire and its direction follows the routing graph,
+# not the table it was read from: `F`/`Q`/`OF` are the destination of no pip,
+# so only the block can drive them and they are its *outputs*; `A`-`D`, `CE`,
+# `CLK` and `LSR` are pip destinations and dead ends unless the block reads
+# them, so they are its *inputs*. That split is read off the vendor bitstream
+# of the 149-port vehicle rather than assumed: over every decoded row-0 tile
+# the vendor ends 1476 pips on the first group and starts 740 from the second,
+# with no wire of either group ever used the other way.
 #
 # The two tables are therefore not one direction each. `Ae350SocOuts` holds the
 # whole input map in one run, with the head and tail of the output map either
@@ -4929,6 +4929,54 @@ _AE350_DAT_ABSENT = 0xffff
 #: to a real wire: a design that drives such a port fails naming the port.
 _AE350_UNMAPPED_PREFIX = 'AE350_UNMAPPED_'
 
+#: The core clock does not come off the fabric. MEASURED
+#: (`evidence/ae350/core-clock.md`): the vendor routes `CLKOUT1` of a top PLL
+#: straight into `CORE_CLK` with `tNET 0.000 ns`, from `PLL_L[0]` and from
+#: `PLL_R[0]` alike, and never realises the `CLK1` tap the port record names.
+#: The edge is modelled as one fuseless pip per PLL site into a wire of the
+#: anchor tile that belongs to no fabric line, so the port has exactly one hop,
+#: it costs no bit, and no fabric route can reach it.
+_AE350_CORE_CLK_PORT = 'CORE_CLK'
+_AE350_CORE_CLK_WIRE = 'AE350_SOC_CORE_CLK'
+_AE350_CORE_CLK_PLL_SITES = ('PLL_L[0]', 'PLL_R[0]')
+_AE350_CORE_CLK_PLL_OUTPUT = 'CLKOUT1'
+
+
+def _ae350_pll_sites(dev):
+    """`{macro: (row, col, clkout1_wire)}` for the sites that drive `CORE_CLK`."""
+    sites = {}
+    for (row, col), funcs in dev.extra_func.items():
+        pll = funcs.get('pll')
+        if not pll:
+            continue
+        macro = pll.get('macro')
+        if macro not in _AE350_CORE_CLK_PLL_SITES:
+            continue
+        wire = (pll.get('outputs') or {}).get(_AE350_CORE_CLK_PLL_OUTPUT)
+        if wire is not None:
+            sites[macro] = (row, col, wire)
+    return sites
+
+
+def _ae350_core_clk_edge(dev, row, col):
+    """Wire the dedicated PLL hops into `CORE_CLK` and describe them.
+
+    Returns the descriptor stored under `extra_func['ae350']['core_clk']`: the
+    bel-pin wire, and one source per PLL site with the alias wire the site's
+    `CLKOUT1` reaches the anchor tile through. An empty `sources` means this
+    device data names no such PLL site, and the caller leaves the port unbound
+    rather than falling back to a fabric tap.
+    """
+    sources = {}
+    for macro, (prow, pcol, pwire) in sorted(_ae350_pll_sites(dev).items()):
+        alias = f'AE350_CORE_CLK_{re.sub(r"[^A-Z0-9]", "", macro)}'
+        node = add_node(dev, f'X{col}Y{row}/{alias}', 'PLL_O', prow, pcol, pwire)
+        add_node(dev, node, 'PLL_O', row, col, alias)
+        dev.wire_delay[alias] = dev.wire_delay.get(pwire, 'X0')
+        dev[row, col].pips.setdefault(_AE350_CORE_CLK_WIRE, {})[alias] = set()
+        sources[macro] = {'alias': alias, 'pll_wire': [prow, pcol, pwire]}
+    return {'wire': _AE350_CORE_CLK_WIRE, 'sources': sources, 'routable': False}
+
 
 def _ae350_port_bits(ports):
     """Yield the port name of every bit of `ports`, in table-slot order.
@@ -4973,6 +5021,14 @@ def _ae350_wire_drives_block(entry):
     drive them: those are its outputs. Everything else -- `A`-`D`, `CE`, `CLK`,
     `LSR` -- is a pip destination and a dead end unless the block reads it:
     those are its inputs.
+
+    The class split is a shorthand for a measurement, not for a name: MEASURED
+    (`evidence/ae350/portmap-reconciled-138c.md`, fixture
+    `tests/data/ae350-pip-roles-138c.json`) over the vendor bitstream of the
+    149-port vehicle, where every one of the block's own taps lands on the side
+    this predicate puts it and no row-0 wire is ever used both ways.
+    `tests/test_ae350_tap_directions.py` holds the map against that fixture, so
+    a flipped class here fails against evidence this function did not produce.
     """
     if entry is None or len(entry) < 3:
         return False
@@ -5058,6 +5114,9 @@ def fse_create_ae350(dev, device, dat):
     driven = [i for i, e in enumerate(outs_table) if _ae350_wire_drives_block(e)]
     first_in, last_in = (driven[0], driven[-1]) if driven else (0, -1)
 
+    core_clk = _ae350_core_clk_edge(dev, row, col)
+    extra_func['core_clk'] = core_clk
+
     directions = (
         (_AE350_SOC_INPUTS,
          _ae350_input_records(outs_table, grid_rows, grid_cols),
@@ -5070,6 +5129,13 @@ def fse_create_ae350(dev, device, dat):
         for bit, port in enumerate(_ae350_port_bits(ports)):
             tap, reason = _ae350_tap(
                 table[bit] if bit < len(table) else None, grid_rows, grid_cols)
+            if port == _AE350_CORE_CLK_PORT:
+                # The port record still names a fabric tap; it is recorded and
+                # not bound, because the vendor takes the dedicated PLL hop and
+                # offering the tap as well would let the router pick a route the
+                # silicon does not use.
+                core_clk['fabric_tap'] = list(tap) if tap else None
+                continue
             if tap is None:
                 pins[port] = f'{_AE350_UNMAPPED_PREFIX}{port}'
                 unmapped[port] = reason
@@ -5079,6 +5145,13 @@ def fse_create_ae350(dev, device, dat):
                       port,
                       'TILE_CLK' if port in _AE350_SOC_CLOCK_PORTS else wire_type,
                       pins)
+
+    if core_clk['sources']:
+        ins[_AE350_CORE_CLK_PORT] = core_clk['wire']
+    else:
+        ins[_AE350_CORE_CLK_PORT] = (
+            f'{_AE350_UNMAPPED_PREFIX}{_AE350_CORE_CLK_PORT}')
+        unmapped[_AE350_CORE_CLK_PORT] = 'no-dedicated-pll-site'
 
     config_tiles = [(r, c)
                     for r, grid_row in enumerate(dev.grid)

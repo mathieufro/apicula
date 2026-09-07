@@ -13,9 +13,11 @@ crossing that routes two logically distinct signals onto one net without
 either failing to build or looking wrong in a diff.
 
 This is a regression test, not a discovery task: it locks in the injectivity
-`P2.T07`/`P2.T08` already measured (`portmap-138c.md` "+698 Himbaechel nodes,
+already measured (`portmap-138c.md` "+698 Himbaechel nodes,
 all `X145Y0/AE350_SOC*` aliases") against the *installed* chipdb, sha256
-`d6e00bdc919cf4e248a98337a4891781b43e25844749f7ff03afda34ded8c367`.
+`7f3c64c94fcf6ae8f4cfbe4e8a90bf38af83251d4bc0f818fd347636580f506e` -- the
+`d6e00bdc...` build plus the dedicated `CLKOUT1 -> CORE_CLK` edge, which adds
+no node whose members cross two ports.
 """
 
 from pathlib import Path
@@ -29,7 +31,7 @@ ANCHOR_NODE_PREFIX = "X159Y0/AE350_SOC"
 ANCHOR_TILE = (0, 159)
 #: The chipdb this test is a regression lock for (`portmap-138c.md`).
 EXPECTED_SHA256 = (
-    "d6e00bdc919cf4e248a98337a4891781b43e25844749f7ff03afda34ded8c367"
+    "7f3c64c94fcf6ae8f4cfbe4e8a90bf38af83251d4bc0f818fd347636580f506e"
 )
 
 

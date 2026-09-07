@@ -552,6 +552,66 @@ def parse_hclk_block(db, row, col, tile):
         bels[f'HCLK{hclk_idx}'] = block
     return bels
 
+#: The one `AE350_SOC` site of the GW5AST-138C, and the device that has it.
+_AE350_DEVICE = 'GW5AST-138C'
+_AE350_ANCHOR = (0, 159)
+
+
+def ae350_tap_wires(db):
+    """`{(row, col, wire): port}` for every fabric tap of the `AE350_SOC` bel.
+
+    A port's bel pin is a wire of the anchor cell; when the tap itself lives in
+    another cell the two are one Himbaechel node, so the node's members are
+    where a routed tap actually shows up in the bitstream.
+    """
+    ae350 = (db.extra_func.get(_AE350_ANCHOR) or {}).get('ae350')
+    if not ae350:
+        return {}
+    row, col = _AE350_ANCHOR
+    by_wire = {}
+    for direction in ('ins', 'outs'):
+        for port, wire in (ae350.get(direction) or {}).items():
+            if wire.startswith('AE350_UNMAPPED_'):
+                continue
+            by_wire.setdefault((row, col, wire), port)
+    taps = dict(by_wire)
+    for _name, (_kind, members) in db.nodes.items():
+        ports = {by_wire[m] for m in members if m in by_wire}
+        if len(ports) != 1:
+            continue
+        port = ports.pop()
+        for member in members:
+            taps.setdefault(tuple(member), port)
+    return taps
+
+
+def parse_ae350(db, pips_by_cell, device=None):
+    """`{'AE350_SOC': set()}` when the bitstream routes one of the block's taps.
+
+    The block itself is fuseless: MEASURED
+    (`$OTC/evidence/ae350/config-fuses-138c.md`) that an AE350 design and the
+    same design without the block differ in the block's band only by pips, and
+    that no bel fuse, no attribute table and no configuration band carries its
+    presence. So the substitute signature a decode can ask for is the routing:
+    a port tap of the block is a dead end for every other cell on the die, so a
+    pip that drives one -- or is driven by one -- exists only because the block
+    is there. The bel carries no attributes because the bitstream records none.
+
+    `pips_by_cell` is `{(row, col): {dest_wire: src_wire}}` in the local wire
+    names `parse_tile_` returns.
+    """
+    if (device or _device) != _AE350_DEVICE:
+        return {}
+    taps = ae350_tap_wires(db)
+    if not taps:
+        return {}
+    for (row, col), pips in pips_by_cell.items():
+        for dest, src in pips.items():
+            if (row, col, dest) in taps or (row, col, src) in taps:
+                return {'AE350_SOC': set()}
+    return {}
+
+
 def hclk_decode_completeness(db, device):
     """`S6b` for the HCLK primitives: what of the HCLK fuse space is decoded.
 
@@ -1708,12 +1768,14 @@ def main():
         #print("bels:", bels)
         tile2verilog(row, col, bels, pips, clock_pips, mod, cst, db)
 
+    ae350_pips = {}
     for idx, t in bm.items():
         row, col = idx
         # skip banks
         if (row, col) in db.bank_tiles.values():
             continue
         bels, pips, clock_pips = parse_tile_(db, row, col, t, bm, noiostd = False)
+        ae350_pips[(row, col)] = dict(pips, **clock_pips)
         #print("bels:", idx, bels)
         #print(pips)
         #print(clock_pips)
@@ -1723,6 +1785,13 @@ def main():
             removeLUTs(bels)
         ram16_remove_bels(bels)
         tile2verilog(row, col, bels, pips, clock_pips, mod, cst, db)
+
+    # The block's presence is recovered from routing, not from a fuse, so it
+    # is emitted here rather than by `tile2verilog`: it belongs to no one cell.
+    for name in parse_ae350(db, ae350_pips):
+        row, col = _AE350_ANCHOR
+        mod.primitives[f'{name}_R{row}C{col}'] = codegen.Primitive(
+            name, f'{name}_R{row}C{col}')
 
     fix_plls(db, mod)
 

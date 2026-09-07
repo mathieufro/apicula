@@ -560,6 +560,21 @@ def unpack_netlist(fs_path, device=DEVICE, db=None, noalu=False):
         gu.ram16_remove_bels(bels)
         absorb(row, col, bels, pips, clock_pips)
 
+    # The AE350 is fuseless, so no tile decodes it; its presence is recovered
+    # from the routing of its port taps, which is a whole-band question
+    # (`gowin_unpack.parse_ae350`) rather than a per-tile one.
+    band_pips = {}
+    for (row, col), tile in bm.items():
+        if (row, col) in bank_positions or row != gu._AE350_ANCHOR[0]:
+            continue
+        _bels, pips, clock_pips = gu.parse_tile_(db, row, col, tile, bm,
+                                                 noiostd=False)
+        band_pips[(row, col)] = dict(pips, **clock_pips)
+    for name in gu.parse_ae350(db, band_pips, device=device):
+        cell_type, z = split_bel_name(name)
+        netlist.cells[Cell(gu._AE350_ANCHOR[1], gu._AE350_ANCHOR[0], z,
+                           cell_type)] = frozenset()
+
     _build_nets(netlist, db, raw_pips)
     return netlist
 
@@ -888,8 +903,7 @@ RESIDUAL_CATEGORIES = {
 #: instead for that chained `CLKDIV` on the same lane; see
 #: `_clkdiv2_recovered_via_chain`.  Leaving it out would make every HCLK-lane
 #: design that uses a `CLKDIV2` permanently `diff`.
-NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG", "CLKDIV2",
-                        "AE350_SOC")
+NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG", "CLKDIV2")
 
 #: Cell-name prefix of nextpnr's `DHCEN` placeholders.  When a design holds any
 #: `DHCE`, `pack.cc` binds one `$PACKER_DHCEN_<n>` cell to **every** `DHCEN`
@@ -1483,6 +1497,38 @@ def tile_coord_delta(bitmap_v, bitmap_o, db):
     return out
 
 
+def open_only_from_tiles(tiles_v, tiles_o):
+    """`{(row, col): {(i, j), ...}}` for the bits **only the open flow sets**.
+
+    `tile_coord_delta` is symmetric, which makes `D35`'s residual blind to the
+    direction of a difference.  This is the other half: a bit set in the open
+    bitstream and clear in the vendor's is a fuse this flow emits and the
+    silicon's own tool does not, which no amount of vendor-side modelling can
+    explain away.  Split out from `tile_coord_delta_directed` so the classifier
+    can be exercised on a hand-built grid.
+    """
+    out = {}
+    for key, a in tiles_v.items():
+        b = tiles_o.get(key)
+        if b is None:
+            continue
+        coords = {(i, j)
+                  for i, (ra, rb) in enumerate(zip(a, b))
+                  for j, (x, y) in enumerate(zip(ra, rb)) if y and not x}
+        if coords:
+            out[key] = coords
+    return out
+
+
+def tile_coord_delta_directed(bitmap_v, bitmap_o, db):
+    """`open_only_from_tiles` over the same grid split the unpacker uses."""
+    from apycula import chipdb as _chipdb
+
+    return open_only_from_tiles(
+        _chipdb.tile_bitmap(db, bitmap_v, empty=True),
+        _chipdb.tile_bitmap(db, bitmap_o, empty=True))
+
+
 def tile_bit_delta(bitmap_v, bitmap_o, db):
     """Differing fuse bits per `(row, col)` tile, plus the ones in no tile.
 
@@ -1742,8 +1788,9 @@ def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
     if scope_tiles is not None:
         want = {tuple(t) for t in scope_tiles}
         coords = {t: v for t, v in coords.items() if t in want}
+    cells_v, cells_o = cells_by_tile(nl_v), cells_by_tile(nl_o)
     out.update(classify_residual(
-        tile_delta, cells_by_tile(nl_v), cells_by_tile(nl_o),
+        tile_delta, cells_v, cells_o,
         outside_every_tile=(0 if scope_tiles is not None
                             else total - in_tiles + out["bitmap_row_delta"]),
         outside=({} if scope_tiles is not None else out["outside_bitmap"]),
@@ -1751,6 +1798,17 @@ def residual(vendor_fs, open_fs, db=None, nl_v=None, nl_o=None, mask=None,
         shape_class=shape_class,
         tile_coords=coords, db=db,
         nl_v=nl_v, nl_o=nl_o, calibration=calibration))
+
+    open_only = tile_coord_delta_directed(bmv, bmo, db)
+    if scope_tiles is not None:
+        open_only = {t: v for t, v in open_only.items() if t in want}
+    over = classify_residual(
+        {t: len(c) for t, c in open_only.items()}, cells_v, cells_o,
+        mask=mask, level=level, shape_class=shape_class,
+        tile_coords=open_only, db=db, nl_v=nl_v, nl_o=nl_o,
+        calibration=calibration)["unexplained_bits"]
+    out["fuses_over_emitted"] = over
+    out["over_emitted_total_bits"] = sum(r.get("bits", 0) for r in over)
     return out
 
 
@@ -2117,8 +2175,14 @@ def compare_e0(vendor, open_, scope=None, mask=None, residual=None):
         result.verdict = "DIFF"
     elif _residual_is_dirty(result.residual):
         result.verdict = "DIFF"
-        result.notes = ("sets identical after the mask, but the raw residual "
-                        "of spec-harness.md 5.1b is non-empty (D35)")
+        over = (result.residual or {}).get("fuses_over_emitted")
+        result.notes = (
+            "sets identical after the mask, but the open flow sets "
+            f"{sum(r.get('bits', 0) for r in over)} bit(s) the vendor does not "
+            "(spec-harness.md 5.1b, symmetric residual)"
+            if over else
+            "sets identical after the mask, but the raw residual "
+            "of spec-harness.md 5.1b is non-empty (D35)")
     else:
         result.verdict = "EQUIV E0 ok"
     return result
@@ -2133,6 +2197,11 @@ def _residual_is_dirty(residual):
     """
     if not residual:
         return False
+    if residual.get("fuses_over_emitted"):
+        # The mirror of §5.1b: a bit this flow sets that the vendor's does not
+        # is never explained by what either unpacker modelled -- being modelled
+        # is exactly why the symmetric residual subtracts it.
+        return True
     if "unexplained_bits" in residual:
         # `P0.T25`'s classified residual: what the two unpackers accounted for
         # has already been subtracted, so anything still listed is a bit no
@@ -2185,6 +2254,14 @@ def report(result):
     else:
         lines.append("PER_TILE (none)")
     res = result.residual or {}
+    over = res.get("fuses_over_emitted")
+    if over is not None:
+        lines.append(
+            f"RESIDUAL_OVER_EMITTED entries={len(over)} "
+            f"bits={res.get('over_emitted_total_bits', 0)}")
+        for row in over:
+            lines.append(f"  OVER_EMITTED {row['category']} bits={row.get('bits', 0)} "
+                         f"tiles={row.get('tiles', 0)} {row.get('sample_tiles', [])}")
     if "unexplained_bits" in res:
         unexplained = res["unexplained_bits"]
         lines.append(
@@ -2282,6 +2359,8 @@ def evidence_rows(result, run_id="equiv", primitive=None, shape=None):
         "unexplained_bits": (result.residual.get("unexplained_bits")
                              if "unexplained_bits" in result.residual
                              else result.residual),
+        "fuses_over_emitted": (result.residual.get("fuses_over_emitted") or []
+                               if isinstance(result.residual, dict) else []),
         "residual": result.residual,
         "decode_check": result.decode_check,
         "e1": result.e1,

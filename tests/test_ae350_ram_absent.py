@@ -1,4 +1,4 @@
-"""`P2.T25` -- the `AE350_RAM` primitive is not a resource of the GW5AST-138C.
+"""The `AE350_RAM` primitive is not a resource of the GW5AST-138C.
 
 MEASURED, twice, by the vendor's own synthesiser on this device
 (`$OTC/evidence/ae350-ram/summary.md`):
@@ -7,8 +7,8 @@ MEASURED, twice, by the vendor's own synthesiser on this device
     please change device
 
 once with an `AE350_SOC` beside it and once alone, so the refusal is the
-primitive's and not a contest over the one `AE350_SOC` site.  The control is
-`P2.T23`: the same tool, the same device, the same Tcl header builds an
+primitive's and not a contest over the one `AE350_SOC` site.  The control
+build uses the same tool, the same device, the same Tcl header to build an
 `AE350_SOC` design to a bitstream.
 
 These tests pin the consequence for the database: a bel for a resource the
