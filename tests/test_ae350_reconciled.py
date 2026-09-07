@@ -86,9 +86,12 @@ def test_ae350_binds_every_live_record_of_both_tables():
 def test_ae350_binds_the_taps_outside_the_band():
     """Three taps sit far to the left of the band; a band filter would drop them.
 
-    Two are output taps of `ROM_HADDR` and one is the clock-spine alternative
-    for `CORE_CLK`, so they are not one direction either -- what they have in
-    common is only that a column filter would lose them.
+    Two are output taps of `ROM_HADDR` and one is the clock-spine record for
+    `CORE_CLK`, so they are not one direction either -- what they have in
+    common is only that a column filter would lose them. The builder must
+    therefore read every record, whatever its column; what it then does with
+    the `CORE_CLK` one is the next test's subject, and the point here is that
+    the record reaches the builder at all.
     """
     dat = datfile()
     dev = built_device()
@@ -96,9 +99,30 @@ def test_ae350_binds_the_taps_outside_the_band():
              if _live(record) and record[1] - 1 in SPINE_COLS]
     assert len(spine) == len(SPINE_COLS)
     taps = {tap for _wire_type, wires in dev.nodes.values() for tap in wires}
+    core_clk = ae350(dev)['core_clk']
     for record in spine:
-        assert (record[0] - 1, record[1] - 1,
-                wnames.wirenames[record[2]]) in taps
+        tap = (record[0] - 1, record[1] - 1, wnames.wirenames[record[2]])
+        if list(record[:3]) == list(core_clk['fabric_tap']):
+            continue
+        assert tap in taps
+
+
+def test_core_clk_fabric_tap_is_recorded_and_left_unbound():
+    """The `CLK1` record the table names is kept, and deliberately not wired.
+
+    MEASURED (`evidence/ae350/core-clock.md`): the vendor never routes
+    `CORE_CLK` over the clock spine -- it takes a 0.000 ns dedicated hop from a
+    top PLL. Binding the record anyway would give the port a second, fabric
+    entrance the silicon does not use, so the record is carried as evidence and
+    the wire is left out of the routing graph.
+    """
+    dev = built_device()
+    core_clk = ae350(dev)['core_clk']
+    row, col, wire = core_clk['fabric_tap']
+    tap = (row - 1, col - 1, wnames.wirenames[wire])
+    assert tap == (0, 87, 'CLK1')
+    taps = {t for _wire_type, wires in dev.nodes.values() for t in wires}
+    assert tap not in taps
 
 
 def test_ae350_placeholders_are_exactly_the_slots_the_data_omits():

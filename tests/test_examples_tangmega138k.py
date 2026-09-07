@@ -8,6 +8,7 @@ Both are read here out of the Makefile itself rather than out of a build.
 """
 import os
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -67,7 +68,18 @@ def test_ae350_example_declares_the_blackbox():
 
 @pytest.mark.heavy
 def test_examples_build():
-    """The two examples really do reach a bitstream, from a clean state."""
+    """The two examples really do reach a bitstream, from a clean state.
+
+    The tools are required, not optional: `gate.env` puts the installed
+    `nextpnr-himbaechel` (the one paired with the installed chipdb) and the
+    venv's `gowin_pack` on `PATH`, so a missing tool is a broken gate
+    environment and is named as one rather than surfacing as an opaque
+    `make` exit status.
+    """
+    for tool in ('nextpnr-himbaechel', 'gowin_pack', 'yosys'):
+        assert shutil.which(tool), (
+            f'{tool} is not on PATH; the gate environment (gate.env) is '
+            f'incomplete, so this test cannot say anything about the examples')
     for target in NEW_TARGETS:
         for stale in (target, target[:-len('.fs')] + '.json',
                       target[:-len('.fs')] + '-synth.json'):

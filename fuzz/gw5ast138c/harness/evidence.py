@@ -80,8 +80,16 @@ REQUIRED_FIELDS: tuple = (
 #: never point at a live path a later prune deletes without also being
 #: rewritten this way (`D99`: "never delete artefacts a committed row still
 #: points at without rewriting the row").
+#: `fuses_over_emitted`: the bits the *open* flow sets and the vendor does not,
+#: measured by `equiv`'s symmetric residual. `unexplained_bits` records the
+#: other direction only, so a row could once carry `verdict: ok` while the open
+#: packer emitted configuration the vendor never wrote. It is optional rather
+#: than required because the rows banked before the symmetric residual existed
+#: cannot grow the measurement retroactively; a row without it claims no
+#: over-emission check, exactly as `decode_check: n/a` claims no decode check.
 OPTIONAL_FIELDS: tuple = (
     "artefact_pruned",
+    "fuses_over_emitted",
 )
 
 #: `sha256:<64 lowercase hex>` or the literal `sha256:unknown` when the hash

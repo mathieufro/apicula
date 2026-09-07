@@ -95,11 +95,16 @@ uart-message-tangmega138k-synth.json: uart-message-tangconsole138k.v
 # The AE350 hard SoC.  There is deliberately no companion AE350_RAM example:
 # that block is not a resource gowin_pack can place on this device, so no
 # bitstream can express it and no example could be built.
-# The design uses only ordinary I/O, so the shared place-and-route and pack
-# rules above serve it unchanged -- in particular the SSPI pins stay with the
-# configuration controller, which is where an AE350 finds its boot flash.
+# The design uses only ordinary I/O, so the shared pack rule above serves it
+# unchanged -- in particular the SSPI pins stay with the configuration
+# controller, which is where an AE350 finds its boot flash. Place-and-route
+# needs its own constraint file: CORE_CLK has no fabric entrance, so the PLL
+# that drives it must be pinned to a site the dedicated hop exists from.
 ae350-emb-tcm-tangmega138k-synth.json: ae350-emb-tcm.v
 	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+ae350-emb-tcm-tangmega138k.json: ae350-emb-tcm-tangmega138k-synth.json ae350-emb-tcm-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=ae350-emb-tcm-tangmega138k.cst
 
 # The dual-purpose pins.  gowin_pack accepts eight of them; the six the pack
 # line below asks for are every one this device honours.  The two left out are

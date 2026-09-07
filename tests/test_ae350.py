@@ -35,6 +35,12 @@ BOUND_OUTPUT_BITS = 468
 INPUT_BITS = 416
 OUTPUT_BITS = 495
 
+#: The top PLL sites `CORE_CLK` can be driven from, measured in
+#: `evidence/ae350/core-clock.md`: the dedicated hop costs 0.000 ns from either,
+#: so the model carries one fuseless edge per site rather than one exclusive
+#: edge from `PLL_R[0]`.
+PLL_SITES = {'PLL_L[0]': (27, 1), 'PLL_R[0]': (27, 177)}
+
 #: `ttyp` 224 sits in rows 10, 28 and 46, `ttyp` 228 in rows 64, 82 and 100,
 #: both spanning columns 145-180 of the 109x182 die.
 CONFIG_ROWS = (10, 28, 46, 64, 82, 100)
@@ -59,12 +65,23 @@ def datfile():
 
 
 def bare_device():
-    """A device with the 138C's grid shape and nothing built into it yet."""
+    """A device with the 138C's grid shape and nothing built into it yet.
+
+    The two top PLL sites are the one exception: `CORE_CLK` does not come off
+    the fabric, so the builder wires it from whichever of them the device data
+    offers, and a fixture without them would exercise a device the 138C is not
+    (`evidence/ae350/core-clock.md`). They carry only what
+    `chipdb._ae350_pll_sites` reads.
+    """
     grid = [[0] * 182 for _ in range(109)]
     for row in CONFIG_ROWS:
         for col in CONFIG_COLS:
             grid[row][col] = 224 if row < 64 else 228
-    return chipdb.Device(grid=grid, tiles={0: chipdb.Tile(1, 1, 0)})
+    dev = chipdb.Device(grid=grid, tiles={0: chipdb.Tile(1, 1, 0)})
+    for macro, (row, col) in PLL_SITES.items():
+        dev.extra_func.setdefault((row, col), {})['pll'] = {
+            'macro': macro, 'outputs': {'CLKOUT1': 'MPLLCLKOUT1'}}
+    return dev
 
 
 def built_device():
@@ -116,16 +133,38 @@ def test_ae350_portmap_covers_every_port_bit_of_the_primitive():
 
 
 def test_ae350_clock_ports_are_tile_clk():
-    """The six clock inputs enter the clock network, not the logic network."""
+    """The fabric clock inputs enter the clock network, not the logic network.
+
+    `CORE_CLK` is not one of them and is checked separately below: it takes a
+    dedicated PLL hop and never a fabric line.
+    """
     dev = built_device()
     block = ae350(dev)
     types = {wire_type for wire_type, _wires in dev.nodes.values()}
     assert 'TILE_CLK' in types
-    for port in chipdb._AE350_SOC_CLOCK_PORTS:
+    for port in chipdb._AE350_SOC_CLOCK_PORTS - {chipdb._AE350_CORE_CLK_PORT}:
         wire = block['ins'][port]
         assert not wire.startswith(chipdb._AE350_UNMAPPED_PREFIX)
         node = dev.nodes[chipdb.wire2node[(0, 159, wire)]]
         assert node[0] == 'TILE_CLK', f'{port} entered the fabric as {node[0]}'
+
+
+def test_core_clk_takes_a_dedicated_pll_hop_from_every_site():
+    """`CORE_CLK` is bound to its own wire, one fuseless pip per PLL site.
+
+    The port is an input like any other -- it must not be left a placeholder --
+    but the wire it binds to belongs to no fabric line, so the only way into it
+    is a dedicated hop from a PLL the device data names.
+    """
+    dev = built_device()
+    block = ae350(dev)
+    core_clk = block['core_clk']
+    assert core_clk['routable'] is False
+    assert block['ins'][chipdb._AE350_CORE_CLK_PORT] == core_clk['wire']
+    assert sorted(core_clk['sources']) == sorted(PLL_SITES)
+    pips = dev[0, 159].pips[core_clk['wire']]
+    assert set(pips) == {s['alias'] for s in core_clk['sources'].values()}
+    assert all(bits == set() for bits in pips.values())
 
 
 def test_ae350_no_port_maps_to_negative_coordinate():

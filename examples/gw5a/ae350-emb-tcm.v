@@ -189,11 +189,39 @@ module top (
     // No GPIO is driven from the board: the port is output-only here.
     assign led = gpio_out[15:0];
 
+    // CORE_CLK is not a fabric port.  MEASURED (`evidence/ae350/core-clock.md`):
+    // the core clock reaches the block over a dedicated, zero-delay hop from a
+    // top PLL's CLKOUT1, from either PLL site, and the fabric tap the device
+    // data names for it is never realised.  So the pad clock cannot drive it
+    // and a PLL is not decoration here -- it is the only entrance.  The other
+    // four clocks are ordinary fabric ports and stay on the pad net.
+    wire core_clk;
+    wire pll_lock;
+    PLL #(
+        .FCLKIN("100.0"),
+        .IDIV_SEL(2),
+        .FBDIV_SEL(2),
+        .MDIV_SEL(13),
+        .ODIV0_SEL(8),
+        .ODIV1_SEL(8),
+        .CLKOUT0_EN("TRUE"),
+        .CLKOUT1_EN("TRUE"),
+        .CLKFB_SEL("INTERNAL")
+    ) u_pll (
+        .CLKIN   (clk),
+        .CLKFB   (1'b0),
+        .RESET   (~rst_n),
+        .PLLPWD  (1'b0),
+        .ENCLK0  (1'b1),
+        .ENCLK1  (1'b1),
+        .LOCK    (pll_lock),
+        .CLKOUT1 (core_clk)
+    );
+
     AE350_SOC u_soc (
-        // One domain for the whole subsystem.  A production design clocks
-        // CORE_CLK from a PLL, but the board oscillator is inside the block's
-        // range on its own, and a single net keeps the example readable.
-        .CORE_CLK   (clk),
+        // The core clock comes off the PLL; the rest of the subsystem runs
+        // from the pad net, which keeps the example to one fabric domain.
+        .CORE_CLK   (core_clk),
         .AHB_CLK    (clk),
         .APB_CLK    (clk),
         .DDR_CLK    (clk),

@@ -31,9 +31,15 @@ def test_openflow_command_shapes():
 
     pack_cmd = openflow.pack_command(["/opt/gowin_pack"])
     packed = " ".join(pack_cmd)
-    # The packer namespace, never the gw_sh Tcl namespace.
-    assert packed.count("--cpu_as_gpio") == 1
-    assert packed.count("-use_cpu_as_gpio") == 0
+    # Any dual-purpose-pin option would be spelled in the packer's namespace,
+    # never the `gw_sh` Tcl one -- the two namespaces are easy to cross.
+    assert "-use_" not in packed
+    # `--cpu_as_gpio` was passed until the dual-purpose sweep measured that the
+    # vendor moves no bit for it on this device while apicula set two
+    # (`evidence/dualpin/`, `P2.F1`). Emitting configuration the vendor does not
+    # is the over-emission the residual now fails a row for, so the option is
+    # gone from the flow rather than carried as a known difference.
+    assert "cpu_as_gpio" not in packed
     assert "-d GW5AST-138C" in packed
 
     yosys_cmd = openflow.yosys_command("/opt/yosys")
