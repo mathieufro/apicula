@@ -246,3 +246,89 @@ def test_safe_pins_agree_with_the_vendor_pinout():
         assert loc in pins, loc
         assert int(pins[loc]["BANK"]) == safe.bank, loc
         assert str(pins[loc]["NAME"]) == safe.site, loc
+
+
+# --------------------------------------------------------------------------
+# The `P3.T07` HCLK probe: a second design out of the same shape file, whose
+# swept axis is the package ball rather than a primitive parameter.
+# --------------------------------------------------------------------------
+def test_io_basic_default_spec_is_still_the_attribute_sweep():
+    """The probe is additive: `SPEC`, the only object `gen.load_shape` can
+    reach, is unchanged, so the `ODDR`/`IDDR` sweep is untouched by it."""
+    spec = io_basic.SPEC
+    assert spec.pins["clk"].loc == "V22"
+    assert set(spec.pins) == {"clk", "din", "dout"}
+    assert spec.sweep_values == list(io_basic.POINTS)
+
+
+def test_io_basic_probe_claims_only_allowlisted_balls():
+    """Every candidate ball and every fixed ball of the probe is in
+    `SAFE_PINS`, which is what keeps a sweep off a ball nobody has looked at."""
+    fixed = {io_basic.DATA_IN_BALL, io_basic.DATA_OUT_BALL,
+             io_basic.RESET_BALL, io_basic.CEN_BALL}
+    for ball, _bank, _role in io_basic.CLOCK_CANDIDATES:
+        assert ball in SAFE_PINS, ball
+        assert ball not in fixed, f"{ball} is both swept and fixed"
+    for ball in fixed:
+        assert ball in SAFE_PINS, ball
+
+
+def test_io_basic_probe_candidate_banks_match_the_pinout():
+    """The bank each candidate declares is the vendor's, so a typo here
+    cannot survive into a `BANK_VCCIO` line."""
+    for ball, bank, _role in io_basic.CLOCK_CANDIDATES:
+        assert SAFE_PINS[ball].bank == bank, ball
+
+
+def test_io_basic_probe_never_reaches_a_ddr_bank():
+    """Banks 6 and 7 carry the DDR3 interface; an `LVCMOS*` there is a
+    thermal hazard, not a cosmetic defect."""
+    for ball, bank, _role in io_basic.CLOCK_CANDIDATES:
+        assert bank not in DDR_BANKS, ball
+
+
+def test_io_basic_probe_gives_each_clock_its_own_div_mode():
+    """A probe design carrying several clocks tells them apart by the
+    divider's one-hot fuse, so two clocks sharing a `DIV_MODE` would make the
+    decode ambiguous and the measurement worthless."""
+    balls = [ball for ball, _b, _r in io_basic.CLOCK_CANDIDATES][:4]
+    shape = io_basic.IoBasicShape(hclk_probe=True, clk_balls=balls)
+    rtl = shape.rtl("iddr-default")
+    modes = re.findall(r'defparam div\d\.DIV_MODE = "([^"]+)";', rtl)
+    assert modes == list(io_basic.PROBE_DIV_MODES[:len(balls)])
+    assert len(set(modes)) == len(modes)
+
+
+def test_io_basic_probe_refuses_more_clocks_than_it_can_tell_apart():
+    """The ambiguity above is refused at construction, not left to the
+    person reading the decode."""
+    balls = [ball for ball, _b, _r in io_basic.CLOCK_CANDIDATES]
+    with pytest.raises(ValueError):
+        io_basic.IoBasicShape(hclk_probe=True, clk_balls=balls)
+
+
+def test_io_basic_probe_drives_the_iologic_fast_clock_from_the_hclk():
+    """The claim under test is pin -> HCLK -> IOLOGIC fast clock, so the
+    gearbox's `FCLK` must come off the `DHCE` output and not off the pad."""
+    shape = io_basic.IoBasicShape(hclk_probe=True, clk_balls=("V22", "F20"))
+    rtl = shape.rtl("iddr-default")
+    assert ".CLKOUT (hclk[0])" in rtl
+    assert ".HCLKIN (hclk[0])" in rtl
+    assert ".FCLK   (hclk[0])" in rtl
+    assert ".CLK    (clk0)" not in rtl
+
+
+def test_io_basic_probe_passes_the_generation_time_cst_assertion():
+    """Each per-ball spec goes through the same unconditional `.cst`
+    assertion `SPEC` does -- the envelope is not skipped for a sweep."""
+    for ball, _bank, _role in io_basic.CLOCK_CANDIDATES:
+        spec = io_basic.IoBasicShape(hclk_probe=True, clk_balls=(ball,)).spec()
+        assert gen.assert_cst_defaults(spec, "iddr-default") == []
+
+
+def test_io_basic_iddr_data_comes_straight_off_the_pad():
+    """MEASURED: GowinSynthesis refuses a fabric flop between the pad and an
+    input gearbox (`CK0013`), so the `IDDR` point's `D` is the port itself."""
+    rtl = io_basic.IoBasicShape().rtl("iddr-default")
+    assert ".D   (din)," in rtl
+    assert ".D   (din_r)," not in rtl

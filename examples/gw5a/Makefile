@@ -27,7 +27,8 @@ primer25k: \
 
 tangmega138k: \
 	big-shift-tangmega138k.fs attosoc-tangmega138k.fs uart-message-tangmega138k.fs \
-	ae350-emb-tcm-tangmega138k.fs dualpin-tangmega138k.fs
+	ae350-emb-tcm-tangmega138k.fs dualpin-tangmega138k.fs \
+	iddr-boardclk-tangmega138k.fs
 
 tangconsole138k: \
 	uart-message-tangmega138k.fs
@@ -79,6 +80,13 @@ attosoc-primer25k-synth.json: attosoc/attosoc.v attosoc/picorv32.v
 
 %-tangmega138k.json: %-tangmega138k-synth.json tangmega138k.cst
 	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tangmega138k.cst
+
+# One IDDR clocked from the board oscillator (P3.T09). The clock reaches the
+# gearbox over the global clock plane, which is what this die does: it carries
+# no HCLK -> IOLOGIC fast-clock edge, for the vendor or for the open flow
+# (evidence/pin-to-hclk/summary.md).
+iddr-boardclk-tangmega138k-synth.json: iddr-boardclk.v
+	$(YOSYS) -D INV_BTN=0 -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
 
 big-shift-tangmega138k-synth.json: big-shift.v
 	$(YOSYS) -D INV_BTN=0 -D LEDS_NR=16 -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
