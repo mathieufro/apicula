@@ -152,3 +152,49 @@ def test_sel4_point_drives_the_four_clkin_from_four_clocks():
         rtl = clocking_dcs.e1_rtl(spec, point)
         assert rtl.count('(clk),') == 4, point
         assert 'd1' not in rtl, point
+
+
+#: MEASURED (`P1.F5`, batch `p1f5-dcsctl`, `$OTC/evidence/dcs/control-138c.md`):
+#: the wire in cell `(54, 89)` each DCS control input is routed into.
+#: `{(dcs cell, dcs idx): {port: wire}}`.
+DCS_CONTROL_WIRES = {
+    ((54, 93), 0): {'SELFORCE': 'C3', 'CLKSEL0': 'C4', 'CLKSEL1': 'B4',
+                    'CLKSEL2': 'A4', 'CLKSEL3': 'D3'},
+    ((54, 93), 1): {'SELFORCE': 'A6', 'CLKSEL0': 'A7', 'CLKSEL1': 'D6',
+                    'CLKSEL2': 'C6', 'CLKSEL3': 'B6'},
+    ((54, 88), 0): {'SELFORCE': 'D7', 'CLKSEL0': 'B3', 'CLKSEL1': 'D1',
+                    'CLKSEL2': 'B7', 'CLKSEL3': 'C7'},
+    ((54, 88), 1): {'SELFORCE': 'D4', 'CLKSEL0': 'D5', 'CLKSEL1': 'C5',
+                    'CLKSEL2': 'B5', 'CLKSEL3': 'A5'},
+}
+
+
+def test_every_dcs_control_input_is_aliased_onto_its_measured_wire(gowinhome):
+    """A DCS bel pin names a wire in the DCS's own cell; the wire the die
+    really routes into is in the cell beside the bridge, so the two must be
+    one Himbaechel node or the router has nowhere to leave the fabric."""
+    dev = _build('GW5AST-138C', gowinhome)
+
+    for (cell, idx), ports in DCS_CONTROL_WIRES.items():
+        dcs = dev.extra_func[cell]['dcs'][idx]
+        assert dcs['control_wires_traced'] is True
+        named = {'SELFORCE': dcs['selforce']}
+        named.update({f'CLKSEL{i}': w for i, w in enumerate(dcs['clksel'])})
+        for port, wire in ports.items():
+            alias = named[port]
+            node = dev.nodes[f'X{cell[1]}Y{cell[0]}/{alias}']
+            assert node[0] == 'DCS_I'
+            assert node[1] == {(cell[0], cell[1], alias), (54, 89, wire)}
+
+
+def test_the_twenty_control_wires_are_pip_destinations_of_that_cell(gowinhome):
+    """A wire the router cannot reach is not a control input.  Each of the
+    twenty is a pip destination of `(54, 89)` and drives no bel there."""
+    dev = _build('GW5AST-138C', gowinhome)
+    tile = dev[54, 89]
+
+    wires = {w for ports in DCS_CONTROL_WIRES.values() for w in ports.values()}
+    assert len(wires) == 20
+    assert wires <= set(tile.pips)
+    driven = {w for bel in tile.bels.values() for w in bel.portmap.values()}
+    assert not wires & driven

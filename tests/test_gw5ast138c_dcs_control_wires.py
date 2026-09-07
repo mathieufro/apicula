@@ -64,8 +64,31 @@ def test_a_traced_die_packs_a_driven_clksel():
     assert _reject(True, {'CLKSEL0': [42]}) is None
 
 
-def test_the_138c_dcs_control_wires_are_recorded_as_untraced():
+
+
+# ------------------------------------------------------------ P1.F5: traced
+
+def test_the_138c_control_wires_are_twenty_distinct_wires_in_one_cell():
+    """`$OTC/evidence/dcs/control-138c.md`: five signals x four DCS, every one
+    an ordinary fabric wire of the cell beside the bridge, none shared."""
+    table = chipdb.gw5ast138c_dcs_inputs
+    assert sorted(table) == [(1, 0), (1, 1), (2, 0), (2, 1)]
+    wires = [w for entry in table.values() for _, w in entry]
+    assert len(wires) == 20
+    assert len(set(wires)) == 20
+    assert {col for entry in table.values() for col, _ in entry} == {89}
+
+
+def test_the_138c_dcs_control_wires_are_recorded_as_traced():
     """The per-device table, not a comment, is what the packer reads."""
-    assert not chipdb.dcs_control_wires_traced('GW5AST-138C')
+    assert chipdb.dcs_control_wires_traced('GW5AST-138C')
     assert chipdb.dcs_control_wires_traced('GW5A-25A')
     assert chipdb.dcs_control_wires_traced('GW1N-9')
+    assert not chipdb.dcs_control_wires_traced('GW5AT-60B')
+
+
+def test_the_control_wire_table_is_reached_through_the_per_device_dispatch():
+    """`fse_create_dcs` takes a die's own row and table, never a literal 18."""
+    assert chipdb._dcs_input_tables['GW5A-25A'] == (18, chipdb.gw5_dcs_inputs)
+    assert chipdb._dcs_input_tables['GW5AST-138C'] == (
+        54, chipdb.gw5ast138c_dcs_inputs)

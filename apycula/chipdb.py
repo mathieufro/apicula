@@ -3424,6 +3424,31 @@ gw5_dcs_inputs = {
 }
 
 
+#: MEASURED (`P1.F5`, `$OTC/evidence/dcs/control-138c.md`): the `GW5AST-138C`
+#: DCS control inputs, in the same `[(col, wire), ...]` shape.  Row is always
+#: 54.  Every one of the twenty is an ordinary fabric cell wire in **one**
+#: cell of the clock-bridge band, `(54, 89)` -- not in the bridge cell that
+#: carries the DCS, which is why a search around the bridge cells found
+#: nothing.  None of the twenty is in any node and none drives a bel, so each
+#: is a dangling sink: exactly what a bel input that only the DCS reads looks
+#: like.
+gw5ast138c_dcs_inputs = {
+        (1, 0) : [(89, 'C3'), (89, 'C4'), (89, 'B4'), (89, 'A4'), (89, 'D3')],
+        (1, 1) : [(89, 'A6'), (89, 'A7'), (89, 'D6'), (89, 'C6'), (89, 'B6')],
+        (2, 0) : [(89, 'D7'), (89, 'B3'), (89, 'D1'), (89, 'B7'), (89, 'C7')],
+        (2, 1) : [(89, 'D4'), (89, 'D5'), (89, 'C5'), (89, 'B5'), (89, 'A5')],
+}
+
+#: `{device: (row, table)}` for the dies whose DCS control wires are MEASURED.
+#: A device absent from this table takes the pre-5A `_DCS_CONTROL_WIRE_SETS`
+#: names, and `dcs_control_wires_traced` reports whether those names are its
+#: own measurement or an inheritance.
+_dcs_input_tables = {
+    'GW5A-25A': (18, gw5_dcs_inputs),
+    'GW5AST-138C': (54, gw5ast138c_dcs_inputs),
+}
+
+
 #: MEASURED per-device split of the clock plane into halves fed from the
 #: bridge (`fse_create_5a138_clocks`, whose own comment draws the two spine
 #: groups): `{device: ((half name, first spine of the half, spine count), ..)}`.
@@ -3484,16 +3509,13 @@ _DCS_CONTROL_WIRE_SETS = (
     {'selforce': 'D3', 'clksel': ['D2', 'A3', 'B3', 'C3']},
 )
 
-#: Devices whose DCS control wires above are MEASURED rather than inherited.
-#: `GW5AST-138C` is deliberately absent: five vendor compiles (`P1.T31`,
-#: `$OTC/evidence/dcs/ports-138c.md`) route no external net into either bridge
-#: cell for `CLKSEL` or `SELFORCE`, so the die's real control wires are not
-#: traced and the pre-5A names above are placeholders -- kept only so that the
-#: two DCS of a shared cell name different wires, and marked untraced in the
-#: chipdb so `gowin_pack` refuses a design that drives them instead of writing
-#: a fuse nothing measured.
+#: Devices whose DCS control wires are MEASURED rather than inherited.  A
+#: device absent from this set takes the pre-5A `_DCS_CONTROL_WIRE_SETS`
+#: names, which are kept only so that the two DCS of a shared cell name
+#: different wires; `gowin_pack` refuses a design that drives them (`D30`)
+#: rather than writing a fuse nothing measured.
 _dcs_control_wires_traced = {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C',
-                             'GW5A-25A'}
+                             'GW5A-25A', 'GW5AST-138C'}
 
 
 def dcs_control_wires_traced(device):
@@ -3528,27 +3550,28 @@ def fse_create_dcs(dev, device, fse):
             # Whether `selforce`/`clksel` below name wires this die was
             # measured on, or names inherited from the pre-5A model.
             dcs['control_wires_traced'] = dcs_control_wires_traced(device)
-            if device in {'GW5A-25A'}:
+            if device in _dcs_input_tables:
+                w_row, table = _dcs_input_tables[device]
                 dcs['input_prefix'] = 'CLKIN'
-                w_col, wire = gw5_dcs_inputs[(q, j)][0]
-                if row == 18 and col == w_col:
+                w_col, wire = table[(q, j)][0]
+                if (row, col) == (w_row, w_col):
                     dcs['selforce'] = wire
                 else:
                     # not our cell, make an alias
                     dcs['selforce'] = f'DCS{q}{j}{wire}'
                     # Himbaechel node
-                    dev.nodes.setdefault(f'X{col}Y{row}/DCS{q}{j}{wire}', ("DCS_I", {(row, col, dcs['selforce'])}))[1].add((row, w_col, wire))
+                    dev.nodes.setdefault(f'X{col}Y{row}/DCS{q}{j}{wire}', ("DCS_I", {(row, col, dcs['selforce'])}))[1].add((w_row, w_col, wire))
                 dcs['clksel'] = []
-                for i, w_desc in enumerate(gw5_dcs_inputs[(q, j)][1:]):
+                for i, w_desc in enumerate(table[(q, j)][1:]):
                     w_col, wire = w_desc
-                    if row == 18 and col == w_col:
+                    if (row, col) == (w_row, w_col):
                         dcs['clksel'].append(wire)
                     else:
                         # not our cell, make an alias
                         w_name = f'DCS{q}{j}{i}{wire}'
                         dcs['clksel'].append(w_name)
                         # Himbaechel node
-                        dev.nodes.setdefault(f'X{col}Y{row}/{w_name}', ("DCS_I", {(row, col, w_name)}))[1].add((row, w_col, wire))
+                        dev.nodes.setdefault(f'X{col}Y{row}/{w_name}', ("DCS_I", {(row, col, w_name)}))[1].add((w_row, w_col, wire))
             else:
                 if device in _dcs_quadrants:
                     dcs['input_prefix'] = 'CLKIN'
