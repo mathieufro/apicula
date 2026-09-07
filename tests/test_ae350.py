@@ -6,9 +6,12 @@ all-sentinel on every GW5 device (`test_ae350_dat_tables.py` is the control for
 that). Slot *i* of a direction's table is bit *i* of that direction, counting
 `primitive.xml`'s 149 ports in declaration order with each bus LSB first.
 
-Both tables are read whole: every live record is bound, and the only bits left
-unmapped are the sentinel slots the device data itself marks absent. They are
-placeholders, not guesses -- see
+Neither table is one direction: a tap's direction is its wire's, so the input
+map is the fabric-driven run of `Ae350SocOuts` and the output map is what lies
+either side of that run with `Ae350SocIns` filling it
+(`tests/test_ae350_tap_directions.py`). Both tables are read whole: every live
+record is bound, and the only bits left unmapped are the ones the device data
+itself omits. They are placeholders, not guesses -- see
 `test_ae350_unmapped_bits_get_unroutable_placeholder_wires`.
 """
 
@@ -23,10 +26,11 @@ from apycula import wirenames as wnames
 
 DEVICE = 'GW5AST-138C'
 
-#: Measured in `evidence/ae350/wire-map-138c.md` §4 and §6: the bits carrying a
-#: live record, per direction. The remainder are sentinel slots.
-BOUND_INPUT_BITS = 398
-BOUND_OUTPUT_BITS = 469
+#: Measured in `evidence/ae350/wire-map-138c.md` §7: the bits carrying a live
+#: record, per direction. Every input bit has one; the 27 that do not are all
+#: outputs, and every one of them is a slot the device data omits.
+BOUND_INPUT_BITS = 416
+BOUND_OUTPUT_BITS = 468
 #: `evidence/ae350/port-inventory.json`: 149 ports, 911 bits.
 INPUT_BITS = 416
 OUTPUT_BITS = 495
@@ -157,8 +161,9 @@ def test_ae350_unmapped_bits_get_unroutable_placeholder_wires():
         assert wire not in wnames.wirenumbers
         assert reason in {'unbound', 'off-grid', 'no-record',
                           'unknown-wire-index'}
-    unmapped_ins = [port for port in block['unmapped'] if port in block['ins']]
-    assert len(unmapped_ins) == INPUT_BITS - BOUND_INPUT_BITS
+    assert not [port for port in block['unmapped'] if port in block['ins']]
+    unmapped_outs = [port for port in block['unmapped'] if port in block['outs']]
+    assert len(unmapped_outs) == OUTPUT_BITS - BOUND_OUTPUT_BITS
 
 
 def test_ae350_config_tiles_are_marked_as_the_blocks_own():
