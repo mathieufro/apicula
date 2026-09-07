@@ -478,6 +478,16 @@ def fse_pips(fse, ttyp, device, table=_wire_tables['GENERAL'], wn=wnames.wirenam
 
 # GW5AST-138C have not one but three tables for clock fuses
 # We will try to combine them all into one
+def _gw5_logic_clock_gate_ids():
+    """The clock-wire ids of the logic-to-clock gates, from the wire names.
+
+    The gates occupy one contiguous band of the clock numbering; naming its
+    ends rather than the literal range keeps the two consumers -- the spine
+    sources here and `gw5_logic_clock_gates` -- reading the same table.
+    """
+    return range(wnames.clknumbers['TRBDCLK0'], wnames.clknumbers['TRMDCLK1'] + 1)
+
+
 def fse_clock_pips_138(fse, ttyp, device):
     clock_MUX_tables = [_wire_tables['CLOCK_MUX_TOP'], _wire_tables['CLOCK_MUX_BOTTOM']]
 
@@ -521,16 +531,24 @@ def fse_clock_pips_138(fse, ttyp, device):
                         raise Exception(f"Spine is connected to wire {destid}. Only 291 or 292 are allowed.")
                     dest = {291: 'GT00', 292: 'GT10'}[destid]
 
-                # spines as dest can only have Bridge as source
+                # A quadrant's spine is normally reached through the central
+                # bridge, but not only: the logic-to-clock gates drive the
+                # quadrant spines directly as well.  MEASURED -- a `PLL` on a
+                # bottom-edge site has no clock wire of its own on this die and
+                # the vendor takes its output to fabric and then in through a
+                # gate: `(81, 85) SPINE9 <= BRMDCLK1` in both
+                # `p1f3-pll-route/b-b0` and `b-b1`
+                # (`$OTC/evidence/plla/hclk-entry-138c.md`).  Dropping those
+                # rows left every such site with no way onto the clock plane.
                 if dest.startswith('SPINE'):
-                    if ttyp not in bridge_tile_types_138:
+                    if srcid in _gw5_logic_clock_gate_ids():
+                        # A gate name is per half, here and in the bridge.
+                        src = mk_clock_wname(device, src, half)
+                    elif ttyp not in bridge_tile_types_138:
                         if not src.startswith('CBRIDGEOUT') or not is_allowed_spine_input(src, dest):
                             continue
                     else:
-                        # bridge spines may get signal from logic->gates and these gates must have suffix
-                        if srcid not in range(139, 163):
-                            continue
-                        src = mk_clock_wname(device, src, half)
+                        continue
 
                 pips.setdefault(dest, {})[src] = fuses
 
@@ -1300,6 +1318,31 @@ def make_hclk_pip(dev, hclk_idx, row, col, src, dest, fuses = set()):
     add_node(dev, f'HCLK{hclk_idx}_{src}', "GLOBAL_CLK", row, col, src)
     add_node(dev, f'HCLK{hclk_idx}_{dest}', "GLOBAL_CLK", row, col, dest)
 
+#: The block-cell wire each of a block's four logic-to-HCLK entries starts
+#: from.  Three are the tile's clock wires and the fourth is an ordinary fabric
+#: wire, which is what makes lane 3 different from lanes 0-2: a clock reaches
+#: it over fabric, never over the global plane (MEASURED, `P1.T27`: the vendor
+#: lights `LSR2 <= W212` for a `DHCE` on block 5 lane 3, with no `CLK*`/`GB*`
+#: pip, `$OTC/evidence/dhcen/lane-138c.md` section 5).
+_gw5_hclk_logic_entry_wires = ("CLK0", "CLK1", "CLK2", "LSR2")
+
+
+#: Devices on which the entry table above has been measured against a vendor
+#: bitstream.  A device absent here records nothing rather than inheriting an
+#: unmeasured claim -- which also keeps the GW5A-25A database byte-identical.
+_gw5_hclk_fabric_entry_devices = {'GW5AST-138C'}
+
+
+def _gw5_hclk_fabric_entry_lanes():
+    """Lanes whose logic-to-HCLK entry is an ordinary fabric wire.
+
+    Derived from the entry-wire table rather than written out, so a device
+    whose entries differ says so by its table and not by a second constant.
+    """
+    return [i for i, w in enumerate(_gw5_hclk_logic_entry_wires)
+            if not w.startswith('CLK')]
+
+
 def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
     hclk_off = gw5_hclk_wire_offset(device)
     ihclk_wire_num = gw5_ihclk_wire_num(device)
@@ -1310,10 +1353,16 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
     # make logic to hclk nodes
     for hclk_idx in range(gw5_get_num_of_hclks(device)):
         row, col = gw5_logic_to_hclk_wires(device)[hclk_idx]
-        for idx in range(4):
-            src = ["CLK0", "CLK1", "CLK2", "LSR2"][idx]
+        for idx, src in enumerate(_gw5_hclk_logic_entry_wires):
             dest = wnames.hclknames[30 + idx + hclk_idx * hclk_off]
             add_node(dev, f'HCLK{hclk_idx}_{dest}', "GLOBAL_CLK", row, col, src)
+        fabric_lanes = (_gw5_hclk_fabric_entry_lanes()
+                        if device in _gw5_hclk_fabric_entry_devices else [])
+        if fabric_lanes:
+            dev.extra_func.setdefault((row, col), {})['hclk_fabric_entry'] = {
+                    'lanes': fabric_lanes,
+                    'sinks': [f'CLKDIV_I{hclk_idx}{i}' for i in fabric_lanes],
+            }
 
     for row in range(dev.rows):
         for col in range(dev.cols):
@@ -2592,6 +2641,24 @@ _gw5a_pll_macros = {
 }
 
 
+#: The clock-plane wire a `PLL` site's output drives, keyed by `slot_idx` and
+#: output port.  MEASURED, one vendor compile per entry: `p1f3-pll-route/`
+#: `a-l0-hclk` pins a `PLL` to `PLL_L[0]` and takes `CLKOUT0` to an HCLK lane,
+#: and its bitstream programs `(54, 93) SPINE9 <= TLPLL0CLK0` -- the same
+#: bridge cell and the same wire the database already carries as a source, with
+#: nothing at the site's end of it (`$OTC/evidence/plla/hclk-entry-138c.md`).
+#:
+#: Only measured entries belong here.  A site with no entry is not broken: the
+#: same evidence shows the bottom-edge sites have no clock wire of their own at
+#: all and the vendor takes their output onto the plane through a
+#: logic-to-clock gate, which every site can do.
+_gw5a_pll_clk_wires = {
+    'GW5AST-138C': {
+        (0, 'CLKOUT0'): 'TLPLL0CLK0',
+    },
+}
+
+
 def fse_create_slot_plls(dev, device, fse, dat):
     if device not in _gw5a_pll_slots:
         return
@@ -2681,6 +2748,20 @@ def fse_create_slot_plls(dev, device, fse, dat):
             if nam.startswith('CLKOUT'):
                 dev.nodes.setdefault(f'MPLL{pll_idx}{nam}', (wire_type, set()))[1].add((row, col, f'MPLL{nam}'))
             dev[row, col].pips.setdefault(logic_wire, {}).update({portmap[nam]:set()})
+        # The clock plane's own name for this site's output.  Without it the
+        # site's `MPLL<port>` wire is in a node of its own and the clock-plane
+        # wire is in another, so a `PLL` can only reach fabric over the
+        # fuseless logic pip above -- which is why a bottom-edge site reached
+        # no flop at all.  A fuseless pip rather than one node: the two are one
+        # piece of silicon, but merging them would leave a single wire with a
+        # single type and the global router would refuse it (same reason the
+        # logic wire above gets a pip).
+        for (slot, port), clk_wire in _gw5a_pll_clk_wires.get(device, {}).items():
+            if slot != slot_idx or port not in portmap:
+                continue
+            dev[row, col].pips.setdefault(clk_wire, {}).update({portmap[port]: set()})
+            add_node(dev, clk_wire, "GLOBAL_CLK", row, col, clk_wire)
+
         # CLKFBOUT is missing from the tables, so we create it manually.
         nam = 'CLKFBOUT'
         portmap[nam] = f'PLLA{nam}'
