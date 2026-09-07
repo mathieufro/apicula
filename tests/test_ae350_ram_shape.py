@@ -1,10 +1,10 @@
-"""`P2.T25` -- the `AE350_RAM` vehicle as a `ShapeSpec`.
+"""The `AE350_RAM` vehicle as a `ShapeSpec`.
 
-The row's question is presence, not parameters (`P2.T05`: 26 ports, 0
+The row's question is presence, not parameters (measured: 26 ports, 0
 parameters), so the vehicle's job is to isolate one variable: an
 `AE350_SOC` design the vendor already builds, plus one `AE350_RAM`.  These
 tests hold that isolation in place -- the `"soc"` point must stay the
-`P2.T20` vehicle byte for byte apart from the block being added.
+`AE350_SOC` vehicle byte for byte apart from the block being added.
 """
 import pytest
 
@@ -36,7 +36,7 @@ def _instance_ports(text, primitive, instance):
 
 
 def test_ae350_ram_soc_point_is_the_soc_vehicle_with_one_block_added():
-    """Only the header, `dout` and additions may differ from `P2.T20`."""
+    """Only the header, `dout` and additions may differ from the `AE350_SOC` vehicle."""
     from fuzz.gw5ast138c.shapes import ae350_soc
     soc = _render(ae350_ram.COMPANION_SOC)
     base = ae350_soc.rtl(ae350_soc.SPEC, None).splitlines()

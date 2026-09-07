@@ -48,13 +48,14 @@ REFUSED = {
     'i2c': 'i2c_as_gpio has conflicting settings in nexpnr and gowin_pack.',
 }
 
-#: MEASURED: points whose attributed bits differ from the packer's, each with
-#: the class the difference belongs to.  A difference outside this table is an
-#: unclassified `DIFF` and fails.
-CLASSIFIED_SYMDIFF = {
+#: MEASURED: points where the vendor moves a bit the packer does not, each
+#: with the class the difference belongs to.  A difference outside this table
+#: is an unclassified `DIFF` and fails.  The other direction has no table: a
+#: bit the packer sets and the vendor does not is an IO setting the silicon's
+#: own tool declines to make, which no class excuses.
+CLASSIFIED_VENDOR_ONLY = {
     'sspi': 'io_used_pin_config: the IOBs of the pins SSPI releases (W-IO, Phase 3)',
-    'cpu': 'apicula sets CPU_AS_GPIO_0/1; the vendor sets no bit (Phase 9 closes it)',
-    'ae350_triple': 'the union of the sspi and cpu classes above',
+    'ae350_triple': 'the sspi class above, carried by the composite point',
 }
 
 
@@ -76,10 +77,27 @@ def test_dualpin_attributed_bits_match_packer():
     for point, data in measured.items():
         if point in REFUSED:
             continue
-        if data['symdiff']:
-            assert point in CLASSIFIED_SYMDIFF, (point, data['symdiff'])
+        if data['vendor_only']:
+            assert point in CLASSIFIED_VENDOR_ONLY, (point, data['vendor_only'])
         else:
-            assert point not in CLASSIFIED_SYMDIFF, point
+            assert point not in CLASSIFIED_VENDOR_ONLY, point
+
+
+def test_dualpin_no_point_over_emits_a_bit():
+    """No option makes the packer set a bit the vendor leaves clear."""
+    with open(os.path.join(_slug('diff'), '_all.json')) as fh:
+        measured = json.load(fh)
+    over = {point: data['packer_only'] for point, data in measured.items()
+            if data['packer_only']}
+    assert over == {}
+
+
+def test_cpu_as_gpio_emits_no_bit_on_this_device():
+    """MEASURED: the vendor moves no bit for the option, so neither may we."""
+    args = types.SimpleNamespace(
+        **{f'{o}_as_gpio': (o == 'cpu') for o in dualpin.OPTIONS})
+    stub = types.SimpleNamespace(cli_args=types.SimpleNamespace(args=args))
+    assert gp.GW5AST_138C.get_pins_attr_vals(stub) == []
 
 
 def test_dualpin_cpu_as_gpio_2_resolved():

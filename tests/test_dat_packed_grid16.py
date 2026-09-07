@@ -108,6 +108,23 @@ def test_ae350_input_taps_are_tile_output_wires(gw5ast138c):
     assert all(32 <= wire < 56 for _row, _col, wire in in_band)
 
 
+@pytest.mark.parametrize('device', ['GW5A-25A', 'GW5AT-60B'])
+def test_five_series_devices_other_than_138c_still_parse_after_the_fix(device):
+    """The transposition fix touches every 5-series `.dat`, not only the 138C's.
+
+    `read_packed_grid16` replaced 72 call sites shared by every 5-series
+    device (`04b97fb`); the no-family-regression argument for the *other*
+    families rested on code inspection alone (pre-5A parts never call
+    `read_5Astuff`, so they cannot regress; 5-series parts other than the
+    138C had no test at all). This exercises two of them directly: the fix
+    must still produce a `gw5aStuff` table, not a parse failure, when the
+    device's own `.dat` is present.
+    """
+    os.environ.setdefault('GOWINHOME', STANDARD_HOME)
+    dat = dat_parser.Datfile(_device_file(device))
+    assert hasattr(dat, 'gw5aStuff')
+
+
 def test_ae350_ins_search_rejects_the_historical_base(gw5ast138c):
     """The historical base names another block's table and must lose.
 

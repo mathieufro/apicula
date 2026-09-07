@@ -47,24 +47,26 @@ def test_138c_sspi_as_gpio_is_off_by_default():
     assert AttrVal('SSPI_AS_GPIO', 'YES') not in GW5AST_138C.get_pins_attr_vals(stub())
 
 
-def test_138c_cpu_as_gpio_emits_two_or_three_attrvals():
+def test_138c_cpu_as_gpio_emits_nothing():
+    """MEASURED: the vendor moves no bit for the option, so neither do we.
+
+    `$OTC/evidence/dualpin/diff/cpu.json` records the vendor moving zero bits
+    while the packer moved two. An IO setting the silicon's own tool declines
+    to make is the class PR #423 fixed, so the emission is the side that gives
+    way.
+    """
     emitted = [av for av in GW5AST_138C.get_pins_attr_vals(stub(cpu=True))
                if av.attr.startswith('CPU_AS_GPIO')]
-    assert 2 <= len(emitted) <= 3
-    assert [av.attr for av in emitted] == sorted({av.attr for av in emitted})
-    assert all(av.attr in attrids.cfg_attrids for av in emitted)
+    assert emitted == []
 
 
 def test_138c_cpu_as_gpio_2_only_with_a_measured_bit():
-    """Attrid 37 is emitted only once the sweep has seen a bit move for it.
-
-    `P2.T29` resolves this either way; the assertion is that the emission and
-    the measurement agree, never that one of them is right.
-    """
+    """No `CPU_AS_GPIO` attrid is emitted, attrid 37 included."""
     from fuzz.gw5ast138c.shapes import dualpin
 
     emitted = {av.attr for av in GW5AST_138C.get_pins_attr_vals(stub(cpu=True))}
     assert ('CPU_AS_GPIO_2' in emitted) == dualpin.CPU_AS_GPIO_2_SETS_A_BIT
+    assert emitted == set()
 
 
 def test_25a_pins_attr_vals_unchanged():

@@ -1,6 +1,6 @@
 """`ae350_ram` -- the `AE350_RAM` row's vehicle.
 
-`P2.T05` measured the primitive and found no design space at all: 26 ports,
+The primitive was measured to have no design space at all: 26 ports,
 0 parameters, and every port name, direction and width an exact subset of
 `AE350_SOC`'s 149.  So this row is not a sweep -- it is a **presence
 question**: does the `AE350_RAM` primitive occupy silicon, wires or fuses of
@@ -8,10 +8,11 @@ its own, or is it a second name for taps `AE350_SOC` already owns?
 
 The vehicle answers that with one vendor run, by construction:
 
-* The `"soc"` point renders the `P2.T20` `AE350_SOC` vehicle **verbatim** --
+* The `"soc"` point renders the `AE350_SOC` vehicle **verbatim** --
   `ae350_soc.rtl` is called, not re-implemented -- and splices one
   `AE350_RAM` instance into it.  Because the `AE350_SOC` half is byte-stable,
-  a presence diff against the `P2.T23` bitstream shows the `AE350_RAM` and
+  a presence diff against the AE350_SOC-only control bitstream shows the
+  `AE350_RAM` and
   nothing else.
 * Every `AE350_RAM` input is wired to the **same net** the `AE350_SOC`'s
   identically-named input already carries, which is MUG1031's external-AHB
@@ -43,7 +44,8 @@ with the `AE350_SOC` beside it and with the die otherwise empty alike, so the
 refusal is the primitive's and not a contest over the single `AE350_SOC`
 site.  The vehicle is kept because that is what the refusal is evidence
 *from*: it is the design a later device with the resource would be measured
-with, and the control `P2.T23` already built without the block.
+with, and the control build already built without the block
+(`evidence/ae350-ram/summary.md`).
 
 The port table is written out here rather than read from the chipdb because
 the device data has none: `GW5AST-138C.dat`'s `gw5aStuff` carries
@@ -57,7 +59,7 @@ import re
 from . import ScopeSpec, ShapeSpec
 from . import ae350_soc
 
-#: The `AE350_RAM` input ports, in `primitive.xml` order (`P2.T05`).
+#: The `AE350_RAM` input ports, in `primitive.xml` order.
 AE350_RAM_INPUTS = (
     ("POR_N", 1), ("HW_RSTN", 1), ("CORE_CLK", 1), ("AHB_CLK", 1),
     ("APB_CLK", 1), ("RTC_CLK", 1), ("CORE_CE", 1), ("AXI_CE", 1),
@@ -68,7 +70,7 @@ AE350_RAM_INPUTS = (
     ("RET1N", 1), ("RET2N", 1),
 )
 
-#: The `AE350_RAM` output ports, in `primitive.xml` order (`P2.T05`).
+#: The `AE350_RAM` output ports, in `primitive.xml` order.
 AE350_RAM_OUTPUTS = (
     ("EXTM_HRDATA", 64), ("EXTM_HREADYOUT", 1), ("EXTM_HRESP", 1),
 )
@@ -181,7 +183,8 @@ def _capture_chain():
 
     A chain of 2-input XORs, never a reduction operator: a wide XOR packs into
     `MUX2_LUT5..8`, which the unpacker does not decode, and that is what cost
-    `P2.T22` its `c1` check (`ae350_soc._divider`, same reasoning).
+    the `AE350_SOC` vehicle's own `c1` check
+    (`ae350_soc._divider`, same reasoning, MEASURED).
     """
     bits = []
     for name, width in AE350_RAM_OUTPUTS:
@@ -206,7 +209,7 @@ _MODULE_TAIL = "\nendmodule\n\n`default_nettype wire\n"
 
 
 def _rtl_with_soc(spec):
-    """The `P2.T20` vehicle, verbatim, with one `AE350_RAM` spliced into it."""
+    """The `AE350_SOC` vehicle, verbatim, with one `AE350_RAM` spliced into it."""
     text = ae350_soc.rtl(spec, COMPANION_SOC)
     for marker in (_DOUT, _MODULE_HEAD, _MODULE_TAIL):
         if marker not in text:

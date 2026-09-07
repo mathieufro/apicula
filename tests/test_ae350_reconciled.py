@@ -1,6 +1,6 @@
-"""`fse_create_ae350()` against the measured input table (`P2.T08b`).
+"""`fse_create_ae350()` against the measured input table.
 
-`P2.T07` built the port map on a split-band reading of the block: inputs to the
+An earlier reading built the port map on a split-band reading of the block: inputs to the
 left of the band, outputs to the right. The relocated `Ae350SocIns` table
 refutes it -- the block reads and drives the *same* columns over disjoint wire
 classes -- so the builder must bind what the tables say and stop filtering bits
@@ -111,7 +111,7 @@ def test_ae350_placeholders_are_exactly_the_slots_the_data_omits():
 
 
 def test_ae350_the_three_resisting_bits_stay_named_placeholders():
-    """The bits `P2.T08b` could not close are named, not guessed at.
+    """The bits the geometric locator could not close are named, not guessed at.
 
     They are output bits: the sentinel slots are in the run `Ae350SocIns`
     fills, and that run is the middle of the output map.

@@ -7,7 +7,7 @@ tests pin the geometry, not the base: whichever release the `.dat` comes from,
 the table it finds must be a complete, collision-free set of tap wires inside
 the band the block's output table drives.
 
-The counts come from `P2.T02`'s port inventory (416 input bits, measured four
+The counts come from the measured port inventory (416 input bits, four
 independent ways) and from the vendor's own fully connected AE350 design, whose
 post-PnR netlist keeps all 410 fabric-driven input bits.
 """

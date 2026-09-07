@@ -20,3 +20,9 @@ generic/blinky.png
 generic/blinky.posp
 generic/blinky.vm
 .vscode
+
+# The AE350 direction fixture: the vendor bitstream's row-0 pip roles, decoded
+# once and committed as text so tests/test_ae350_tap_directions.py can hold the
+# port map against a measurement without the 34 MB .fs. A named exception to
+# the "*.json" deny above.
+!tests/data/ae350-pip-roles-138c.json

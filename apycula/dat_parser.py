@@ -2,12 +2,13 @@ import re
 import struct
 import sys
 import os
+import warnings
 from pathlib import Path
 from dataclasses import dataclass
 
 from apycula.fse_parser import (FseVersionError, _version_tuple,
                                detect_ide_version)
-from apycula.wirenames import wirenames_5a25a
+from apycula.wirenames import wirenames_5a25a, wirenames_5ast138c
 
 
 class DatLayoutError(ValueError):
@@ -497,12 +498,6 @@ class Datfile:
             num_rows, num_cols, 2 * num_cols, 1,
             self._rs_table_offset + 2 * base_words)
 
-    def read_packed_grid16i(self, num_rows, num_cols, base_words):
-        """`read_packed_grid16` for tables whose entries are signed."""
-        return self.read_scaledGrid16i(
-            num_rows, num_cols, 2 * num_cols, 1,
-            self._rs_table_offset + 2 * base_words)
-
     # `Ae350SocIns` -- the (row, col, wire) triples naming the fabric wires the
     # AE350 SoC hard block reads. Its base drifts between `.dat` releases the
     # way `CibFabricNode`'s did, and the historical 0x86a0 points at a
@@ -523,17 +518,42 @@ class Datfile:
     # column, i.e. the record before it sits in a different column.
     #
     # Reading 0x1b1 slots this way on a 1.9.12.03 GW5AST-138C gives 415 live
-    # taps in columns 160-181 for 416 declared input bits; the historical base
+    # taps in columns 160-181 for 416 declared input bits (this is the input
+    # taps' own sub-range within the block's full 145-181 port-column span,
+    # `evidence/ae350/portmap-138c.md` "Band, stated once" -- not a competing
+    # definition of the band); the historical base
     # gives 256, which is fewer taps than the vendor's own fully connected
-    # AE350 design routes.
+    # AE350 design routes. `0x86a1` is that historical `0x86a0` nudged one
+    # word forward -- still measured wrong (256, not 415) -- and is kept only
+    # as a last-resort return when `read_ae350_soc_ins` cannot locate the
+    # table geometrically; using it is a data quality regression and is
+    # therefore never silent (see the `warnings.warn` calls below).
     AE350_SOC_INS_FALLBACK_BASE = 0x86a1
 
     #: Wire indices a fabric tile drives, and so the only ones a hard block
-    #: can tap as an input.
-    _TAP_WIRES = frozenset(
-        idx for idx, name in wirenames_5a25a.items()
-        if re.fullmatch(r"(?:F|Q|OF)\d", name)
-    )
+    #: can tap as an input. `wirenames_5a25a` and `wirenames_5ast138c` (the
+    #: table the 138C actually selects) agree on this index set today
+    #: (MEASURED: both name exactly `{32..55}` as `F`/`Q`/`OF` wires) -- but
+    #: agreement is a fact about the current tables, not a guarantee, so this
+    #: is built per family rather than hardcoded to one, and a mismatch would
+    #: raise here rather than silently mis-tag taps.
+    _TAP_WIRES_BY_FAMILY = {
+        'GW5A-25A': frozenset(
+            idx for idx, name in wirenames_5a25a.items()
+            if re.fullmatch(r"(?:F|Q|OF)\d", name)),
+        'GW5AST-138C': frozenset(
+            idx for idx, name in wirenames_5ast138c.items()
+            if re.fullmatch(r"(?:F|Q|OF)\d", name)),
+    }
+    assert (_TAP_WIRES_BY_FAMILY['GW5A-25A']
+            == _TAP_WIRES_BY_FAMILY['GW5AST-138C']), (
+        "wirenames_5a25a and wirenames_5ast138c disagree on which indices "
+        "are F/Q/OF tap wires -- _TAP_WIRES can no longer use one family's "
+        "table as a stand-in for the other's; fix read_ae350_soc_ins to "
+        "select per device.")
+    #: The 138C is the only family `read_ae350_soc_ins` serves today; the
+    #: assertion above is what makes reusing the 25A's table safe for it.
+    _TAP_WIRES = _TAP_WIRES_BY_FAMILY['GW5AST-138C']
 
     def _rs_words(self):
         """The 5-series table block as u16 words, indexed the way bases are."""
@@ -548,6 +568,12 @@ class Datfile:
         """
         band = self._hard_block_band(outs)
         if band is None:
+            warnings.warn(
+                "read_ae350_soc_ins: Ae350SocOuts named no band, falling "
+                "back to AE350_SOC_INS_FALLBACK_BASE (0x86a1), which is "
+                "MEASURED to under-report taps (256 of 416, evidence/ae350/"
+                "wire-map-138c.md); the AE350 input port map from this read "
+                "will be incomplete.", RuntimeWarning, stacklevel=2)
             return self.read_packed_grid16(
                 num_slots, 3, self.AE350_SOC_INS_FALLBACK_BASE)
         rows, col_lo, col_hi = band
@@ -565,6 +591,13 @@ class Datfile:
 
         base = self._locate_tap_table(words, kinds, num_slots)
         if base is None:
+            warnings.warn(
+                "read_ae350_soc_ins: no run of tap records matched the "
+                "block's own band geometry, falling back to "
+                "AE350_SOC_INS_FALLBACK_BASE (0x86a1), which is MEASURED to "
+                "under-report taps (256 of 416, evidence/ae350/"
+                "wire-map-138c.md); the AE350 input port map from this read "
+                "will be incomplete.", RuntimeWarning, stacklevel=2)
             return self.read_packed_grid16(
                 num_slots, 3, self.AE350_SOC_INS_FALLBACK_BASE)
         return self.read_packed_grid16(num_slots, 3, base)
