@@ -154,6 +154,16 @@ def _per_point(value, spec, sweep_value):
     return list(value or ())
 
 
+def pack_flags_are_complete(spec):
+    """Does this shape state its packer dual-purpose flags in full?
+
+    A shape whose `extra_pack_flags` is a callable computes the set per sweep
+    point, so it owns the whole set and inherits no default -- without that
+    rule the `dualpin` sweep has no all-off baseline to diff against.
+    """
+    return callable(spec.extra_pack_flags)
+
+
 def gwsh_options_of(spec, sweep_value=None):
     """The `set_option` arguments the vendor run gets for one sweep point."""
     return _per_point(spec.extra_gwsh_options, spec, sweep_value)

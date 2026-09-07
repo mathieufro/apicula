@@ -65,3 +65,31 @@ def test_dualpin_shape_stays_out_of_the_ddr_banks():
 def test_dualpin_shape_rejects_an_unknown_point():
     with pytest.raises(ValueError):
         dualpin.options_of("mode")
+
+
+def test_dualpin_shape_owns_its_packer_flag_set():
+    """No inherited `--cpu_as_gpio`: the all-off baseline must really be off."""
+    from fuzz.gw5ast138c.harness import openflow
+
+    assert gen.pack_flags_are_complete(SPEC)
+    cmd = openflow.pack_command(["gowin_pack"], extra_gpio=[],
+                                base_gpio=())
+    assert "--cpu_as_gpio" not in cmd
+    cmd = openflow.pack_command(["gowin_pack"],
+                                extra_gpio=gen.pack_flags_of(SPEC, "cpu"),
+                                base_gpio=())
+    assert cmd.count("--cpu_as_gpio") == 1
+
+
+def test_landed_shapes_keep_the_inherited_packer_flag():
+    """A shape with a plain flag list still packs exactly as it did before."""
+    from fuzz.gw5ast138c.harness import openflow
+    from fuzz.gw5ast138c.shapes import ae350_soc, smoke
+
+    assert not gen.pack_flags_are_complete(smoke.SPEC)
+    assert not gen.pack_flags_are_complete(ae350_soc.SPEC)
+    cmd = openflow.pack_command(
+        ["gowin_pack"], extra_gpio=gen.pack_flags_of(ae350_soc.SPEC))
+    assert cmd == ["gowin_pack", "-d", openflow.DEVICE, "--cpu_as_gpio",
+                   "--sspi_as_gpio", "--mspi_as_gpio",
+                   "-o", "top.fs", "top_pnr.json"]

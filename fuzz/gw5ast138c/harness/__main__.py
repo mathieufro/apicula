@@ -377,7 +377,9 @@ def real_runner(run_id, design_dir, shape, sweep_value, level):
     open_result = openflow.run_openflow(
         design_dir, top_module=spec.top_module,
         extra_gpio=gen.pack_flags_of(spec, sweep_value),
-        vopts=gen.nextpnr_vopts_of(spec, sweep_value))
+        vopts=gen.nextpnr_vopts_of(spec, sweep_value),
+        base_gpio=() if gen.pack_flags_are_complete(spec)
+        else openflow.DEFAULT_PACK_GPIO)
     wall = {"oracle": oracle_result["wall_clock_s"],
             "total": time.time() - started}
     open_logs = [step["log_path"] for step in open_result["steps"]

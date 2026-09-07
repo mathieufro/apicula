@@ -180,8 +180,17 @@ def nextpnr_command(nextpnr, chipdb, cst="top.cst", json_in="top.json",
     return cmd
 
 
+#: The dual-purpose-pin flags a shape that states none of its own inherits.
+#: Every shape landed before the `dualpin` sweep was packed with `cpu_as_gpio`
+#: on, so it stays the default: dropping it would silently move those shapes'
+#: bitstreams.  A shape that computes its flags per sweep point overrides it
+#: with the empty set, because such a shape owns its option set completely --
+#: an all-off baseline is unreachable otherwise.
+DEFAULT_PACK_GPIO = ("--cpu_as_gpio",)
+
+
 def pack_command(gowin_pack, json_in="top_pnr.json", fs_out="top.fs",
-                 device=DEVICE, extra_gpio=()):
+                 device=DEVICE, extra_gpio=(), base_gpio=DEFAULT_PACK_GPIO):
     """`gowin_pack -d <device> --cpu_as_gpio -o top.fs top_pnr.json`.
 
     `--cpu_as_gpio` is the **packer** namespace (`gowin_pack.py:36`); the
@@ -189,9 +198,11 @@ def pack_command(gowin_pack, json_in="top_pnr.json", fs_out="top.fs",
     `extra_gpio` carries a shape's additional dual-purpose-pin flags (the
     AE350 shape passes `sspi_as_gpio` and `mspi_as_gpio`).
     """
-    cmd = list(gowin_pack) + ["-d", device, "--cpu_as_gpio"]
-    for flag in extra_gpio:
-        cmd.append(flag if flag.startswith("--") else f"--{flag}")
+    cmd = list(gowin_pack) + ["-d", device]
+    for flag in list(base_gpio) + list(extra_gpio):
+        flag = flag if flag.startswith("--") else f"--{flag}"
+        if flag not in cmd:
+            cmd.append(flag)
     cmd += ["-o", fs_out, json_in]
     return cmd
 
@@ -362,7 +373,7 @@ def run_openflow(design_dir, top_module="top", verilog="top.v", cst="top.cst",
                  fs_out="top.fs", yosys=None, nextpnr=None, chipdb=None,
                  gowin_pack=None, extra_gpio=(), timing_allow_fail=True,
                  report="top_report.json", timeout=DEFAULT_TIMEOUT_S,
-                 vopts=()):
+                 vopts=(), base_gpio=DEFAULT_PACK_GPIO):
     """Run the three tools on one design directory and return the result.
 
     Every step's log is a real file inside `design_dir`; the first non-zero
@@ -401,7 +412,8 @@ def run_openflow(design_dir, top_module="top", verilog="top.v", cst="top.cst",
     if steps[-1]["returncode"] == 0:
         steps.append(run_step(
             "gowin_pack", pack_command(
-                pack_prefix, pnr_json, fs_out, DEVICE, extra_gpio),
+                pack_prefix, pnr_json, fs_out, DEVICE, extra_gpio,
+                base_gpio),
             design_dir, timeout))
 
     nextpnr_log = next((s["log_text"] for s in steps if s["step"] == "nextpnr"),
