@@ -1292,8 +1292,107 @@ def gw5_get_num_of_hclks(device):
         return 6
     return len(locs)
 
+#: The four die sides, as (name, is_row_side) -- `is_row_side` says whether a
+#: cell's position along the side is its row (left/right) or its column
+#: (top/bottom).  Every HCLK block and every IOLOGIC sits on one of them.
+def gw5_die_side(dev, row, col):
+    """The side a peripheral cell sits on, and its position along that side.
+
+    Returns ``(side, pos)`` or ``None`` for a cell that is not on the
+    periphery -- where no IOLOGIC and no HCLK block ever sits.  A corner cell
+    is reported on its horizontal side, which is the convention the block
+    table already follows (no 138C or 25A block sits in a corner).
+    """
+    if row == 0:
+        return ('top', col)
+    if row == dev.rows - 1:
+        return ('bottom', col)
+    if col == 0:
+        return ('left', row)
+    if col == dev.cols - 1:
+        return ('right', row)
+    return None
+
+
+def gw5_hclk_arcs(dev, device, fse):
+    """Map every peripheral cell to the HCLK block that can drive its FCLK.
+
+    Each die side carries some number of HCLK blocks -- two on each of the
+    GW5AST-138C's `left`, `right` and `bottom`, none on its `top` -- and each
+    block serves a contiguous run of that side.  Two facts fix the runs, and
+    both are read out of the shipped tables rather than traced by hand:
+
+    * the blocks themselves, from the measured block table (`P1.T04`), whose
+      per-side order is the vendor's own `INS_LOC` convention (SUG1018 sec 2.9,
+      `LEFTSIDE[0..3]` = the first block of the left side, `[4..7]` = the
+      second; `P1.T08d` measured all twenty-four positions);
+    * the boundary between two blocks of one side: the *inter-HCLK bridge*
+      cell between them when the `.fse` puts one there -- a cell carrying
+      table 48 without being a block -- and the midpoint between the two block
+      cells when it does not.
+
+    On the GW5AST-138C the left and right sides each have their bridge at row
+    63, so their boundary is measured; the bottom side's two blocks (columns 64
+    and 117) have no bridge between them -- its one interior bridge, (108,118),
+    lies beyond both -- so the bottom boundary is the midpoint, column 90/91.
+    Every block cell then falls inside its own arc, which is the property the
+    GW5A-25A's hand-traced arcs have and the check this derivation is held to.
+
+    Cross-checked against the one vendor gearbox bitstream on this die
+    (`$OTC/evidence/oser/attr-audit.json`): its `OSER4` sits at `IOR51A`, cell
+    (50, 181), which this walk puts in block 1 -- the first block of the right
+    side, the one whose `FCLKSEL1=HCLK2` fuse the vendor set.
+
+    The GW5A-25A keeps its own literals: its arcs cross corners, which no rule
+    reading this die's tables reproduces, so replacing them would be a change
+    to a device this epic does not measure.
+    """
+    arcs = {}
+    blocks = {}
+    bridges = {}
+    for row in range(dev.rows):
+        for col in range(dev.cols):
+            side_pos = gw5_die_side(dev, row, col)
+            if side_pos is None or 48 not in fse[dev.grid[row][col]]['wire']:
+                continue
+            side, pos = side_pos
+            if gw5_hclk_idx(dev, device, row, col) >= 0:
+                blocks.setdefault(side, []).append(
+                        (pos, gw5_hclk_idx(dev, device, row, col)))
+            else:
+                bridges.setdefault(side, []).append(pos)
+
+    boundaries = {}
+    for side, side_blocks in blocks.items():
+        side_blocks.sort()
+        side_bounds = []
+        for (pos_a, _), (pos_b, _) in zip(side_blocks, side_blocks[1:]):
+            between = [b for b in bridges.get(side, []) if pos_a < b < pos_b]
+            side_bounds.append(between[0] if len(between) == 1
+                               else (pos_a + pos_b) / 2)
+        boundaries[side] = side_bounds
+
+    for row in range(dev.rows):
+        for col in range(dev.cols):
+            side_pos = gw5_die_side(dev, row, col)
+            if side_pos is None or side_pos[0] not in blocks:
+                continue
+            side, pos = side_pos
+            side_blocks = blocks[side]
+            idx = sum(1 for b in boundaries[side] if pos > b)
+            arcs[(row, col)] = side_blocks[idx][1]
+    return arcs
+
+
 # These cells do contain IOLOGIC
-def gw5_create_hclk_iol_pip(dev, device, row, col):
+def gw5_create_hclk_iol_pip(dev, device, row, col, fse = None):
+    """Whether an IOLOGIC of this cell can be clocked from an HCLK block.
+
+    The GW5A-25A answers from the traced literals below.  Every other GW5A
+    device answers from the `.fse` itself: a cell has an FCLK to drive exactly
+    when `fse_iologic` gives it an IOLOGIC bel, which is the same test that
+    puts the bel in the database, so the two can no longer disagree.
+    """
     if device == 'GW5A-25A':
         if row == 0:
             return col not in {46, 59, 64, 81, 92}
@@ -1303,7 +1402,10 @@ def gw5_create_hclk_iol_pip(dev, device, row, col):
             return row not in {10, 18}
         if col == dev.cols - 1:
             return row not in {2, 10, 27}
-    return False
+        return False
+    if fse is None:
+        return False
+    return bool(fse_iologic(device, fse, dev.grid[row][col]))
 
 # The cell that carries a block's logic->HCLK entry wires is the block cell
 # itself, so this is _gw5a_hclk_locs -- the 25A literal it used to hold was a
@@ -1395,24 +1497,32 @@ def gw5_make_hclk_pips(dev, device, fse, dat: Datfile):
                                 dest = wnames.hclknames[destid + 5 * hclk_off]
                                 mk_hclk_pip('_IHCLK', row, col, src, dest, fuses)
 
-                if gw5_create_hclk_iol_pip(dev, device, row, col):
-                    dev.io2hclk.setdefault(hclk_idx, set()).add((row, col))
-                    # Each IOLOGIC can use four HCLK lines for FCLK, and
-                    # the connection is established by setting the
-                    # functional fuses in the IOLOGIC, not the routing
-                    # fuses.
-                    # However, for simplicity, we create PIPs such as HCLK0 -> FCLK_A, etc.
-                    # In other words, the FCLK_A|B wires do not exist, the
-                    # PIP does not exist, and the HCLK0|1|2|3 themselves
-                    # are present in the cell only virtually, so we also
-                    # create a node.
-                    fuses = set()
-                    for i in range(2):
-                        dest = f'FCLK{"AB"[i]}'
-                        for j in range(4):
-                            src = f'HCLK{hclk_idx}{j}'
-                            dev.hclk_pips.setdefault((row, col), {}).setdefault(dest, {}).update({src: fuses})
-                            add_node(dev, f'HCLK{hclk_idx}_{src}', "GLOBAL_CLK", row, col, src)
+    # An IOLOGIC's fast clock comes from its side's HCLK block, and on a device
+    # whose blocks do not cover a whole side each (the GW5AST-138C has two per
+    # side) the block that serves a cell is not the block that IS that cell --
+    # so the arc walk answers it, not the block-cell test above.
+    iol_hclk = (gw5_hclk_arcs(dev, device, fse) if device != 'GW5A-25A'
+                else {(row, col): gw5_hclk_idx(dev, device, row, col)
+                      for row in range(dev.rows) for col in range(dev.cols)
+                      if gw5_hclk_idx(dev, device, row, col) >= 0})
+    for (row, col), hclk_idx in sorted(iol_hclk.items()):
+        if not gw5_create_hclk_iol_pip(dev, device, row, col, fse):
+            continue
+        dev.io2hclk.setdefault(hclk_idx, set()).add((row, col))
+        # Each IOLOGIC can use four HCLK lines for FCLK, and the connection is
+        # established by setting the functional fuses in the IOLOGIC, not the
+        # routing fuses.
+        # However, for simplicity, we create PIPs such as HCLK0 -> FCLK_A, etc.
+        # In other words, the FCLK_A|B wires do not exist, the PIP does not
+        # exist, and the HCLK0|1|2|3 themselves are present in the cell only
+        # virtually, so we also create a node.
+        fuses = set()
+        for i in range(2):
+            dest = f'FCLK{"AB"[i]}'
+            for j in range(4):
+                src = f'HCLK{hclk_idx}{j}'
+                dev.hclk_pips.setdefault((row, col), {}).setdefault(dest, {}).update({src: fuses})
+                add_node(dev, f'HCLK{hclk_idx}_{src}', "GLOBAL_CLK", row, col, src)
 
     # default PIPs - The tables for the GW5A series do not include
     # descriptions of the default PIPs. So we add them manually by placing

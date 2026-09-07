@@ -474,3 +474,81 @@ def test_gearbox_shapes_place_the_iologic_on_an_a_half_ball():
     from fuzz.gw5ast138c.shapes import _io_base, io_des, io_ser
     for ball in (io_ser.OSER_BALL, io_des.IDES_BALL):
         assert _io_base.SAFE_PINS[ball].site.endswith("A"), ball
+
+
+# ---------------------------------------------------------------- P3.F1
+# The HCLK -> IOLOGIC FCLK wiring (`D106`).  Every assertion below is about
+# the *derivation*: the arcs come from the shipped tables, so a test that
+# restated the table would prove nothing.
+
+def _iologic_cells(db):
+    """Every cell of the grid that carries an IOLOGIC bel."""
+    return {(row, col)
+            for row, ttyps in enumerate(db.grid)
+            for col, ttyp in enumerate(ttyps)
+            if any(name.startswith("IOLOGIC") for name in db.tiles[ttyp].bels)}
+
+
+def test_io2hclk_serves_every_iologic_cell_and_nothing_else(db_138c):
+    """An IOLOGIC without an HCLK block has no fast clock at all, and a cell
+    without an IOLOGIC has nothing to clock."""
+    served = {cell for cells in db_138c.io2hclk.values() for cell in cells}
+    assert served == _iologic_cells(db_138c)
+
+
+def test_io2hclk_gives_each_cell_exactly_one_block(db_138c):
+    """The arcs partition the periphery: two blocks over one cell would let
+    the placer pick a block the fuse set cannot express."""
+    served = [cell for cells in db_138c.io2hclk.values() for cell in cells]
+    assert len(served) == len(set(served))
+
+
+def test_io2hclk_arc_contains_its_own_block_cell(db_138c):
+    """The property that fixes the bottom side's boundary: a block serves the
+    run of its own side that it sits in.  The GW5A-25A's hand-traced arcs have
+    it, and it is what rules out reading the (108,118) bridge as a boundary."""
+    from apycula.chipdb import _gw5a_hclk_locs, gw5_die_side
+
+    for hclk_idx, (block_row, block_col) in _gw5a_hclk_locs[DEVICE].items():
+        side, pos = gw5_die_side(db_138c, block_row, block_col)
+        arc = [gw5_die_side(db_138c, row, col)
+               for row, col in db_138c.io2hclk[hclk_idx]]
+        assert {s for s, _ in arc} == {side}, hclk_idx
+        positions = [p for _, p in arc]
+        assert min(positions) < pos < max(positions), hclk_idx
+
+
+def test_io2hclk_places_the_vendor_oser4_cell_in_block_one(db_138c):
+    """The cross-check the derivation is calibrated against: the vendor's
+    `OSER4` (`$OTC/evidence/oser/attr-audit.json`) sits at `IOR51A`, cell
+    (50, 181), and set `FCLKSEL1=HCLK2` -- lane 2 of the block that serves it,
+    which this walk has to name."""
+    assert (50, 181) in db_138c.io2hclk[1]
+    assert sorted(db_138c.hclk_pips[(50, 181)]["FCLKA"]) == [
+            "HCLK10", "HCLK11", "HCLK12", "HCLK13"]
+
+
+def test_gw5ast138c_out_iologic_selects_the_measured_fclk_fuses():
+    """`FCLKSEL1`/`FCLKSEL2` are the two bits the packer used to miss."""
+    from apycula.gowin_pack import GW5AST_138C
+
+    device = object.__new__(GW5AST_138C)
+    bel = _iologic_bel("OSER4", {"OUTMODE": "ODDRX2"})
+    bel = type(bel)(bel.x, bel.y, bel.idx_str, bel.cell, "SPINE12",
+                    "ODDRX2", None)
+    emitted = {(av.attr, str(av.val))
+               for av in device.get_out_iologic_attrs(bel)}
+    assert ("WRFCLKSEL", "UNK102") in emitted
+    assert ("FCLKSEL1", "HCLK2") in emitted
+    assert ("FCLKSEL2", "HCLK2_") in emitted
+
+
+def test_gw5ast138c_out_iologic_selects_nothing_without_an_hclk():
+    """A gearbox whose `FCLK` the router did not bring off an HCLK must not
+    get a selection fuse invented for it."""
+    from apycula.gowin_pack import GW5AST_138C
+
+    device = object.__new__(GW5AST_138C)
+    bel = _iologic_bel("OSER4", {"OUTMODE": "ODDRX2"})
+    emitted = {av.attr for av in device.get_out_iologic_attrs(bel)}
+    assert not emitted & {"WRFCLKSEL", "FCLKSEL1", "FCLKSEL2"}

@@ -7049,6 +7049,47 @@ class GW5AST_138C(GW5A):
         """
         return self.handle_iodelay_gw5a(bel)
 
+    #: The `IOLOGIC_FCLK` attribute `nextpnr` writes, as an HCLK lane index.
+    #: `set_iologic_bel_fclk` has already turned `HCLK_OUT<n>` into
+    #: `SPINE1<n>`, and on this die -- unlike the pre-5A families -- the spine
+    #: number IS the lane of the cell's own HCLK block, because the block a
+    #: cell can use is fixed by its position (`chipdb.gw5_hclk_arcs`).
+    _fclk_lane = {'SPINE10': 0, 'SPINE11': 1, 'SPINE12': 2, 'SPINE13': 3}
+
+    def fclk_select_attrs(self, bel: IologicBelDesc, sel: str,
+                          sel_) -> list[AttrVal]:
+        """ The fast-clock selection of one IOLOGIC half.
+
+        MEASURED (`P3.T13`, `$OTC/evidence/oser/attr-gap.tsv`): the vendor's
+        `OSER4` at `IOLOGICA` of (50, 181) carries `WRFCLKSEL=UNK102`,
+        `FCLKSEL1=HCLK2` and `FCLKSEL2=HCLK2_`, and those three are exactly the
+        two fuses -- (0,123) and (3,131) -- by which the packer's set was a
+        strict subset of the vendor's.  Two selection attributes, not the
+        GW5A-25A's four: this die spells the lane once plain and once with the
+        trailing underscore, and has no `FCLKSEL0`/`FCLKSEL3` row for it.
+
+        `sel_` is the attribute that takes the underscored spelling, or None
+        for a path that has only the plain one.
+        """
+        lane = self._fclk_lane.get(bel.fclk)
+        if lane is None:
+            return []
+        attr_vals = [AttrVal('WRFCLKSEL', 'UNK102'),
+                     AttrVal(sel, f'HCLK{lane}')]
+        if sel_ is not None:
+            attr_vals.append(AttrVal(sel_, f'HCLK{lane}_'))
+        return attr_vals
+
+    def get_out_iologic_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ Add the fast-clock selection the generic GW5A handler cannot make.
+
+        The base handler models the pre-5A `CLKODDRMUX_*` shape, which on this
+        die costs no fuse at all, so an output gearbox came out of it with its
+        `FCLK` unselected -- the two-bit gap `P3.T13` measured.
+        """
+        return (super().get_out_iologic_attrs(bel)
+                + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2'))
+
     def get_in_iologic_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
         """ The reset multiplexer of an IDDRC is inverting on this die.
 
