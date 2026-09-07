@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field, fields as dc_fields, is_dataclass
 from typing import Dict, List, Optional, Set, Tuple, Union, Any
-from itertools import chain
+from itertools import chain, product
 import os
 import re
 import sys
@@ -4146,29 +4146,40 @@ _osc_ports = {('OSCZ', 'GW1NZ-1'): ({}, {'OSCOUT' : (0, 5, 'OF3'), 'OSCEN': (0, 
 # already done when we created pure clock pips. But what we need to do is
 # indicate that these CLKs at these coordinates are TRBDCLK0, etc. Therefore,
 # we create Himbaechel nodes.
+def gw5_logic_clock_gates(dat: Datfile, table):
+    """The 24 logic-to-clock gates one `dat.gw5aStuff` CMux table describes.
+
+    Each entry is `(clock wire id, row, col, fabric wire id)`; the table holds
+    1-based coordinates, the chipdb 0-based ones.
+    """
+    return {
+            (i, dat.gw5aStuff[table][i - 80][0] - 1,
+                dat.gw5aStuff[table][i - 80][1] - 1,
+                dat.gw5aStuff[table][i - 80][2])
+            for i in range(wnames.clknumbers['TRBDCLK0'], wnames.clknumbers['TRMDCLK1'] + 1)
+           }
+
+#: The half whose logic-to-clock gates the *central* clock multiplexer names
+#: without a half suffix.
+#:
+#: On the 138C a gate name such as `BLMDCLK1` denotes two different wires --
+#: one per half of the clock plane, at the two coordinates `CMuxTopIns` and
+#: `CMuxBotIns` give.  The half backbones (fse tables 90 and 91) keep them
+#: apart by suffix, but the central multiplexer (fse table 38), which is what
+#: feeds the DCS clock inputs, names the gate bare.  MEASURED which of the two
+#: it is: five vendor bitstreams (`P1.T31` baseline plus batch `p1f2-dcsin`
+#: a/b/c/d, `$OTC/evidence/dcs/input-side-138c.md`) program a bare gate source
+#: into a DCS input multiplexer, and in every one of them only the
+#: `CMuxBotIns` coordinate of that gate carries a driven `CLK1`.
+_central_mux_gate_half = {'GW5AST-138C': 1}
+
+
 def get_logic_clock_ins(device, dat: Datfile):
     if device in {'GW5A-25A'}:
-        return [{
-                    (i, dat.gw5aStuff['CMuxTopIns'][i - 80][0] - 1,
-                        dat.gw5aStuff['CMuxTopIns'][i - 80][1] - 1,
-                        dat.gw5aStuff['CMuxTopIns'][i - 80][2])
-                    for i in range(wnames.clknumbers['TRBDCLK0'], wnames.clknumbers['TRMDCLK1'] + 1)
-                }]
+        return [gw5_logic_clock_gates(dat, 'CMuxTopIns')]
     elif device in {'GW5AST-138C'}:
-        return [{}, {(160, 108, 91, 125)}] # XXX for now only one gate: BRMDCLK1
-        """
-        return [{
-                    (i, dat.gw5aStuff['CMuxTopIns'][i - 80][0] - 1,
-                        dat.gw5aStuff['CMuxTopIns'][i - 80][1] - 1,
-                        dat.gw5aStuff['CMuxTopIns'][i - 80][2])
-                    for i in range(wnames.clknumbers['TRBDCLK0'], wnames.clknumbers['TRMDCLK1'] + 1)
-                }, {
-                    (i, dat.gw5aStuff['CMuxBotIns'][i - 80][0] - 1,
-                        dat.gw5aStuff['CMuxBotIns'][i - 80][1] - 1,
-                        dat.gw5aStuff['CMuxBotIns'][i - 80][2])
-                    for i in range(wnames.clknumbers['TRBDCLK0'], wnames.clknumbers['TRMDCLK1'] + 1)
-                }]
-        """
+        return [gw5_logic_clock_gates(dat, 'CMuxTopIns'),
+                gw5_logic_clock_gates(dat, 'CMuxBotIns')]
     # pre 5a
     return [{
                 (i, dat.cmux_ins[i - 80][0] - 1,
@@ -4177,16 +4188,41 @@ def get_logic_clock_ins(device, dat: Datfile):
                 for i in range(wnames.clknumbers['TRBDCLK0'], wnames.clknumbers['TRMDCLK1'] + 1)
             }]
 
+def central_mux_gate_cells(dev, device, gate):
+    """Cells whose *central* clock multiplexer takes `gate` as a bare source.
+
+    Only the clock-bridge cells have that multiplexer, and only the sources it
+    really lists are returned -- the caller must not invent a wire in a cell
+    the fse tables never gave one.
+    """
+    if device not in _central_mux_gate_half:
+        return
+    for row, col in product(range(dev.rows), range(dev.cols)):
+        if dev.grid[row][col] not in bridge_tile_types_138:
+            continue
+        if any(gate in srcs for srcs in dev[row, col].clock_pips.values()):
+            yield row, col
+
+
 def fse_create_logic2clk(dev, device, dat: Datfile):
     for half, clk_desc in enumerate(get_logic_clock_ins(device, dat)):
         print(f"Create logic to clock gates. Half:{half}")
         for clkwire_idx, row, col, wire_idx in clk_desc:
-            if row != -2:
-                add_node(dev, mk_clock_wname(device, wnames.clknames[clkwire_idx], half), "GLOBAL_CLK", row, col, wnames.wirenames[wire_idx])
-                print(clkwire_idx, row, col, wire_idx, mk_clock_wname(device, wnames.clknames[clkwire_idx], half))
-                add_buf_bel(dev, row, col, wnames.wirenames[wire_idx])
-                # Make list of the clock gates for nextpnr
-                dev.extra_func.setdefault((row, col), {}).setdefault('clock_gates', []).append(wnames.wirenames[wire_idx])
+            if row == -2:
+                continue
+            gate = wnames.clknames[clkwire_idx]
+            node = mk_clock_wname(device, gate, half)
+            add_node(dev, node, "GLOBAL_CLK", row, col, wnames.wirenames[wire_idx])
+            print(clkwire_idx, row, col, wire_idx, node)
+            add_buf_bel(dev, row, col, wnames.wirenames[wire_idx])
+            # Make list of the clock gates for nextpnr
+            dev.extra_func.setdefault((row, col), {}).setdefault('clock_gates', []).append(wnames.wirenames[wire_idx])
+            # The bare gate wire of the central multiplexer is the same silicon
+            # as this half's suffixed one; without the alias a clock can reach
+            # a half backbone but never a DCS clock input.
+            if half == _central_mux_gate_half.get(device):
+                for brow, bcol in central_mux_gate_cells(dev, device, gate):
+                    add_node(dev, node, "GLOBAL_CLK", brow, bcol, gate)
 
 def fse_create_osc(dev, device, fse):
     if device in {'GW5AT-60B', 'GW5AST-138C'}:

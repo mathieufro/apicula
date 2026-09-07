@@ -77,6 +77,14 @@ POINTS = {
     "q2": ((54, 88), "SPINE22"),
 }
 
+#: A sweep point whose four `CLKIN` carry four **different** clocks, so
+#: `CLKSEL` selects among distinct sources instead of among four copies of
+#: one.  It is the design the DCS input side exists for: `P1.F2` added it once
+#: the input multiplexers had a driver at all (`evidence/dcs/input-side-138c.md`).
+#: Only one clock-capable location is measured good on this part, so the other
+#: three clocks are fabric-divided from it.
+SEL_POINT = "sel4"
+
 _ACK_CLK = ("EMCCLK: 27 vendor runs on this device placed a CLKDIV with clk on "
             "V22 and gw_sh returned 0 every time (P1.T08d "
             "evidence/hclk/mux38-138c.md 3); it is the Tang Mega 138K board "
@@ -134,11 +142,53 @@ endmodule
 """
 
 
+#: The `sel4` point's body, spliced into `E1_RTL` in place of the four
+#: identical `CLKIN`.  The divider chain is deliberately a chain: three
+#: independent clock nets the vendor cannot fold into one.
+SEL4_DIVIDERS = """\
+    reg d1 = 1'b0, d2 = 1'b0, d3 = 1'b0;
+    always @(posedge clk) d1 <= ~d1;
+    always @(posedge d1)  d2 <= ~d2;
+    always @(posedge d2)  d3 <= ~d3;
+"""
+
+SEL4_CLKIN = """\
+        .CLKIN0   (clk),
+        .CLKIN1   (d1),
+        .CLKIN2   (d2),
+        .CLKIN3   (d3),"""
+
+_UNIFORM_COMMENT = """\
+    // The selection is dynamic so the mux cannot be folded away.  All four
+    // CLKIN come from the one package clock: this part has one measured
+    // clock-capable location, and a DCS is a black box to synthesis, so it
+    // still programs all four of its input multiplexers -- which is the thing
+    // being compared."""
+
+SEL4_COMMENT = """\
+    // The selection is dynamic so the mux cannot be folded away, and the four
+    // CLKIN carry four different clocks, so it selects among distinct sources.
+    // Only one clock-capable location is measured good on this part, so the
+    // other three are fabric-divided from it."""
+
+_UNIFORM_CLKIN = """\
+        .CLKIN0   (clk),
+        .CLKIN1   (clk),
+        .CLKIN2   (clk),
+        .CLKIN3   (clk),"""
+
+
 def e1_rtl(spec, sweep_value=None):
     value = sweep_value if sweep_value is not None else spec.baseline_value
-    return E1_RTL.format(
+    rtl = E1_RTL.format(
         name=spec.name, primitive=spec.primitive, sweep_axis=spec.sweep_axis,
         sweep_value=value, top_module=spec.top_module, mode="RISING")
+    if value == SEL_POINT:
+        rtl = rtl.replace(_UNIFORM_CLKIN, SEL4_CLKIN)
+        rtl = rtl.replace(_UNIFORM_COMMENT, SEL4_COMMENT)
+        rtl = rtl.replace("    reg [3:0] sel;",
+                          SEL4_DIVIDERS + "\n    reg [3:0] sel;")
+    return rtl
 
 
 def _spec():
@@ -147,7 +197,7 @@ def _spec():
         name="clocking_dcs",
         primitive="DCS",
         sweep_axis="quadrant",
-        sweep_values=list(POINTS),
+        sweep_values=list(POINTS) + [SEL_POINT],
         baseline_value="q1",
         pins={
             "clk": PinSpec(loc="V22", bank=4, drive=None, direction="input",

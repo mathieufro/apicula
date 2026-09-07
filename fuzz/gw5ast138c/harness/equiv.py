@@ -916,6 +916,51 @@ def dqce_recovered_via_pip(cell, netlist):
     return f"DQCE_PIP {pip} is not in the decoded bitstream"
 
 
+#: `SPINE<n>` of a `DCS` bel, however the bel or the placeholder spells it.
+DCS_SPINE_RE = re.compile(r"SPINE(\d+)")
+
+
+def dcs_clkout_node(spine_idx):
+    """The node a 138C `DCS` output really drives, or `None` off this die.
+
+    MEASURED (`P1.T31`, `evidence/dcs/ports-138c.md`): a DCS output on this
+    die does not stay on the spine it is named after -- it joins its half's
+    `CBRIDGEOUT_<half><n>` and re-enters the clock plane through the other
+    bridge cell's multiplexer.  The two halves start at `SPINE8` and
+    `SPINE16`, eight spines each.
+    """
+    for base, half in ((8, "TOP"), (16, "BOTTOM")):
+        if base <= spine_idx < base + 8:
+            return f"CBRIDGEOUT_{half}{spine_idx - base}"
+    return None
+
+
+def dcs_recovered_via_clkout(cell, netlist):
+    """`None` if this used DCS left its mark on the decoded bitstream.
+
+    A `DCS` is not a cell any decode can return: its `DCS_MODE` lives in the
+    `longfuses` tables (`gowin_pack.get_dcs_fuses`), and `gowin_unpack`
+    decodes no `longfuses` table on **any** device -- the same architectural
+    hole `dqce_recovered_via_pip` works around, one table deeper.  What the
+    bitstream does carry, and what a route through the mux is worth asserting,
+    is the DCS output driving the clock plane, so that is what is required
+    here.  It proves the route, not the mode fuse; the mode fuse is covered by
+    the bit-level comparison and by `c2`, never by `c1`.
+    """
+    match = DCS_SPINE_RE.search(cell["name"]) or (
+        DCS_SPINE_RE.search(cell["bel"] or ""))
+    if match is None:
+        return f"no SPINE index in DCS cell name {cell['name']!r}"
+    node = dcs_clkout_node(int(match[1]))
+    if node is None:
+        return f"SPINE{match[1]} is not a DCS output spine of this die"
+    suffix = "_" + node
+    for tile_pips in netlist.raw_pips.values():
+        if any(src.endswith(suffix) for src in tile_pips.values()):
+            return None
+    return f"the DCS output node {node} drives nothing in the decoded bitstream"
+
+
 def unused_clock_mux_placeholder(cell):
     """Why this clock-mux placeholder writes no fuse, or `None` if it does."""
     for prefix, (attr, router) in PACKER_CLOCK_MUX_PLACEHOLDERS.items():
@@ -1734,6 +1779,21 @@ def decode_check_c1(pnr_cells, netlist):
         if why_unused:
             skipped.append({"name": cell["name"], "type": cell["type"],
                             "bel": cell["bel"], "why": why_unused})
+            continue
+        if cell["type"] == "DCS":
+            why_not = dcs_recovered_via_clkout(cell, netlist)
+            if why_not is None:
+                skipped.append({"name": cell["name"], "type": cell["type"],
+                                "bel": cell["bel"],
+                                "why": "used DCS; DCS_MODE is a longfuses "
+                                       "attribute the unpacker decodes on no "
+                                       "device, so the DCS output node "
+                                       "driving the clock plane is required "
+                                       "instead"})
+                continue
+            missing.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "site": list(cell["site"]),
+                            "why": why_not})
             continue
         if cell["type"] == "DQCE":
             why_not = dqce_recovered_via_pip(cell, netlist)
