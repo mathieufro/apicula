@@ -384,6 +384,14 @@ def real_runner(run_id, design_dir, shape, sweep_value, level):
         open_result["provenance"], open_log=open_logs or None,
         open_fs=open_result["fs_path"], wall_clock_s=wall)
     if not open_result["ok"]:
+        # `D30`/`spec-harness.md` §6: a named refusal is a deliverable with
+        # its own verdict, and the packer's exact words are the evidence.
+        # Only a crash is `aborted`.
+        refusal = open_result.get("refused")
+        if refusal:
+            return evidence.adapt(
+                oracle_fragment, open_fragment, base,
+                verdict="refused", notes=f"open flow refused: {refusal}")
         return evidence.adapt(
             oracle_fragment, open_fragment, base,
             notes=f"open flow failed: {open_result['returncodes']}")

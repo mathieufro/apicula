@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import re
+import sys
 
 from apycula import attrids
 from apycula import gw5ast138c_pll_pump as pll_pump
@@ -20,6 +21,21 @@ from dataclasses import dataclass
 from types import FunctionType
 
 ################################################################
+class PackRefused(Exception):
+    """The packer declines to emit a bitstream it cannot justify.
+
+    A refusal is a *result*, not a crash: the device model has no measured
+    fuse for what the design asks for, so emitting a plausible-looking one
+    would produce a wrong bitstream with no error (`D30`).  `main` turns it
+    into a ``REFUSED:`` line and exit status :data:`REFUSED_EXIT`, which is
+    how a caller tells a deliberate refusal from a traceback.
+    """
+
+
+#: Exit status `main` uses for a `PackRefused`, distinct from 1 (a crash).
+REFUSED_EXIT = 3
+
+
 class CliArgs:
     """ Parses the command line. """
     def __init__(self):
@@ -1214,7 +1230,7 @@ class Device:
     # certain data. That’s why, in these methods, we generate what we can, and
     # handle the rest in the `get_final_fuses()` method, which is called last.
     def error_not_supported_cell_type(self, bel: BelDesc):
-        raise Exception(f"Not supported cell type '{bel.cell.typ}'. Cell '{bel.cell.name}'.")
+        raise PackRefused(f"Not supported cell type '{bel.cell.typ}'. Cell '{bel.cell.name}'.")
 
     def error_not_implemented_method(self, method_name: str):
         raise Exception(f"Not implemented method '{method_name}'.")
@@ -5536,7 +5552,7 @@ class GW5A(Device):
                                      or port.startswith('CLKSEL')))
         if driven and not self.chipdb.dcs_control_wires_traced(
                 bel.x, bel.y, bel.idx_int):
-            raise Exception(
+            raise PackRefused(
                 f"DCS {', '.join(driven)} is driven on a device whose DCS "
                 "control wires have never been traced: the wire names come "
                 "from the pre-5A model, so the route into them is not the "
@@ -7356,8 +7372,7 @@ def create_output_bitstream(cli_args: CliArgs, device: Device) -> Bitstream:
     else:
         raise Exception(f"Unknown device {dev}")
 
-def main():
-    cli_args = CliArgs()
+def _pack(cli_args):
     pnr = Netlist(cli_args)
     device = create_device(cli_args, pnr)
     output = create_output_bitstream(cli_args, device)
@@ -7371,7 +7386,18 @@ def main():
     output.set_fuses(fuses)
     output.write()
 
+
+def main():
+    try:
+        _pack(CliArgs())
+    except PackRefused as refusal:
+        # One line, on stderr, prefixed so a caller can recover the exact
+        # text without parsing a traceback -- the refusal is the deliverable.
+        print(f"REFUSED: {refusal}", file=sys.stderr)
+        return REFUSED_EXIT
+    return 0
+
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
 
 # vim: set et sw=4 ts=4:
