@@ -4808,6 +4808,185 @@ def fse_create_emcu(dev, device, dat):
         make_port(dev, row, col, r, c, wire, 'EMCU', port, 'EMCU_IN', ins)
 
 
+# The AE350 SoC hard block of the GW5AST-138C.
+#
+# Unlike the GW1NS-4's EMCU, whose port map is a slice of the legacy
+# `McuIns`/`McuOuts` triples, this block's map lives in the 5-series table
+# block: `dat.gw5aStuff['Ae350SocIns']` and `['Ae350SocOuts']`. The legacy
+# triples are all-sentinel on every GW5 device measured, so there is nothing to
+# slice there (`tests/test_ae350_dat_tables.py` pins that as a control).
+#
+# Geometry, measured (`evidence/ae350/wire-map-138c.md`): every live record
+# names die row 0, and the two halves of the block's band are contiguous and
+# disjoint -- the block reads the left of its band (columns 145-155) and drives
+# the right (columns 156-180). The bel therefore lives in the row-0 tile at the
+# first tapped column, `(0, 145)`: the leftmost cell of the block's own
+# footprint, and one whose wires the block really reads. The EMCU's `(0, 0)`
+# rests on a GW1NS-4 CPU-enable flag that has no counterpart here, so it is not
+# inherited.
+#
+# The interface bands of tile types 224 and 228 are where the presence diff's
+# configuration bits move, but no port record names them; they are marked as the
+# block's configuration tiles and carry no ports.
+
+#: `(name, width)` per port, in `primitive.xml` declaration order. Slot *i* of a
+#: direction's table is bit *i* of that direction, counting these ports in order
+#: with each bus LSB first -- so the order of these two tuples is load-bearing
+#: and must never be sorted.
+_AE350_SOC_INPUTS = (
+    ('POR_N', 1), ('HW_RSTN', 1), ('CORE_CLK', 1), ('DDR_CLK', 1),
+    ('AHB_CLK', 1), ('APB_CLK', 1), ('DBG_TCK', 1), ('RTC_CLK', 1),
+    ('CORE_CE', 1), ('AXI_CE', 1), ('DDR_CE', 1), ('AHB_CE', 1),
+    ('APB_CE', 8), ('APB2AHB_CE', 1), ('SCAN_TEST', 1), ('SCAN_EN', 1),
+    ('GP_INT', 16), ('DMA_REQ', 8), ('WAKEUP_IN', 1), ('TEST_CLK', 1),
+    ('TEST_MODE', 1), ('TEST_RSTN', 1), ('ROM_HRDATA', 32), ('ROM_HREADY', 1),
+    ('ROM_HRESP', 1), ('APB_PRDATA', 32), ('APB_PREADY', 1),
+    ('APB_PSLVERR', 1), ('EXTS_HRDATA', 32), ('EXTS_HREADYIN', 1),
+    ('EXTS_HRESP', 1), ('EXTM_HADDR', 32), ('EXTM_HBURST', 3),
+    ('EXTM_HPROT', 4), ('EXTM_HREADY', 1), ('EXTM_HSEL', 1),
+    ('EXTM_HSIZE', 3), ('EXTM_HTRANS', 2), ('EXTM_HWDATA', 64),
+    ('EXTM_HWRITE', 1), ('DDR_HRDATA', 64), ('DDR_HREADY', 1),
+    ('DDR_HRESP', 1), ('TMS_IN', 1), ('TRST_IN', 1), ('TDI_IN', 1),
+    ('SPI2_HOLDN_IN', 1), ('SPI2_WPN_IN', 1), ('SPI2_CLK_IN', 1),
+    ('SPI2_CSN_IN', 1), ('SPI2_MISO_IN', 1), ('SPI2_MOSI_IN', 1),
+    ('I2C_SCL_IN', 1), ('I2C_SDA_IN', 1), ('UART1_RXD', 1), ('UART1_CTSN', 1),
+    ('UART1_DSRN', 1), ('UART1_DCDN', 1), ('UART1_RIN', 1), ('UART2_RXD', 1),
+    ('UART2_CTSN', 1), ('UART2_DCDN', 1), ('UART2_DSRN', 1), ('UART2_RIN', 1),
+    ('GPIO_IN', 32), ('SCAN_IN', 20), ('INTEG_TCK', 1), ('INTEG_TDI', 1),
+    ('INTEG_TMS', 1), ('INTEG_TRST', 1), ('PGEN_CHAIN_I', 1), ('EMA', 3),
+    ('EMAW', 2), ('EMAS', 1), ('RET1N', 1), ('RET2N', 1)
+)
+
+_AE350_SOC_OUTPUTS = (
+    ('DMA_ACK', 8), ('PRESETN', 1), ('HRESETN', 1), ('DDR_RSTN', 1),
+    ('CORE0_WFI_MODE', 1), ('RTC_WAKEUP', 1), ('ROM_HADDR', 32),
+    ('ROM_HTRANS', 2), ('ROM_HWRITE', 1), ('APB_PADDR', 32),
+    ('APB_PENABLE', 1), ('APB_PSEL', 1), ('APB_PWDATA', 32),
+    ('APB_PWRITE', 1), ('APB_PPROT', 3), ('APB_PSTRB', 4), ('EXTS_HADDR', 32),
+    ('EXTS_HBURST', 3), ('EXTS_HPROT', 4), ('EXTS_HSEL', 1),
+    ('EXTS_HSIZE', 3), ('EXTS_HTRANS', 2), ('EXTS_HWDATA', 32),
+    ('EXTS_HWRITE', 1), ('EXTM_HRDATA', 64), ('EXTM_HREADYOUT', 1),
+    ('EXTM_HRESP', 1), ('DDR_HADDR', 32), ('DDR_HBURST', 3), ('DDR_HPROT', 4),
+    ('DDR_HSIZE', 3), ('DDR_HTRANS', 2), ('DDR_HWDATA', 64),
+    ('DDR_HWRITE', 1), ('TDO_OUT', 1), ('TDO_OE', 1), ('SPI2_HOLDN_OUT', 1),
+    ('SPI2_HOLDN_OE', 1), ('SPI2_WPN_OUT', 1), ('SPI2_WPN_OE', 1),
+    ('SPI2_CLK_OUT', 1), ('SPI2_CLK_OE', 1), ('SPI2_CSN_OUT', 1),
+    ('SPI2_CSN_OE', 1), ('SPI2_MISO_OUT', 1), ('SPI2_MISO_OE', 1),
+    ('SPI2_MOSI_OUT', 1), ('SPI2_MOSI_OE', 1), ('I2C_SCL', 1), ('I2C_SDA', 1),
+    ('UART1_TXD', 1), ('UART1_RTSN', 1), ('UART1_DTRN', 1),
+    ('UART1_OUT1N', 1), ('UART1_OUT2N', 1), ('UART2_TXD', 1),
+    ('UART2_RTSN', 1), ('UART2_DTRN', 1), ('UART2_OUT1N', 1),
+    ('UART2_OUT2N', 1), ('CH0_PWM', 1), ('CH0_PWMOE', 1), ('CH1_PWM', 1),
+    ('CH1_PWMOE', 1), ('CH2_PWM', 1), ('CH2_PWMOE', 1), ('CH3_PWM', 1),
+    ('CH3_PWMOE', 1), ('GPIO_OE', 32), ('GPIO_OUT', 32), ('INTEG_TDO', 1),
+    ('SCAN_OUT', 20), ('PRDYN_CHAIN_O', 1)
+)
+
+#: The six clock inputs. Every other input is ordinary fabric logic; `TEST_CLK`
+#: is not among them because the hard block ties it internally (`port-inventory`
+#: `tied_to`), so it never reaches the clock network.
+_AE350_SOC_CLOCK_PORTS = frozenset(
+    {'CORE_CLK', 'DDR_CLK', 'AHB_CLK', 'APB_CLK', 'RTC_CLK', 'DBG_TCK'})
+
+#: Die `(row, col)` of the `AE350_SOC` bel: row 0, first tapped column.
+_AE350_SOC_ANCHOR = (0, 145)
+
+#: Die columns the block reads from and drives into, measured.
+_AE350_SOC_IN_COLS = range(145, 156)
+_AE350_SOC_OUT_COLS = range(156, 181)
+
+#: Tile types carrying the block's configuration bits. They hold no ports.
+_AE350_SOC_CONFIG_TTYPS = (224, 228)
+
+#: An absent field in a `gw5aStuff` record: these tables are unsigned, so the
+#: `-1` of the legacy triples reads back as `0xffff` here.
+_AE350_DAT_ABSENT = 0xffff
+
+#: Prefix of the placeholder wire a bit with no usable record is given. The name
+#: exists in no wire table, so nextpnr can neither route it nor silently alias it
+#: to a real wire: a design that drives such a port fails naming the port.
+_AE350_UNMAPPED_PREFIX = 'AE350_UNMAPPED_'
+
+
+def _ae350_port_bits(ports):
+    """Yield the port name of every bit of `ports`, in table-slot order.
+
+    Single-bit ports keep their name; a bus of width *w* becomes `NAME0` ..
+    `NAME{w-1}`, LSB first -- the same spelling `fse_create_emcu` uses.
+    """
+    for name, width in ports:
+        if width == 1:
+            yield name
+        else:
+            for index in range(width):
+                yield f'{name}{index}'
+
+
+def _ae350_tap(entry, cols):
+    """`((row, col, wire), None)` for a usable record, else `(None, reason)`.
+
+    A record is usable when it is present, names a column inside the half of the
+    block's band that this direction uses, and names a wire the device's wire
+    table knows. Anything else is a bit this device data does not map, and the
+    reason is kept so the gap is auditable rather than silent.
+    """
+    if entry is None or len(entry) < 3:
+        return None, 'no-record'
+    row, col, wire = entry[0], entry[1], entry[2]
+    if _AE350_DAT_ABSENT in (row, col, wire) or -1 in (row, col, wire):
+        return None, 'unbound'
+    if col - 1 not in cols:
+        return None, 'outside-footprint'
+    if wire not in wnames.wirenames:
+        return None, 'unknown-wire-index'
+    return (row, col, wire), None
+
+
+def fse_create_ae350(dev, device, dat):
+    """Register the `AE350_SOC` hard block's bel and fabric port map.
+
+    Device-gated: the AE350 exists on the GW5AST-138C and nowhere else, so every
+    other device leaves this function with `dev` untouched.
+    """
+    if device != 'GW5AST-138C':
+        return
+
+    row, col = _AE350_SOC_ANCHOR
+    dev.extra_func.setdefault((row, col), {}).update({'ae350': {}})
+    extra_func = dev.extra_func[(row, col)]['ae350']
+    ins = extra_func.setdefault('ins', {})
+    outs = extra_func.setdefault('outs', {})
+    unmapped = extra_func.setdefault('unmapped', {})
+
+    stuff = getattr(dat, 'gw5aStuff', None) or {}
+    directions = (
+        (_AE350_SOC_INPUTS, 'Ae350SocIns', _AE350_SOC_IN_COLS, 'AE350_IN', ins),
+        (_AE350_SOC_OUTPUTS, 'Ae350SocOuts', _AE350_SOC_OUT_COLS, 'AE350_OUT', outs),
+    )
+    for ports, table_name, cols, wire_type, pins in directions:
+        table = stuff.get(table_name) or []
+        for bit, port in enumerate(_ae350_port_bits(ports)):
+            tap, reason = _ae350_tap(
+                table[bit] if bit < len(table) else None, cols)
+            if tap is None:
+                pins[port] = f'{_AE350_UNMAPPED_PREFIX}{port}'
+                unmapped[port] = reason
+                continue
+            wire_row, wire_col, wire = tap
+            make_port(dev, row, col, wire_row, wire_col, wire, 'AE350_SOC',
+                      port,
+                      'TILE_CLK' if port in _AE350_SOC_CLOCK_PORTS else wire_type,
+                      pins)
+
+    config_tiles = [(r, c)
+                    for r, grid_row in enumerate(dev.grid)
+                    for c, ttyp in enumerate(grid_row)
+                    if ttyp in _AE350_SOC_CONFIG_TTYPS]
+    extra_func['config_ttyps'] = list(_AE350_SOC_CONFIG_TTYPS)
+    extra_func['config_tiles'] = config_tiles
+    for loc in config_tiles:
+        dev.extra_func.setdefault(loc, {}).setdefault('ae350_config', {})
+
 def fse_bram(fse, aux = False):
     bels = {}
     name = 'BSRAM'
@@ -5028,6 +5207,7 @@ def from_fse(device, fse, dat: Datfile):
     fse_create_userflash(dev, device, dat)
     fse_create_pincfg(dev, device, dat)
     fse_create_emcu(dev, device, dat)
+    fse_create_ae350(dev, device, dat)
     fse_create_logic2clk(dev, device, dat)
     fse_create_dhcen(dev, device, fse, dat)
     fse_create_dlldly(dev, device)
