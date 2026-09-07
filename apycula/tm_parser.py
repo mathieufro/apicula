@@ -283,11 +283,138 @@ def parse_iodelay(data):
              'SDTAP_DF', 'SETN_DF', 'VALUE_DF']
     return float_data(data, paths)
 
+# ---------------------------------------------------------------------------
+# IO buffers (`offsets[0x3278]`) and IO registers (`offsets[0x306c]`), P3.T32
+# ---------------------------------------------------------------------------
+# Both blocks decode cleanly and both are, on this die, **inherited GW2A data**:
+#
+#   * `0x306c..0x3278` (524 B) and `0x3278..0x3728` (1200 B) of GW5AST-138C
+#     chunks 0 and 1 are byte-identical to the same ranges of GW2A-18, GW2A-55
+#     and GW2AR-18, and to GW5A-25A and GW5AT-60B.  Chunk 0 as a whole differs
+#     from GW2A-18 chunk 0 in 81 bytes, every one of them at or after 0x3738 --
+#     i.e. only the `iodelay`/`wire`/`fanout`/`glbsrc`/`hclk` tail was
+#     re-characterised for GW5A.  Chunk 2 is chunk 0 scaled by 0.86 (P0.T36),
+#     so it carries no independent IO measurement either.
+#   * The numbers do not describe this die.  The vendor's own SDF for a 138C
+#     ODDR/IDDR design (`-device_version C`, worst-case, `max` field) gives
+#     `OBUF I->O` 2.528 ns and 2.737 ns; the whole `io` block's largest value is
+#     0.819 ns, so it cannot be the source of an output-buffer arc at any
+#     scaling.  On the register side the SDF gives `ODDR CLK->Q` 1.160/1.146 ns
+#     and `IDDR CLK->Q0/Q1` 0.572/0.486 ns, against clock-to-out candidates of
+#     1.019/1.213, 0.945/1.289 and 0.635/0.831 ns -- no assignment of those to
+#     the vendor arcs lands inside the +/-10% L0 band.
+#
+# So, exactly as for the PLL block at `0x7cc` (`P1.T33`, `D60`), publishing
+# these floats under GW5A IO/IOLOGIC path names would invent a model the
+# silicon vendor does not have.  `parse_io` and `parse_iregoreg` publish
+# nothing and return a `NoData` sentinel carrying the measured reason; the
+# decoders are kept as `io_block` / `iregoreg_block` so the claim stays
+# inspectable from the shipped file.
+#
+# This is NOT a statement that the 138C has no IO timing anywhere: chunks 3 and
+# up are the device-specific payload this parser deliberately stops before
+# (`read_tm`, the `i >= 3` break).  Whether they carry a real IO table is
+# Phase 6's question, not this one.
+#
+# Evidence: `doc/timing-io-iologic.md` (`P3.T32`), the vendor SDFs under
+# `p3t11/{oddr,iddr}-pair` and `p3t12/p3-oddr-iddr-io_basic-*`.
+
+class NoData(dict):
+    """An empty timing group that remembers why it is empty.
+
+    Empty, and therefore falsy, so `read_tm`'s `if tm:` publishes nothing: a
+    group with no defensible model must never reach the chipdb. The reason
+    travels with the sentinel so consumers can quote the measurement instead
+    of re-deriving it.
+    """
+
+    def __init__(self, group, reason):
+        super().__init__()
+        self.group = group
+        self.reason = reason
+
+    def __repr__(self):
+        return f'NoData({self.group!r}, {self.reason!r})'
+
+
+_IO_NO_DATA = (
+    'the 0x3278 block is byte-identical to GW2A-18/-55/GW2AR-18 (inherited, '
+    'not characterised for GW5A) and its largest value is 0.819 ns, while the '
+    "vendor's own 138C SDF gives OBUF I->O 2.528/2.737 ns: no output-buffer "
+    'arc can be sourced from it at any scaling'
+)
+_IREGOREG_NO_DATA = (
+    'the 0x306c block is byte-identical to GW2A-18/-55/GW2AR-18 (inherited, '
+    'not characterised for GW5A) and none of its clock-to-out candidates '
+    '(1.019/1.213, 0.945/1.289, 0.635/0.831 ns) lands within +/-10% of the '
+    "vendor's own 138C SDF (ODDR CLK->Q 1.160/1.146, IDDR CLK->Q0/Q1 "
+    '0.572/0.486 ns)'
+)
+
+# The `io` block is five 240-byte records; each holds exactly one populated
+# 4-float path, at record offset 0x8.  The remaining 56 floats of every record
+# are zero on every GW1N, GW2A and GW5A device inspected.
+_IO_RECORDS = 5
+_IO_RECORD_LEN = 0xf0
+_IO_PATH_OFFSET = 0x8
+
+# The `iregoreg` block is two 4-float paths, three reserved words, then thirty
+# 4-float paths.  The reserved words are zero on GW1N, GW2A and GW5A alike.
+_IREGOREG_HEAD_PATHS = 2
+_IREGOREG_RESERVED = 3
+_IREGOREG_TAIL_PATHS = 30
+_IREGOREG_TAIL_OFFSET = (_IREGOREG_HEAD_PATHS * 4 + _IREGOREG_RESERVED) * 4
+
+
+def io_block(data):
+    """Decode the 0x3278 block verbatim, under provisional index names.
+
+    Inspection/regression helper only -- `parse_io` does not publish it, see
+    the comment above.  `path_n` is the single populated path of record `n`;
+    the names are positions in the file and are NOT a claim about which IO
+    buffer each one models.
+    """
+    offsets = [i * _IO_RECORD_LEN + _IO_PATH_OFFSET for i in range(_IO_RECORDS)]
+    return {
+        f'path_{i}': [to_float(data[off + j * 4:off + j * 4 + 4]) for j in range(4)]
+        for i, off in enumerate(offsets)
+    }
+
+
+def iregoreg_block(data):
+    """Decode the 0x306c block verbatim, under provisional index names.
+
+    Inspection/regression helper only -- `parse_iregoreg` does not publish it.
+    `path_n` is the n-th 4-float path in file order, skipping the three
+    reserved words after the first two paths; the names are positions in the
+    file and are NOT a claim about which register arc each one models.
+    """
+    offsets = [i * 0x10 for i in range(_IREGOREG_HEAD_PATHS)]
+    offsets += [_IREGOREG_TAIL_OFFSET + i * 0x10
+                for i in range(_IREGOREG_TAIL_PATHS)]
+    return {
+        f'path_{i}': [to_float(data[off + j * 4:off + j * 4 + 4]) for j in range(4)]
+        for i, off in enumerate(offsets)
+    }
+
+
 def parse_io(data):
-    pass
+    """No IO timing group: the .tm carries no IO buffer model for this die.
+
+    Returns the `NoData` sentinel (falsy, so `read_tm` publishes nothing)
+    rather than silently falling off the end of the function.  See above for
+    the measurement and `doc/timing-io-iologic.md` for the full record.
+    """
+    return NoData('io', _IO_NO_DATA)
+
 
 def parse_iregoreg(data):
-    pass
+    """No IO-register timing group: the .tm carries no IREG/OREG model here.
+
+    Returns the `NoData` sentinel (falsy, so `read_tm` publishes nothing).
+    See above for the measurement and `doc/timing-io-iologic.md`.
+    """
+    return NoData('iregoreg', _IREGOREG_NO_DATA)
 
 def parse_wire(data):
     paths = [
