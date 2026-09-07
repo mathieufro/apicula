@@ -598,9 +598,16 @@ def test_clock_pips_138c_reads_table38(gowinhome):
     assert spine_srcs & {names[w] for w in kept}
 
 
-_T08D_CHIPDB = Path(os.environ.get(
-    'GW5AST138C_T08D_CHIPDB',
-    str(_DATASTORE / 'chipdb/p1t08d/chipdb-GW5AST-138C.bin')))
+#: The database the installed `nextpnr-himbaechel` is paired with.  A `.bin`
+#: and a binary are a matching pair -- appending to `constids.inc` invalidates
+#: every database built before it, and nextpnr answers a mismatch with
+#: `Assertion failure: int(ctx->idstring_idx_to_str->size()) == idx` rather
+#: than a diagnosable error -- so this points at the installed database and
+#: never at a phase's archived copy.
+_INSTALLED_CHIPDB = Path(os.environ.get(
+    'GW5AST138C_CHIPDB',
+    str(_DATASTORE / 'toolchains/nextpnr/share/himbaechel/gowin'
+                     '/chipdb-GW5AST-138C.bin')))
 
 
 @pytest.mark.heavy  # real yosys + the installed nextpnr + gowin_pack
@@ -610,15 +617,16 @@ def test_clkdiv_routes_138c(tmp_path):
     The P1.T11 design, full place-and-route (no `--no-route`), then packed.
     Asserts what P1.T08c could not: nextpnr exit 0, the log line saying the
     CLKDIV output net went out on global resources, and a `.fs` gowin_pack
-    actually wrote.  The chipdb must be one built from THIS tree -- the .bin
-    the toolchain has installed is whatever the integration branch put there --
-    so the test points at $DATASTORE/chipdb/p1t08d/ (override with
-    GW5AST138C_T08D_CHIPDB) and skips rather than lying if it is absent.
+    actually wrote.  The chipdb must be the one the installed binary is
+    paired with, never a phase's archived copy: a `constids.inc` append
+    invalidates every older database, and the mismatch surfaces as an
+    assertion inside nextpnr rather than a diagnosable error.  Override with
+    GW5AST138C_CHIPDB; skips rather than lying if it is absent.
     """
     import json
     import shutil
     import subprocess
-    for tool in (_NEXTPNR, _T08D_CHIPDB, _YOSYS):
+    for tool in (_NEXTPNR, _INSTALLED_CHIPDB, _YOSYS):
         if not tool.exists():
             pytest.skip(f'{tool} absent')
     src = Path(__file__).resolve().parents[1] / 'examples' / 'gw5a'
@@ -630,7 +638,7 @@ def test_clkdiv_routes_138c(tmp_path):
         cwd=tmp_path, check=True, capture_output=True)
     pnr = subprocess.run(
         [str(_NEXTPNR), '--device', 'GW5AST-LV138PG484AC1/I0',
-         '--chipdb', str(_T08D_CHIPDB), '--vopt', 'cst=top.cst',
+         '--chipdb', str(_INSTALLED_CHIPDB), '--vopt', 'cst=top.cst',
          '--json', 'top.json', '--write', 'top_pnr.json',
          '--timing-allow-fail'],
         cwd=tmp_path, capture_output=True, text=True)
