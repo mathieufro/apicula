@@ -1,3 +1,5 @@
+import re
+import struct
 import sys
 import os
 from pathlib import Path
@@ -5,6 +7,7 @@ from dataclasses import dataclass
 
 from apycula.fse_parser import (FseVersionError, _version_tuple,
                                detect_ide_version)
+from apycula.wirenames import wirenames_5a25a
 
 
 class DatLayoutError(ValueError):
@@ -501,34 +504,138 @@ class Datfile:
             self._rs_table_offset + 2 * base_words)
 
     # `Ae350SocIns` -- the (row, col, wire) triples naming the fabric wires the
-    # AE350 SoC hard block reads. Its base drifted the way `CibFabricNode`'s
-    # did: 0x86a0 is the historical value, and on a Gowin IDE 1.9.12.03
-    # GW5AST-138C `.dat` it points at a different block's table (columns 51-139,
-    # nowhere near the AE350). The AE350's own table sits at 0x8314.
+    # AE350 SoC hard block reads. Its base drifts between `.dat` releases the
+    # way `CibFabricNode`'s did, and the historical 0x86a0 points at a
+    # different block's table on a Gowin IDE 1.9.12.03 GW5AST-138C, so the
+    # table is *located* rather than addressed:
     #
-    # The candidates are separated by the block's own geometry rather than by a
-    # hard-coded column: a hard block taps one contiguous band of fabric
-    # columns, reading from the left half and driving the right, so the input
-    # table's last column must be the one immediately before a column the
-    # already-decoded `Ae350SocOuts` drives. On this device that is 156 against
-    # a first driven column of 157, and the stale base's 139 fails it. A `.dat`
-    # that still holds the table at the old base therefore reads at its own
-    # base, and a future relocation is one more entry in the tuple.
-    AE350_SOC_INS_BASES = (0x86a1, 0x8314)
+    #  * a hard block reads a wire the fabric tile drives (`F`/`Q`/`OF`) and
+    #    drives a wire the tile reads (`A`-`D`, `CLK`, `CE`, `LSR`), so the
+    #    input table holds tap wires and only tap wires;
+    #  * it taps the same column band its already-decoded output table drives,
+    #    in the same die row; and
+    #  * it names each wire at most once -- a second port cannot share a tap.
+    #
+    # Those three hold at every base in a run of tap records, which leaves the
+    # window free to slide by a few slots and rotate the bit assignment with
+    # it. The block's own layout fixes the phase: the table walks the band
+    # column by column, so the true base is the one whose first record opens a
+    # column, i.e. the record before it sits in a different column.
+    #
+    # Reading 0x1b1 slots this way on a 1.9.12.03 GW5AST-138C gives 415 live
+    # taps in columns 160-181 for 416 declared input bits; the historical base
+    # gives 256, which is fewer taps than the vendor's own fully connected
+    # AE350 design routes.
+    AE350_SOC_INS_FALLBACK_BASE = 0x86a1
 
-    def read_ae350_soc_ins(self, outs):
-        """The AE350 SoC's fabric input taps, from whichever base holds them."""
-        driven_cols = {col for _row, col, _wire in outs if col != 0xffff}
-        last = None
-        for base in self.AE350_SOC_INS_BASES:
-            grid = self.read_packed_grid16(0x1b1, 3, base)
-            last = grid
-            tapped_cols = {col for _row, col, _wire in grid if col != 0xffff}
-            if not tapped_cols:
+    #: Wire indices a fabric tile drives, and so the only ones a hard block
+    #: can tap as an input.
+    _TAP_WIRES = frozenset(
+        idx for idx, name in wirenames_5a25a.items()
+        if re.fullmatch(r"(?:F|Q|OF)\d", name)
+    )
+
+    def _rs_words(self):
+        """The 5-series table block as u16 words, indexed the way bases are."""
+        count = (len(self.data) - self._rs_table_offset) // 2
+        return struct.unpack_from(f"<{count}H", self.data, self._rs_table_offset)
+
+    def read_ae350_soc_ins(self, outs, num_slots=0x1b1):
+        """The AE350 SoC's fabric input taps, located by the block's geometry.
+
+        `outs` is the decoded `Ae350SocOuts` table, which names the column band
+        and the die row the block occupies.
+        """
+        band = self._hard_block_band(outs)
+        if band is None:
+            return self.read_packed_grid16(
+                num_slots, 3, self.AE350_SOC_INS_FALLBACK_BASE)
+        rows, col_lo, col_hi = band
+
+        words = self._rs_words()
+        # +1 a live tap in the band, 0 an unbound slot, -1 anything else: a
+        # window holding a single -1 is not this table.
+        kinds = [0] * len(words)
+        for i in range(len(words) - 2):
+            row, col, wire = words[i], words[i + 1], words[i + 2]
+            if row == 0xffff and col == 0xffff and wire == 0xffff:
                 continue
-            if max(tapped_cols) + 1 in driven_cols:
-                return grid
-        return last
+            in_band = row in rows and col_lo <= col <= col_hi
+            kinds[i] = 1 if (in_band and wire in self._TAP_WIRES) else -1
+
+        base = self._locate_tap_table(words, kinds, num_slots)
+        if base is None:
+            return self.read_packed_grid16(
+                num_slots, 3, self.AE350_SOC_INS_FALLBACK_BASE)
+        return self.read_packed_grid16(num_slots, 3, base)
+
+    #: Columns a hard block's band may skip without the band ending.
+    _BAND_GAP = 4
+
+    @classmethod
+    def _hard_block_band(cls, outs):
+        """The `(rows, col_lo, col_hi)` band a decoded output table describes.
+
+        A hard block drives one dense column band plus a handful of far-away
+        clock-spine columns; only the band bounds the input table.
+        """
+        live = [(row, col) for row, col, _wire in outs if col != 0xffff]
+        if not live:
+            return None
+        columns = sorted({col for _row, col in live})
+        clusters = [[columns[0]]]
+        for col in columns[1:]:
+            if col - clusters[-1][-1] > cls._BAND_GAP:
+                clusters.append([])
+            clusters[-1].append(col)
+        weight = {col: 0 for col in columns}
+        for _row, col in live:
+            weight[col] += 1
+        band = max(clusters, key=lambda c: sum(weight[col] for col in c))
+        rows = {row for row, col in live if band[0] <= col <= band[-1]}
+        return rows, band[0], band[-1]
+
+    def _locate_tap_table(self, words, kinds, num_slots):
+        """The base of the longest run of `num_slots` band taps, phase fixed."""
+        best = None
+        for phase in range(3):
+            starts = range(phase, len(words) - 3 * num_slots, 3)
+            live = 0
+            bad = 0
+            for offset, base in enumerate(starts):
+                if offset == 0:
+                    window = [kinds[base + 3 * k] for k in range(num_slots)]
+                    live = window.count(1)
+                    bad = window.count(-1)
+                else:
+                    gone, came = kinds[base - 3], kinds[base + 3 * (num_slots - 1)]
+                    live += (came == 1) - (gone == 1)
+                    bad += (came == -1) - (gone == -1)
+                if bad or not live:
+                    continue
+                key = (live, self._opens_a_column(words, kinds, base, num_slots), -base)
+                if best is None or key > best[0]:
+                    best = (key, base)
+        if best is None:
+            return None
+        base = best[1]
+        seen = {(words[base + 3 * k + 1], words[base + 3 * k + 2])
+                for k in range(num_slots) if kinds[base + 3 * k] == 1}
+        return base if len(seen) == best[0][0] else None
+
+    @staticmethod
+    def _opens_a_column(words, kinds, base, num_slots):
+        """Whether `base`'s first live record starts a fresh fabric column."""
+        first = next((base + 3 * k for k in range(num_slots)
+                      if kinds[base + 3 * k] == 1), None)
+        if first is None:
+            return False
+        previous = first - 3
+        while previous >= 0 and kinds[previous] == 0:
+            previous -= 3
+        if previous < 0:
+            return False
+        return words[previous + 1] != words[first + 1]
 
     def read_scaledGrid16i(self, numRows, numCols, rowScaling, colScaling, baseOffset):
         ret = []
