@@ -112,3 +112,7 @@ class ShapeSpec:
     clocks: dict = field(default_factory=dict)   # port -> period in ns
     extra_gwsh_options: list = field(default_factory=list)
     extra_pack_flags: list = field(default_factory=list)
+    #: Extra `--vopt` settings for `nextpnr-himbaechel`.  A dual-purpose-pin
+    #: option is cross-checked by `gowin_pack.get_PINCFG_fuses`, so a shape
+    #: that sets one on the packer sets it here too or the pack step raises.
+    extra_nextpnr_vopts: list = field(default_factory=list)

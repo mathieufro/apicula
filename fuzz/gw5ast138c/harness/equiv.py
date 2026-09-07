@@ -425,6 +425,25 @@ def net_id(endpoints):
     return "net:" + hashlib.sha256(blob).hexdigest()[:16]
 
 
+#: Union-find roots that are a power rail, not a routed net.  A port tied to
+#: one of these is a **constant**, and its identity is that constant: an
+#: endpoint-set digest of the rail is a digest of every tied port on the die,
+#: so two flows that tie the same port to the same rail still disagree
+#: (MEASURED, `P2.T23`: the vendor's `VCC` component has 310 040 endpoints and
+#: the open flow's 6 120, because an unrouted `CE`/`LSR` joins it too).  That
+#: is an artefact of naming a rail like a net, not a configuration difference,
+#: and it is fixed here rather than masked -- a mask entry would hide a real
+#: difference in what a port is tied *to*, which this keeps visible.
+CONSTANT_NET_ROOTS = ("VCC", "VSS", "GND")
+
+
+def net_label(label, endpoints):
+    """A net's comparable identity: the rail's name, or the endpoint digest."""
+    if label in CONSTANT_NET_ROOTS:
+        return "net:" + label
+    return net_id(endpoints)
+
+
 def in_scope(cell, scope):
     if scope is None:
         return True
@@ -450,7 +469,8 @@ def canonicalise(netlist, scope):
                 attrs.add((cell, name, value))
     conns = set()
     if scope is None or scope.include_port_nets:
-        ids = {label: net_id(eps) for label, eps in netlist.nets.items()}
+        ids = {label: net_label(label, eps)
+               for label, eps in netlist.nets.items()}
         for cell in cells:
             for port, label in netlist.conns.get(cell, {}).items():
                 conns.add((cell, port, ids.get(label, "net:unrouted")))
@@ -868,7 +888,8 @@ RESIDUAL_CATEGORIES = {
 #: instead for that chained `CLKDIV` on the same lane; see
 #: `_clkdiv2_recovered_via_chain`.  Leaving it out would make every HCLK-lane
 #: design that uses a `CLKDIV2` permanently `diff`.
-NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG", "CLKDIV2")
+NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG", "CLKDIV2",
+                        "AE350_SOC")
 
 #: Cell-name prefix of nextpnr's `DHCEN` placeholders.  When a design holds any
 #: `DHCE`, `pack.cc` binds one `$PACKER_DHCEN_<n>` cell to **every** `DHCEN`
@@ -879,6 +900,11 @@ NON_FUSE_BACKED_BELS = ("VCC", "GND", "GSR", "PINCFG", "BUFG", "CLKDIV2")
 #: them makes `c1` assert the absence of a gate as if it were a missing cell
 #: (MEASURED on the `clocking_e2e` DHCE run, 2026-09-06).  A *named* `DHCE`
 #: from the design keeps its own name and stays required.
+#: `AE350_SOC` is in that list on the `EMCU` precedent, and now on a
+#: measurement rather than an analogy (`P2.T23`): two AE350 vendor bitstreams
+#: share **no** interface-band bit, so nothing in the bitstream marks the
+#: block's presence and the decode cannot be asked to recover it.  The band's
+#: per-design configuration is a named gap, not a cell.
 PACKER_DHCEN_PREFIX = "$PACKER_DHCEN_"
 
 #: Cell-name prefixes of nextpnr's `DQCE` and `DCS` placeholders.  `pack.cc`

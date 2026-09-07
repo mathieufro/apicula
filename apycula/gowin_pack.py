@@ -6865,15 +6865,13 @@ class GW5AST_138C(GW5A):
     #: fuse of those tile types accounts for. Keyed `(x, y)`, i.e. `(col, row)`,
     #: values `(bit_row, bit_col)` inside the tile.
     #:
-    #: They are the whole of the block's non-routing configuration reachable
-    #: from the banked runs: in the vendor bitstream that instantiates
-    #: `AE350_SOC` nine tiles of `ttyp` 224/228 carry unexplained set bits, and
-    #: in the bitstream that does not, no tile of either type carries a single
-    #: one. Their variation from tile to tile is real and unexplained -- one
-    #: AE350 design cannot separate an unconditional block enable from a
-    #: configuration that follows the ports a design uses -- so this table is
-    #: what the flow emits and what an `E0` diff is read against, not a claim
-    #: that the block has exactly 77 configuration bits.
+    #: `P2.T23` settled the question `P2.T24` left open, with a second AE350
+    #: design: the band is a **per-design** configuration. That design's
+    #: vendor bitstream carries 3 such bits, at tile `(145, 10)`, in the same
+    #: `[(10, 24), (10, 31), (11, 31)]` pattern this table has at `(156, 10)`
+    #: -- and the intersection of the two designs' sets is empty. So this is
+    #: recorded evidence about one design, never a fuse set to emit:
+    #: `get_AE350_SOC_fuses` returns `[]`.
     AE350_SOC_CONFIG_FUSES = {
         (156, 10): [(10, 24), (10, 31), (11, 31)],
         (157, 10): [(10, 24), (10, 27), (10, 31), (10, 56), (10, 63), (10, 85),
@@ -6899,14 +6897,18 @@ class GW5AST_138C(GW5A):
     #========== AE350 SoC
     #==============================
     def get_AE350_SOC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        """ The hard block's configuration, in the interface bands.
+        """ No fuse, as for the `EMCU` -- MEASURED on two AE350 designs.
 
-        The `EMCU` precedent sets no fuse at all; this block does, and where is
-        measured rather than assumed. The bits sit in tiles far from the bel,
-        so they are emitted against their own cells.
+        `AE350_SOC_CONFIG_FUSES` records the interface-band bits one design
+        sets; a second AE350 design (`P2.T23`, the `ae350_soc` shape) sets
+        **three** bits, in a different tile, and shares not one bit with it.
+        No bit of either set is therefore attributable to the block being
+        present, and emitting the table would write one design's interface
+        configuration into every other design's bitstream. The band is a
+        per-design configuration this flow does not model yet, recorded as a
+        named gap rather than approximated by a constant.
         """
-        return [CellFuseBits(x, y, set(bits))
-                for (x, y), bits in self.AE350_SOC_CONFIG_FUSES.items()]
+        return []
 
     #==============================
     #========== Clocks
