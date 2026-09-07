@@ -7,10 +7,8 @@ place `fse_create_adc` reads the ADC's ports from (`chipdb.py`, `Adc25kIns`).
 
 These tests pin the two facts a future `fse_create_ae350()` depends on: that the
 tables are present, and that their slot counts bracket the primitive's measured
-port-bit counts. They deliberately do **not** assert the tables' *contents*: the
-call sites at `dat_parser.py:545-546` pass `read_scaledGrid16`'s arguments in the
-wrong order, so the decoded values are noise until that is repaired in the phase
-that owns the parser.
+port-bit counts. What the tables *decode to* is pinned next door, in
+`test_dat_packed_grid16.py`.
 """
 
 import os
