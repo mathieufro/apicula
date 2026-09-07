@@ -4816,14 +4816,20 @@ def fse_create_emcu(dev, device, dat):
 # triples are all-sentinel on every GW5 device measured, so there is nothing to
 # slice there (`tests/test_ae350_dat_tables.py` pins that as a control).
 #
-# Geometry, measured (`evidence/ae350/wire-map-138c.md`): every live record
-# names die row 0, and the two halves of the block's band are contiguous and
-# disjoint -- the block reads the left of its band (columns 145-155) and drives
-# the right (columns 156-180). The bel therefore lives in the row-0 tile at the
-# first tapped column, `(0, 145)`: the leftmost cell of the block's own
-# footprint, and one whose wires the block really reads. The EMCU's `(0, 0)`
-# rests on a GW1NS-4 CPU-enable flag that has no counterpart here, so it is not
-# inherited.
+# Geometry, measured (`evidence/ae350/wire-map-138c.md` SS3 and SS6): every live
+# record names die row 0, and both directions live in **one** band. The block
+# does not read one half of a band and drive the other -- it reads and drives
+# the same tiles, over disjoint wire classes: it taps `F`/`Q`/`OF` (what a
+# fabric tile drives) in columns 159-180 and drives `A`-`D`, `CLK`, `CE`,
+# `LSR` in columns 156-180, plus three clock-spine columns far to the left.
+#
+# The bel therefore lives at `(0, 159)`, the first column of the measured band.
+# `P2.T07`'s `(0, 145)` was the first tapped column under the split-band
+# reading of the stale `Ae350SocIns` base; that reading is refuted -- column 145
+# is not tapped, not driven, and shows no changed bit in the vendor run -- so
+# the rationale that chose it no longer holds and the anchor follows the
+# measurement. The EMCU's `(0, 0)` rests on a GW1NS-4 CPU-enable flag that has
+# no counterpart here, so it is not inherited either.
 #
 # The interface bands of tile types 224 and 228 are where the presence diff's
 # configuration bits move, but no port record names them; they are marked as the
@@ -4888,12 +4894,15 @@ _AE350_SOC_OUTPUTS = (
 _AE350_SOC_CLOCK_PORTS = frozenset(
     {'CORE_CLK', 'DDR_CLK', 'AHB_CLK', 'APB_CLK', 'RTC_CLK', 'DBG_TCK'})
 
-#: Die `(row, col)` of the `AE350_SOC` bel: row 0, first tapped column.
-_AE350_SOC_ANCHOR = (0, 145)
+#: Die `(row, col)` of the `AE350_SOC` bel: row 0, first column of the band.
+_AE350_SOC_ANCHOR = (0, 159)
 
-#: Die columns the block reads from and drives into, measured.
-_AE350_SOC_IN_COLS = range(145, 156)
-_AE350_SOC_OUT_COLS = range(156, 181)
+#: The one die-column band the block reads from and drives into, measured.
+#: Kept as documentation of the footprint; it is deliberately *not* a filter on
+#: the port map. `Ae350SocOuts` also names columns 22, 23 and 87 -- clock-spine
+#: taps far to the left of the band -- and those bits are as bound as any
+#: other, so a band filter would drop three real taps to no purpose.
+_AE350_SOC_BAND_COLS = range(159, 181)
 
 #: Tile types carrying the block's configuration bits. They hold no ports.
 _AE350_SOC_CONFIG_TTYPS = (224, 228)
@@ -4922,21 +4931,21 @@ def _ae350_port_bits(ports):
                 yield f'{name}{index}'
 
 
-def _ae350_tap(entry, cols):
+def _ae350_tap(entry, grid_rows, grid_cols):
     """`((row, col, wire), None)` for a usable record, else `(None, reason)`.
 
-    A record is usable when it is present, names a column inside the half of the
-    block's band that this direction uses, and names a wire the device's wire
-    table knows. Anything else is a bit this device data does not map, and the
-    reason is kept so the gap is auditable rather than silent.
+    A record is usable when it is present, lands on a cell of this device's
+    grid, and names a wire the device's wire table knows. Anything else is a
+    bit this device data does not map, and the reason is kept so the gap is
+    auditable rather than silent.
     """
     if entry is None or len(entry) < 3:
         return None, 'no-record'
     row, col, wire = entry[0], entry[1], entry[2]
     if _AE350_DAT_ABSENT in (row, col, wire) or -1 in (row, col, wire):
         return None, 'unbound'
-    if col - 1 not in cols:
-        return None, 'outside-footprint'
+    if not (0 <= row - 1 < grid_rows and 0 <= col - 1 < grid_cols):
+        return None, 'off-grid'
     if wire not in wnames.wirenames:
         return None, 'unknown-wire-index'
     return (row, col, wire), None
@@ -4960,14 +4969,16 @@ def fse_create_ae350(dev, device, dat):
 
     stuff = getattr(dat, 'gw5aStuff', None) or {}
     directions = (
-        (_AE350_SOC_INPUTS, 'Ae350SocIns', _AE350_SOC_IN_COLS, 'AE350_IN', ins),
-        (_AE350_SOC_OUTPUTS, 'Ae350SocOuts', _AE350_SOC_OUT_COLS, 'AE350_OUT', outs),
+        (_AE350_SOC_INPUTS, 'Ae350SocIns', 'AE350_IN', ins),
+        (_AE350_SOC_OUTPUTS, 'Ae350SocOuts', 'AE350_OUT', outs),
     )
-    for ports, table_name, cols, wire_type, pins in directions:
+    grid_rows = len(dev.grid)
+    grid_cols = len(dev.grid[0]) if dev.grid else 0
+    for ports, table_name, wire_type, pins in directions:
         table = stuff.get(table_name) or []
         for bit, port in enumerate(_ae350_port_bits(ports)):
             tap, reason = _ae350_tap(
-                table[bit] if bit < len(table) else None, cols)
+                table[bit] if bit < len(table) else None, grid_rows, grid_cols)
             if tap is None:
                 pins[port] = f'{_AE350_UNMAPPED_PREFIX}{port}'
                 unmapped[port] = reason
