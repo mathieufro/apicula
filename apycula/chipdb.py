@@ -4816,12 +4816,21 @@ def fse_create_emcu(dev, device, dat):
 # triples are all-sentinel on every GW5 device measured, so there is nothing to
 # slice there (`tests/test_ae350_dat_tables.py` pins that as a control).
 #
-# Geometry, measured (`evidence/ae350/wire-map-138c.md` SS3 and SS6): every live
-# record names die row 0, and both directions live in **one** band. The block
-# does not read one half of a band and drive the other -- it reads and drives
-# the same tiles, over disjoint wire classes: it taps `F`/`Q`/`OF` (what a
-# fabric tile drives) in columns 159-180 and drives `A`-`D`, `CLK`, `CE`,
-# `LSR` in columns 156-180, plus three clock-spine columns far to the left.
+# Geometry, measured (`evidence/ae350/e0-138c.md` SS5): every live record names
+# die row 0, and both directions live in **one** band. Row 0 is a row of
+# routing tiles with no bels of their own, so a tap is an ordinary local wire
+# and its direction follows the routing graph, not the table it was read from:
+# `F`/`Q`/`OF` are the destination of no pip, so only the block can drive them
+# and they are its *outputs*; `A`-`D`, `CE`, `CLK` and `LSR` are pip
+# destinations and dead ends unless the block reads them, so they are its
+# *inputs*. The vendor bitstream for the 149-port vehicle agrees bit for bit:
+# it drives 415 of the 416 `A`-class wires and sources 418 pips from `F`/`Q`/
+# `OF`, and the `CE`, `LSR` and `CLK` tap counts are exactly the block's 13
+# clock-enable, 2 reset and 6 clock inputs.
+#
+# The two tables are therefore not one direction each. `Ae350SocOuts` holds the
+# whole input map in one run, with the head and tail of the output map either
+# side of it; `Ae350SocIns` holds the output map's middle run.
 #
 # The bel therefore lives at `(0, 159)`, the first column of the measured band.
 # `P2.T07`'s `(0, 145)` was the first tapped column under the split-band
@@ -4894,6 +4903,10 @@ _AE350_SOC_OUTPUTS = (
 _AE350_SOC_CLOCK_PORTS = frozenset(
     {'CORE_CLK', 'DDR_CLK', 'AHB_CLK', 'APB_CLK', 'RTC_CLK', 'DBG_TCK'})
 
+#: The two asynchronous reset inputs. They are the only ports that can sit on a
+#: tile's `LSR` line, which is what fixes them within the head of the input map.
+_AE350_SOC_RESET_PORTS = frozenset({'POR_N', 'HW_RSTN'})
+
 #: Die `(row, col)` of the `AE350_SOC` bel: row 0, first column of the band.
 _AE350_SOC_ANCHOR = (0, 159)
 
@@ -4951,6 +4964,75 @@ def _ae350_tap(entry, grid_rows, grid_cols):
     return (row, col, wire), None
 
 
+def _ae350_wire_drives_block(entry):
+    """True when a usable record names a wire the *fabric* drives.
+
+    The block sits in a row of bel-less routing tiles, so a tap's direction is
+    fixed by the wire's role in the routing graph, not by the table it came
+    from. `F`/`Q`/`OF` carry no pip that ends on them, so only the block can
+    drive them: those are its outputs. Everything else -- `A`-`D`, `CE`, `CLK`,
+    `LSR` -- is a pip destination and a dead end unless the block reads it:
+    those are its inputs.
+    """
+    if entry is None or len(entry) < 3:
+        return False
+    wire = entry[2]
+    if wire not in wnames.wirenames:
+        return False
+    return re.fullmatch(r'(?:Q|F|OF)\d+', wnames.wirenames[wire]) is None
+
+
+def _ae350_input_records(outs_table, grid_rows, grid_cols):
+    """The block's input taps, one per input bit, in table-slot order.
+
+    Every fabric-driven record of `Ae350SocOuts` is an input tap and there are
+    exactly as many of them as the block has input bits. Within the two classes
+    that name a dedicated tile line the slot order and the port order disagree,
+    so the class decides: an `LSR` tap can only be a reset input and a `CLK` tap
+    can only be a clock input.
+    """
+    records = [e for e in outs_table
+               if _ae350_tap(e, grid_rows, grid_cols)[0] is not None
+               and _ae350_wire_drives_block(e)]
+    ports = list(_ae350_port_bits(_AE350_SOC_INPUTS))
+    if len(records) != len(ports):
+        return records
+    def cls(entry):
+        name = wnames.wirenames[entry[2]]
+        return re.match(r'[A-Z]+', name).group()
+    dedicated = [i for i, port in enumerate(ports)
+                 if port in _AE350_SOC_CLOCK_PORTS or port in _AE350_SOC_RESET_PORTS]
+    pool = {'LSR': [records[i] for i in dedicated if cls(records[i]) == 'LSR'],
+            'CLK': [records[i] for i in dedicated if cls(records[i]) == 'CLK']}
+    if len(pool['LSR']) != len(_AE350_SOC_RESET_PORTS) or \
+            len(pool['CLK']) != len(_AE350_SOC_CLOCK_PORTS):
+        return records
+    for i in dedicated:
+        want = 'LSR' if ports[i] in _AE350_SOC_RESET_PORTS else 'CLK'
+        records[i] = pool[want].pop(0)
+    return records
+
+
+def _ae350_output_records(ins_table, outs_table, first_in, last_in):
+    """The block's output taps, one per output bit, in output-bit order.
+
+    The output map is stored in two runs either side of the input map: bits
+    below the first input slot and above the last one come from `Ae350SocOuts`
+    at their own index, the run between them from `Ae350SocIns` at its start.
+    `Ae350SocIns` is shorter than that gap, so the bits past its end are the
+    ones this device data does not map.
+    """
+    for bit in range(len(outs_table)):
+        if bit < first_in:
+            yield outs_table[bit]
+        elif bit - first_in < len(ins_table):
+            yield ins_table[bit - first_in]
+        elif bit <= last_in:
+            yield None
+        else:
+            yield outs_table[bit]
+
+
 def fse_create_ae350(dev, device, dat):
     """Register the `AE350_SOC` hard block's bel and fabric port map.
 
@@ -4968,14 +5050,23 @@ def fse_create_ae350(dev, device, dat):
     unmapped = extra_func.setdefault('unmapped', {})
 
     stuff = getattr(dat, 'gw5aStuff', None) or {}
-    directions = (
-        (_AE350_SOC_INPUTS, 'Ae350SocIns', 'AE350_IN', ins),
-        (_AE350_SOC_OUTPUTS, 'Ae350SocOuts', 'AE350_OUT', outs),
-    )
+    ins_table = stuff.get('Ae350SocIns') or []
+    outs_table = stuff.get('Ae350SocOuts') or []
     grid_rows = len(dev.grid)
     grid_cols = len(dev.grid[0]) if dev.grid else 0
-    for ports, table_name, wire_type, pins in directions:
-        table = stuff.get(table_name) or []
+
+    driven = [i for i, e in enumerate(outs_table) if _ae350_wire_drives_block(e)]
+    first_in, last_in = (driven[0], driven[-1]) if driven else (0, -1)
+
+    directions = (
+        (_AE350_SOC_INPUTS,
+         _ae350_input_records(outs_table, grid_rows, grid_cols),
+         'AE350_IN', ins),
+        (_AE350_SOC_OUTPUTS,
+         list(_ae350_output_records(ins_table, outs_table, first_in, last_in)),
+         'AE350_OUT', outs),
+    )
+    for ports, table, wire_type, pins in directions:
         for bit, port in enumerate(_ae350_port_bits(ports)):
             tap, reason = _ae350_tap(
                 table[bit] if bit < len(table) else None, grid_rows, grid_cols)
