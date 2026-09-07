@@ -269,3 +269,27 @@ def test_bitstream_bel_exported_reads_clkdiv_and_clkdiv2_bels():
     assert set(got) == {"div0", "div2"}
     assert got["div0"]["type"] == "CLKDIV" and got["div0"]["z"] == 2
     assert got["div2"]["type"] == "CLKDIV2"
+
+
+def test_an_e1_merge_never_publishes_the_ec9_token():
+    """`EC9` means "this class drops to E0"; an `E1` row must not carry it."""
+    silent = {"level": "E0", "checked": 3, "matched": [], "mismatched": [],
+              "unobserved": [],
+              "notes": ("EC9: the open placement exported no CLS constraint, "
+                        "so there is nothing for E1 to assert")}
+    hclk = {"level": "E1", "checked": 1, "mismatched": [], "unobserved": [],
+            "matched": [{"name": "div0", "in_scope": True,
+                         "site": "X117Y108/CLKDIV_0"}],
+            "notes": ""}
+    merged = equiv.merge_e1(silent, hclk)
+
+    assert merged["level"] == "E1"
+    assert "EC9" not in merged["notes"]
+    assert merged["notes"].startswith(
+        "E1 from the bitstream-addressed bel: 1 matched in scope, "
+        "first X117Y108/CLKDIV_0")
+    # and an E0 merge keeps the token, because there it is the truth
+    moved = dict(hclk, level="E0", matched=[],
+                 mismatched=[{"name": "div0"}],
+                 notes="EC9/HCLK: 1 HCLK bel(s) ...")
+    assert "EC9" in equiv.merge_e1(silent, moved)["notes"]

@@ -3343,6 +3343,39 @@ gw5_dcs_inputs = {
 }
 
 
+#: MEASURED per-device split of the clock plane into halves fed from the
+#: bridge (`fse_create_5a138_clocks`, whose own comment draws the two spine
+#: groups): `{device: ((half name, first spine of the half, spine count), ..)}`.
+#: A device absent from this table has an undivided plane, where the spine wire
+#: *is* the network node.  The halves are named by their first **wire**, not by
+#: a spine number, so the numbering is read from the device's own clock-wire
+#: table (`wirenames.clknames`) rather than from a literal that a die with a
+#: different split would silently invalidate.
+_gw5_clock_plane_halves = {
+    'GW5AST-138C': (('TOP', 'SPINE8', 8), ('BOTTOM', 'SPINE16', 8)),
+}
+
+
+def _spine_number(spine):
+    """`'SPINE14'` -> 14, from the selected clock-wire table when it is loaded."""
+    if isinstance(spine, int):
+        return spine
+    table = wnames.clknumbers or {}
+    if spine in table:
+        return table[spine]
+    return int(spine[len('SPINE'):])
+
+
+def gw5_clock_plane_half(device, spine):
+    """`(half name, index in that half)` for `spine`, or `None` if undivided."""
+    for half, first, count in _gw5_clock_plane_halves.get(device, ()):
+        base = _spine_number(first)
+        idx = _spine_number(spine)
+        if base <= idx < base + count:
+            return half, idx - base
+    return None
+
+
 def dcs_clkout_node(device, spine_idx):
     """The clock-network node a DCS output joins.
 
@@ -3355,11 +3388,36 @@ def dcs_clkout_node(device, spine_idx):
     own would leave it an island: nextpnr packs and places the DCS and then
     reports `Can't route the <clkout> network` (MEASURED, `p1t31-dcs-e1`).
     """
-    if device not in _dcs_quadrants:
+    half = gw5_clock_plane_half(device, spine_idx)
+    if half is None:
         return spine_idx
-    spine = int(spine_idx[len('SPINE'):])
-    half, base = ('TOP', 8) if spine < 16 else ('BOTTOM', 16)
-    return f'CBRIDGEOUT_{half}{spine - base}'
+    return f'CBRIDGEOUT_{half[0]}{half[1]}'
+
+
+#: The two pre-5A DCS control-wire sets, in the order a cell's two DCS take
+#: them.  Names only: which wire a die really routes `SELFORCE` and `CLKSEL`
+#: over is a property of that die, and `dcs_control_wires_traced` says which
+#: dies it has been measured on.
+_DCS_CONTROL_WIRE_SETS = (
+    {'selforce': 'C2', 'clksel': ['C1', 'D1', 'A2', 'B2']},
+    {'selforce': 'D3', 'clksel': ['D2', 'A3', 'B3', 'C3']},
+)
+
+#: Devices whose DCS control wires above are MEASURED rather than inherited.
+#: `GW5AST-138C` is deliberately absent: five vendor compiles (`P1.T31`,
+#: `$OTC/evidence/dcs/ports-138c.md`) route no external net into either bridge
+#: cell for `CLKSEL` or `SELFORCE`, so the die's real control wires are not
+#: traced and the pre-5A names above are placeholders -- kept only so that the
+#: two DCS of a shared cell name different wires, and marked untraced in the
+#: chipdb so `gowin_pack` refuses a design that drives them instead of writing
+#: a fuse nothing measured.
+_dcs_control_wires_traced = {'GW1N-9', 'GW1N-9C', 'GW2A-18', 'GW2A-18C',
+                             'GW5A-25A'}
+
+
+def dcs_control_wires_traced(device):
+    """Has this device's `SELFORCE`/`CLKSEL` wiring actually been measured?"""
+    return device in _dcs_control_wires_traced
 
 
 def fse_create_dcs(dev, device, fse):
@@ -3386,6 +3444,9 @@ def fse_create_dcs(dev, device, fse):
                 wire_name = f'P{q + 1}{j + 6}{port}'
                 dcs['clk'].append(wire_name)
                 dev.nodes.setdefault(wire_name, ("GLOBAL_CLK", set()))[1].add((row, col, wire_name))
+            # Whether `selforce`/`clksel` below name wires this die was
+            # measured on, or names inherited from the pre-5A model.
+            dcs['control_wires_traced'] = dcs_control_wires_traced(device)
             if device in {'GW5A-25A'}:
                 dcs['input_prefix'] = 'CLKIN'
                 w_col, wire = gw5_dcs_inputs[(q, j)][0]
@@ -3411,20 +3472,11 @@ def fse_create_dcs(dev, device, fse):
                 if device in _dcs_quadrants:
                     dcs['input_prefix'] = 'CLKIN'
                 # Two DCS that share a cell cannot share their control wires,
-                # so the second takes the other pre-5A wire set.  UNVERIFIED on
-                # the 138C: five vendor compiles (P1.T31) route no external net
-                # into either bridge cell for CLKSEL or SELFORCE, so the die's
-                # real control wires are not yet traced and these are the
-                # pre-5A names, chosen only so that the two DCS of a cell name
-                # different wires.  A design that drives CLKSEL dynamically on
-                # this device is not yet modelled -- see
-                # `$OTC/evidence/dcs/ports-138c.md`.
-                if (q < 2) != (same_cell and j == 1):
-                    dcs['selforce'] = 'C2'
-                    dcs['clksel'] = ['C1', 'D1', 'A2', 'B2']
-                else:
-                    dcs['selforce'] = 'D3'
-                    dcs['clksel'] = ['D2', 'A3', 'B3', 'C3']
+                # so the second takes the other wire set.
+                wire_set = _DCS_CONTROL_WIRE_SETS[
+                    int((q < 2) == (same_cell and j == 1))]
+                dcs['selforce'] = wire_set['selforce']
+                dcs['clksel'] = list(wire_set['clksel'])
 
 def fse_create_clocks(dev, device, dat: Datfile, fse):
     # The 138 chip has a more complex clock system than other chips. To
@@ -3599,14 +3651,11 @@ def fse_create_5a138_clocks(dev, device, dat: Datfile, fse):
         return mk_clock_wname(device, wire, half)
 
     def spine_to_bridgeout(spine):
-        idx = wnames.clknumbers[spine]
-        if idx >= wnames.clknumbers['SPINE16']:
-            half = 'BOTTOM'
-            idx -= wnames.clknumbers['SPINE16']
-        else:
-            half = 'TOP'
-            idx -= wnames.clknumbers['SPINE8']
-        return half, idx
+        half = gw5_clock_plane_half(device, spine)
+        if half is None:
+            raise ValueError(
+                f'{device}: {spine} lies on no half of the clock plane')
+        return half
 
     # top half, bottom half and bridge tile types
     spine_rows = [ [10, 28, 46], [64, 82, 100] ]
