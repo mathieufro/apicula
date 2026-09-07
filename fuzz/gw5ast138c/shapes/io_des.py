@@ -7,29 +7,71 @@ the PHY's `RXC`.
 The divider is the whole point of the shape and the thing most easily got
 wrong, so it is stated once and derived everywhere: a `w`-bit gearbox's
 `PCLK` is `FCLK / (w / 2)` (UG304E p.62-69) -- `IDES4` at half, `IDES8` at a
-quarter, `IDES10` at a fifth.  `_io_base.GEARBOX_DIV_MODE` holds those and
-the `.sdc` declares both clocks, so a wrong divider fails timing rather than
-passing quietly with a mis-sampled word.
+quarter, `IDES10` at a fifth.  `_io_base.GEARBOX_DIV_MODE` holds those and the
+rendered `CLKDIV` carries the ratio into every design, so a wrong divider is
+visible in the artefact rather than hidden in a comment.
 
-`FCLK` comes from the board clock and `PCLK` from a `CLKDIV` in HCLK block 5,
-for the reason `io_ser` gives: `CLKDIV` is closed at `E1` on this die and the
-PLL->HCLK path is not.
+`FCLK` comes from the board clock over `BUFG`/global, which is how the vendor
+clocks an IOLOGIC on this die (`G-FCLK-138C`, `P3.T08`: no HCLK->FCLK edge
+exists and no vendor bitstream configures an `FCLK*` pip) and how apicula's
+own `examples/gw5a/ides4.v` drives it.  `PCLK` comes from a `CLKDIV` in HCLK
+block 5, pinned in both flows, for the reason `io_ser` gives.
+
+**Every producer and consumer of the primitive under test is a package ball**
+(`D105`): the deserialised word leaves on ten balls rather than being reduced
+in fabric, because a fabric cell is placed independently by the two flows and
+would give every net it sits on two identities (MEASURED, `P3.T12`).  A width
+narrower than ten drives the balls it does not use from `rst`, so no sweep
+point leaves a top-level port for the vendor to prune out from under its own
+`IO_LOC`.
+
+The swept axis is the **reset source**, one change per run: `prim_sim.v`
+declares no parameter at all on `IDES4` (`:8258`), `IDES8` (`:8461`) or
+`IDES10` (`:8675`), so there is no `defparam` to move, and the reset is the
+one input of the primitive that changes its configuration -- it is what
+`LSRIMUX_0`/`LSRMUX_LSR` select, the pair the 138C's own IOLOGIC override
+exists for (`P3.T11` finding 2).  Three widths times a pad-driven and a
+constant-tied `RESET` is the six runs `spec-primitives.md` §2 budgets.
 """
-from ._io_base import GEARBOX_DIV_MODE, IoShape, clkdiv_rtl
+from ._io_base import (CLKDIV_BLOCK5_INS_LOC, GEARBOX_DIV_MODE, IoShape,
+                       clkdiv_rtl)
 
-#: `(width, attribute, value)` per sweep point, one axis per run (`F12`).
+#: `(width, reset expression)` per sweep point, one axis per run (`F12`).
 POINTS = {
-    "ides4-default": (4, None, None),
-    "ides4-lsren": (4, "LSREN", '"false"'),
-    "ides8-default": (8, None, None),
-    "ides8-lsren": (8, "LSREN", '"false"'),
-    "ides10-default": (10, None, None),
-    "ides10-gsren": (10, "GSREN", '"true"'),
+    "ides4-reset-pad": (4, "rst"),
+    "ides4-reset-tied": (4, "1'b0"),
+    "ides8-reset-pad": (8, "rst"),
+    "ides8-reset-tied": (8, "1'b0"),
+    "ides10-reset-pad": (10, "rst"),
+    "ides10-reset-tied": (10, "1'b0"),
 }
 
-BASELINE = "ides4-default"
+BASELINE = "ides4-reset-pad"
 
 PRIMITIVE_OF_WIDTH = {4: "IDES4", 8: "IDES8", 10: "IDES10"}
+
+#: The deserialiser's own pad.  `E22` is `IOR49A`, cell `(181,48)`: the **A**
+#: half, because an IOLOGIC is configurable on the A half only -- the B half's
+#: fuse table holds 3 coordinates against the A half's 100 on every IO tile
+#: type this package bonds (`P3.T11`'s named gap).
+IDES_BALL = "E22"          # IOR49A, cell (181,48), RGMII_TXD[3]
+RESET_BALL = "F21"         # IOR55A, RGMII_TXEN
+RESETN_BALL = "AB13"       # IOB89B, Key_in[0], the CLKDIV's own reset
+FCLK_BALL = "V22"          # IOB104B, the board oscillator
+
+#: One ball per bit of the widest gearbox, all bank 5, none of them claimed
+#: by another port of this shape.
+WORD_BALLS = ("Y17", "W14", "Y14", "Y16", "AA16",
+              "AB16", "AB17", "AA15", "W15", "W16")
+
+#: The ball `rst` always leaves on.  Without it the widest point -- ten bits
+#: on ten balls with `RESET` tied to a constant -- would carry a top-level
+#: input no cell reads, and the vendor may prune such a port out from under
+#: its own `IO_LOC`.
+TAP_BALL = "T16"           # IOB76A, LCD_CTP[2]
+
+#: The deserialiser's own pad cell -- the only cell an IOLOGIC lives in.
+SCOPE_TILES = ((181, 48),)
 
 _ACK_CLK = ("EMCCLK: 27 vendor runs on this device placed a design with clk "
             "on V22 and gw_sh returned 0 every time (P1.T08d, "
@@ -45,39 +87,31 @@ _TEMPLATE = """\
 module {top} (
     input  wire fclk,
     input  wire resetn,
+    input  wire rst,
     input  wire din,
-    output wire dout
-);
+    output wire tap,
+{word_ports});
 
     wire pclk;
-    wire [{msb}:0] word;
-    reg  parity;
 
 {clkdiv}
     {primitive} dut (
 {ports}    );
-{defparams}
-    // The whole word is reduced into one pin so no bit of it is dead: an
-    // unused deserialiser output is optimised away and the vendor then
-    // realises a narrower gearbox than the one under test.
-    always @(posedge pclk)
-        parity <= ^word;
 
-    assign dout = parity;
-
+{spares}
 endmodule
 
 `default_nettype wire
 """
 
 
-def _port_block(width):
-    lines = ["        .%-6s (word[%d])," % ("Q%d" % i, i)
+def _port_block(width, reset):
+    lines = ["        .%-6s (q%d)," % ("Q%d" % i, i)
              for i in range(width - 1, -1, -1)]
     lines += [
         "        .FCLK   (fclk),",
         "        .PCLK   (pclk),",
-        "        .RESET  (~resetn),",
+        "        .RESET  (%s)," % reset,
         "        .CALIB  (1'b0),",
         "        .D      (din)",
     ]
@@ -92,25 +126,43 @@ class IoDesShape(IoShape):
     sweep_axis = "POINT"
     sweep_values = list(POINTS)
     baseline_value = BASELINE
-    ports = {
-        "fclk": ("V22", "input"),
-        "resetn": ("AB13", "input", {"pull_mode": "UP"}),
-        "din": ("D21", "input"),
-        "dout": ("F20", "output"),
-    }
+    ports = dict(
+        {
+            "fclk": (FCLK_BALL, "input"),
+            # Active-low for the divider, active-high for the gearbox: two
+            # balls rather than one inverter, because an inverter is a fabric
+            # cell on a net that reaches the scoped tile.
+            "resetn": (RESETN_BALL, "input", {"pull_mode": "UP"}),
+            "rst": (RESET_BALL, "input", {"pull_mode": "DOWN"}),
+            "din": (IDES_BALL, "input"),
+        },
+        **{"q%d" % i: (ball, "output")
+           for i, ball in enumerate(WORD_BALLS)},
+        tap=(TAP_BALL, "output"),
+    )
     clocks = {"fclk": 8.0}
-    config_role_acks = {"V22": _ACK_CLK}
+    config_role_acks = {FCLK_BALL: _ACK_CLK}
+    scope_tiles = SCOPE_TILES
+    ins_loc = {"pclk_div": CLKDIV_BLOCK5_INS_LOC}
 
     def rtl(self, sweep_value):
-        width, attribute, value = POINTS[sweep_value]
+        width, reset = POINTS[sweep_value]
         primitive = PRIMITIVE_OF_WIDTH[width]
-        defparams = ("    defparam dut.%s = %s;\n" % (attribute, value)
-                     if attribute else "")
+        word_ports = "".join(
+            "    output wire q%d%s\n" % (i, "," if i < len(WORD_BALLS) - 1 else "")
+            for i in range(len(WORD_BALLS)))
+        spares = "    assign tap = rst;\n"
+        if width < len(WORD_BALLS):
+            spares += ("    // The bits this width does not deserialise still "
+                       "drive their own ball,\n    // so no point leaves a "
+                       "top-level port undriven.\n")
+            spares += "".join("    assign q%d = rst;\n" % i
+                              for i in range(width, len(WORD_BALLS)))
         return _TEMPLATE.format(
             primitive=primitive, axis=self.sweep_axis, point=sweep_value,
-            top=self.top_module, msb=width - 1,
-            clkdiv=clkdiv_rtl(width), ports=_port_block(width),
-            defparams=defparams)
+            top=self.top_module, word_ports=word_ports,
+            clkdiv=clkdiv_rtl(width), ports=_port_block(width, reset),
+            spares=spares)
 
 
 #: A width with no `DIV_MODE` would clock the gearbox wrong in silence.

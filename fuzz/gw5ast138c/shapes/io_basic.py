@@ -13,9 +13,11 @@ oscillator in bank 4, so the design crosses a bank boundary on purpose: an
 the property that makes the `P3.T06` bank -> HCLK-block table useful at all,
 and it is what `P3.T07` measures over `CLOCK_CANDIDATES`.
 
-The design keeps a fabric flop on each side so the IOLOGIC has a real
-producer and consumer -- an unconnected `IDDR` output is optimised away and
-the vendor then realises no IOLOGIC at all.
+The gearbox's producers and consumers are package balls, never fabric flops
+(`D105`): an unconnected gearbox output is still optimised away, so every
+port of the primitive under test drives or is driven by a pad, and the design
+holds no fabric cell at all.  That is what lets the two flows agree on every
+net of the scoped tiles -- see `DATA_IN_BALL`.
 
 The clock ball is a **constructor argument** (`P3.T07`).  `SPEC` -- the object
 `gen.load_shape` returns, and the only thing the batch driver can reach -- is
@@ -71,10 +73,28 @@ CLOCK_CANDIDATES = (
     ("G15", 3, ""),              # ordinary bank-3 ball (HDMI pair, single-ended here)
 )
 
-#: The data balls the sweep keeps fixed. Both are bank 5 and neither is a
+#: The data balls the sweep keeps fixed. All are bank 5 and none is a
 #: candidate, so no sweep point ever has to move them out of its own way.
+#:
+#: There are five of them rather than two because **every** net that touches a
+#: scoped tile has to end on a package ball (`D105`).  A net running out to a
+#: fabric flop is placed independently by the two flows -- `INS_LOC` cannot
+#: constrain the flop, because GowinSynthesis renames it (`din_r` becomes
+#: `din_r_s0`) and `equiv.insloc_lines` refuses to emit a name the vendor's
+#: netlist does not carry -- so the net's endpoint set, and with it its
+#: identity, differs on the two sides and the `conns` term of `E0` reports a
+#: difference that is free placement and not configuration (MEASURED, the six
+#: `conns` entries of the first `P3.T12` sweep).  Driving the gearbox from
+#: balls removes the fabric cell rather than masking its effect.
+#:
+#: Every port is used by **both** points: an input the point under test does
+#: not need is fed through to its own ball, so no sweep point carries a
+#: top-level port the vendor could prune out from under its own `IO_LOC`.
 DATA_IN_BALL = "AA15"
 DATA_OUT_BALL = "AB16"
+DATA_D1_BALL = "T16"
+DATA_Q1_BALL = "W16"
+DATA_SPARE_BALL = "T15"
 
 #: The two tiles the `E0`/`E1` comparison is restricted to: the cells the two
 #: data balls sit in, `(x, y)` as `P3.T06`'s measured pin table gives them
@@ -98,37 +118,34 @@ _ACK_CLK = ("EMCCLK: 27 vendor runs on this device placed a design with clk "
 
 _ODDR_RTL = """\
     ODDR dut (
-        .D0  (d0),
+        .D0  (din),
         .D1  (d1),
         .TX  (1'b0),
         .CLK (clk),
-        .Q0  (q0),
+        .Q0  (dout),
         .Q1  ()
     );
 {defparams}\
-    assign dout = q0;
-    always @(posedge clk) begin
-        d0 <= din_r;
-        d1 <= ~din_r;
-    end
+    // Both serialiser inputs come off pads and Q0 drives one, so every net of
+    // the scoped tile has both its endpoints at an `IO_LOC`-pinned site.
+    assign dout2 = d1;
+    assign dout3 = din;
 """
 
 # The deserialiser's D comes straight off the pad: GowinSynthesis refuses a
 # fabric flop between the two -- `ERROR (CK0013) : Instance 'dut' is not
 # connected to buffer or IODELAY by wire 'din_r'` (measured, P3.T07) -- because
-# an input gearbox is only realisable in the IOLOGIC of its own pad.  The
-# output side keeps its fabric flop, which is what gives Q0/Q1 a consumer.
+# an input gearbox is only realisable in the IOLOGIC of its own pad.  Both
+# outputs go straight to pads for the reason DATA_IN_BALL gives.
 _IDDR_RTL = """\
     IDDR dut (
         .D   (din),
         .CLK (clk),
-        .Q0  (q0),
-        .Q1  (q1)
+        .Q0  (dout),
+        .Q1  (dout2)
     );
 {defparams}\
-    always @(posedge clk)
-        dout_r <= q0 ^ q1;
-    assign dout = dout_r;
+    assign dout3 = d1;
 """
 
 #: The three balls the HCLK probe needs beside its clocks.  All bank 5, none
@@ -248,18 +265,11 @@ _TEMPLATE = """\
 module {top} (
     input  wire clk,
     input  wire din,
-    output wire dout
+    input  wire d1,
+    output wire dout,
+    output wire dout2,
+    output wire dout3
 );
-
-    wire q0, q1;
-    reg  d0, d1;
-    reg  din_r, dout_r;
-
-    // Registered on both sides so the IOLOGIC has a real producer and
-    // consumer; an unconnected gearbox output is optimised away and the
-    // vendor then realises no IOLOGIC at all.
-    always @(posedge clk)
-        din_r <= din;
 
 {body}
 endmodule
@@ -305,7 +315,10 @@ class IoBasicShape(IoShape):
             self.ports = {
                 "clk": (clk_ball, "input"),
                 "din": (DATA_IN_BALL, "input"),
+                "d1": (DATA_D1_BALL, "input"),
                 "dout": (DATA_OUT_BALL, "output"),
+                "dout2": (DATA_Q1_BALL, "output"),
+                "dout3": (DATA_SPARE_BALL, "output"),
             }
             return
         if len(self.clk_balls) > len(PROBE_DIV_MODES):

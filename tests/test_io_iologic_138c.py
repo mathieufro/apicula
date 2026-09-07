@@ -281,14 +281,18 @@ def test_oddr_iddr_sweep_is_complete_at_e1():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="MEASURED open item: every row is E1 with cells=0, attrs=0, both "
-           "decode checks ok and no residual, and differs on six conns whose "
-           "net partition is identical -- the shape's context flops are placed "
-           "independently because GowinSynthesis renames them out of reach of "
-           "the INS_LOC export. Closing it means driving D0/D1 from package "
-           "balls so no net leaves the scoped tiles, and six oracle runs "
-           "against a cap already spent. Strict, so this fails the day the "
-           "shape lands and the marker has to go.")
+    reason="MEASURED, and a different open item from the one the fabric flops "
+           "caused (P3.T12 first sweep, now fixed): all three ODDR points are "
+           "verdict ok with conns=0, and all three IDDR points differ on four "
+           "conns because the two flows take the deserialiser's output out of "
+           "the tile on different fabric wires -- the vendor drives the pad "
+           "from IOLOGIC.Q14 (wire F7) and nextpnr from IOLOGIC.Q8 (wire F0, "
+           "its Q0->Q8 rename in pack_iologic.cc), while BOTH flows occupy "
+           "F0 and F7. One of the two has Q0 and Q1 the wrong way round. "
+           "Settling it needs the vendor's whole wire->Q_i map, which the "
+           "IDES row (P3.T14) decodes for free from bitstreams it is already "
+           "paying for; the fix belongs there, with that evidence. Strict, so "
+           "this fails the day the mapping is corrected.")
 def test_oddr_iddr_rows_e1():
     """The row is closed at `E1` over the shape's whole sweep."""
     rows = _oddr_iddr_rows()
@@ -320,3 +324,153 @@ def test_oddr_iddr_no_raw_residual():
         leftovers = row.get("unexplained_bits") or []
         assert all(isinstance(entry, dict) and entry.get("justification")
                    for entry in leftovers), row["run_id"]
+
+
+# --------------------------------------------------------------------------
+# The serialiser and deserialiser rows (`P3.T13`, `P3.T14`)
+# --------------------------------------------------------------------------
+_OSER = "oser"
+_IDES = "ides"
+
+
+def _rows(slug):
+    path = _otc_path(slug, "runs.jsonl")
+    if path is None or not os.path.exists(path) or not os.path.getsize(path):
+        return None
+    import json
+    return [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="MEASURED open row: the vendor builds an OSER4 on this die and the "
+           "open flow cannot, because the IOLOGIC FCLK wire has no driver in "
+           "the 138C chipdb (db.tiles[245].pips has no FCLK key, "
+           "db.io2hclk == {}) -- nextpnr fails the route and router1 then "
+           "throws out of dict::at(). Two of P3.T13's eight oracle runs were "
+           "spent and the batch stopped rather than record six more aborted "
+           "rows. The fix is a chipdb io2hclk entry plus a database rebuild "
+           "plus 25A-style FCLKSEL* emission, escalated in "
+           "$OTC/evidence/oser/summary.md. Strict, so this fails the day the "
+           "row closes.")
+def test_oser_rows_e1():
+    """The output-serialiser row is closed at `E1` over its whole sweep."""
+    rows = _rows(_OSER)
+    if rows is None:
+        pytest.skip("evidence/oser/runs.jsonl not written yet")
+    assert len(rows) == 8
+    good = [r for r in rows if r["level"] == "E1" and r["verdict"] == "ok"]
+    assert len(good) >= 7
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="MEASURED open row: the vendor builds an OSER4 on this die and the "
+           "open flow cannot, because the IOLOGIC FCLK wire has no driver in "
+           "the 138C chipdb (db.tiles[245].pips has no FCLK key, "
+           "db.io2hclk == {}) -- nextpnr fails the route and router1 then "
+           "throws out of dict::at(). Two of P3.T13's eight oracle runs were "
+           "spent and the batch stopped rather than record six more aborted "
+           "rows. The fix is a chipdb io2hclk entry plus a database rebuild "
+           "plus 25A-style FCLKSEL* emission, escalated in "
+           "$OTC/evidence/oser/summary.md. Strict, so this fails the day the "
+           "row closes.")
+def test_oser_widths_covered():
+    """All four widths of the family are measured, not just the two the
+    parameter sweep can move."""
+    rows = _rows(_OSER)
+    if rows is None:
+        pytest.skip("evidence/oser/runs.jsonl not written yet")
+    from fuzz.gw5ast138c.shapes import io_ser
+    measured = {io_ser.PRIMITIVE_OF_WIDTH[io_ser.POINTS[
+        r["sweep"]["POINT"]][0]] for r in rows}
+    assert measured == {"OSER4", "OSER8", "OSER10", "OVIDEO"}
+
+
+def test_oser_no_mem_variants_touched():
+    """`OSER4_MEM`/`OSER8_MEM` belong to Phase 5b; this row must not have
+    measured one by accident."""
+    rows = _rows(_OSER)
+    if rows is None:
+        pytest.skip("evidence/oser/runs.jsonl not written yet")
+    for row in rows:
+        assert "_MEM" not in row["primitive"], row["run_id"]
+        assert "_MEM" not in row["sweep"]["POINT"], row["run_id"]
+
+
+def test_ides_rows_e1():
+    """The input-deserialiser row is closed at `E1` over its whole sweep."""
+    rows = _rows(_IDES)
+    if rows is None:
+        pytest.skip("evidence/ides/runs.jsonl not written yet")
+    assert len(rows) == 6
+    good = [r for r in rows if r["level"] == "E1" and r["verdict"] == "ok"]
+    assert len(good) >= 5
+
+
+def _generated_periods(shape_module, point, tmp_path):
+    """`(fclk period, pclk period)` of one point's **generated design**.
+
+    The slow clock is stated by the `CLKDIV` the design carries, not by a
+    `create_clock` line: `gen.render_sdc` is Phase 0's and emits one
+    `create_clock` per **port**, and `PCLK` is internal to the design and
+    divides differently at every point, so a per-point period cannot reach
+    the `.sdc` through `ShapeSpec.clocks` at all.  The ratio is therefore
+    asserted where the design really carries it.
+    """
+    import re as _re
+    from fuzz.gw5ast138c.harness import gen
+    spec = shape_module.SPEC
+    design = tmp_path / point
+    gen.run(spec, str(design), point)
+    sdc = (design / "top.sdc").read_text()
+    verilog = (design / "top.v").read_text()
+    fclk = float(_re.search(r"-name fclk -period ([0-9.]+)", sdc).group(1))
+    div = float(_re.search(r'DIV_MODE = "([0-9.]+)"', verilog).group(1))
+    return fclk, fclk * div
+
+
+def test_ides_pclk_ratio_ides4(tmp_path):
+    """`IDES4`'s `PCLK` period is exactly twice its `FCLK`'s (UG304E p.62)."""
+    from fuzz.gw5ast138c.shapes import io_des
+    fclk, pclk = _generated_periods(io_des, "ides4-reset-pad", tmp_path)
+    assert pclk == 2 * fclk
+
+
+def test_ides_pclk_ratio_ides8(tmp_path):
+    """`IDES8`'s `PCLK` period is exactly four times its `FCLK`'s."""
+    from fuzz.gw5ast138c.shapes import io_des
+    fclk, pclk = _generated_periods(io_des, "ides8-reset-pad", tmp_path)
+    assert pclk == 4 * fclk
+
+
+def test_gearbox_shapes_hold_no_fabric_cell(tmp_path):
+    """`D105`: neither gearbox shape puts a cell between a package ball and
+    the primitive under test, at any point of its sweep."""
+    from fuzz.gw5ast138c.shapes import io_des, io_ser
+    for module in (io_ser, io_des):
+        for point in module.POINTS:
+            rtl = module.SPEC.rtl(module.SPEC, point)
+            assert "always @" not in rtl, (module.__name__, point)
+            assert " reg " not in rtl, (module.__name__, point)
+
+
+def test_gearbox_shapes_pin_their_divider_in_both_flows(tmp_path):
+    """The `PCLK` net ends on the scoped tile, so a freely placed `CLKDIV`
+    would give it two identities; both flows have to place it."""
+    from fuzz.gw5ast138c.harness import gen
+    from fuzz.gw5ast138c.shapes import io_des, io_ser
+    for module in (io_ser, io_des):
+        spec = module.SPEC
+        point = spec.baseline_value
+        assert "pclk_div" in gen.ins_loc_of(spec, point)
+        assert '(* BEL = "X117Y108/CLKDIV_0" *)' in spec.rtl(spec, point)
+
+
+def test_gearbox_shapes_place_the_iologic_on_an_a_half_ball():
+    """An IOLOGIC is configurable on the A half only -- the B half's fuse
+    table holds 3 coordinates against the A half's 100 -- so a gearbox on a
+    `B` ball would have nothing to compare (`P3.T11`'s named gap)."""
+    from fuzz.gw5ast138c.shapes import _io_base, io_des, io_ser
+    for ball in (io_ser.OSER_BALL, io_des.IDES_BALL):
+        assert _io_base.SAFE_PINS[ball].site.endswith("A"), ball

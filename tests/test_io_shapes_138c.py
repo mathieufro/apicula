@@ -271,7 +271,7 @@ def test_io_basic_default_spec_is_still_the_attribute_sweep():
     reach, is unchanged, so the `ODDR`/`IDDR` sweep is untouched by it."""
     spec = io_basic.SPEC
     assert spec.pins["clk"].loc == "V22"
-    assert set(spec.pins) == {"clk", "din", "dout"}
+    assert set(spec.pins) == {"clk", "din", "d1", "dout", "dout2", "dout3"}
     assert spec.sweep_values == list(io_basic.POINTS)
 
 
@@ -338,6 +338,33 @@ def test_io_basic_probe_passes_the_generation_time_cst_assertion():
     for ball, _bank, _role in io_basic.CLOCK_CANDIDATES:
         spec = io_basic.IoBasicShape(hclk_probe=True, clk_balls=(ball,)).spec()
         assert gen.assert_cst_defaults(spec, "iddr-default") == []
+
+
+def test_io_basic_points_drive_the_gearbox_from_package_balls_only():
+    """`D105`: no point of the attribute sweep instantiates a fabric cell.
+
+    A fabric flop on a gearbox port is placed independently by the two flows,
+    so the net's endpoint set -- and with it the identity `equiv.net_id`
+    digests -- differs on the two sides and `E0`'s `conns` term reports free
+    placement as a difference.  Every producer and consumer being a pad is
+    what removes that, so it is asserted on the rendered design rather than
+    left to the reader of the shape file.
+    """
+    for point in io_basic.POINTS:
+        rtl = io_basic.IoBasicShape().rtl(point)
+        assert "always @" not in rtl, point
+        assert " reg " not in rtl, point
+
+
+def test_io_basic_every_point_uses_every_port():
+    """A top-level port no point drives is a port the vendor may prune out
+    from under its own `IO_LOC`, so each point feeds the spare balls through."""
+    ports = set(io_basic.IoBasicShape().ports) - {"clk"}
+    for point in io_basic.POINTS:
+        rtl = io_basic.IoBasicShape().rtl(point)
+        body = rtl.split("(\n", 1)[1].split(");", 1)[1]
+        for port in ports:
+            assert re.search(r"\b%s\b" % port, body), (point, port)
 
 
 def test_io_basic_iddr_data_comes_straight_off_the_pad():
