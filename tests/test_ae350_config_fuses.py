@@ -1,9 +1,14 @@
-"""`P2.T24`: the AE350's configuration fuse set, and who is allowed to emit it.
+"""`P2.T24`/`P2.T23`: the AE350's interface band, and why nothing emits it.
 
-`EMCU` sets no fuse at all. This block does: nine tiles of the interface bands
-carry bits in the vendor bitstream that instantiates `AE350_SOC` and in no tile
-of either band in the bitstream that does not. The set is measured, so the test
-pins its shape and its ownership, not a guess about the block's internals.
+`P2.T24` measured 77 bits over 9 tiles that one AE350 design sets and the
+AE350-free control does not, and read them as the block's configuration.
+`P2.T23` ran the second AE350 design that measurement asked for: it sets
+**three** such bits, at a different tile, and the two designs' sets intersect
+in **zero**.  So the band is a per-design configuration, no bit marks the
+block's presence, and `get_AE350_SOC_fuses` emits nothing -- exactly as
+`get_EMCU_fuses` does.  The table survives as recorded evidence about one
+design, and these tests pin that split: the shape of the record, and the
+emptiness of the emission.
 """
 
 import pytest
@@ -27,13 +32,10 @@ def test_config_fuses_are_the_measured_set():
         assert len(set(bits)) == len(bits)
 
 
-def test_config_fuses_are_emitted_against_their_own_cells():
-    """The bits sit far from the bel, so each carries its own `(x, y)`."""
-    table = gowin_pack.GW5AST_138C.AE350_SOC_CONFIG_FUSES
-    emitted = gowin_pack.GW5AST_138C.get_AE350_SOC_fuses(
-        gowin_pack.GW5AST_138C, bel=None)
-    assert {(cell.x, cell.y) for cell in emitted} == set(table)
-    assert sum(len(cell.bits) for cell in emitted) == CONFIG_BITS
+def test_the_recorded_table_is_never_emitted():
+    """One design's interface band must not be written into another's."""
+    assert gowin_pack.GW5AST_138C.get_AE350_SOC_fuses(
+        gowin_pack.GW5AST_138C, bel=None) == []
 
 
 def test_other_devices_refuse_the_ae350():

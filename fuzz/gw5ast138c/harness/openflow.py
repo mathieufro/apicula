@@ -151,12 +151,24 @@ def yosys_command(yosys, verilog="top.v", json_out="top.json", family=FAMILY):
 
 def nextpnr_command(nextpnr, chipdb, cst="top.cst", json_in="top.json",
                     json_out="top_pnr.json", top_module="top",
-                    timing_allow_fail=True, report=None):
+                    timing_allow_fail=True, report=None, vopts=()):
+    """The place-and-route command; `vopts` are extra `--vopt` settings.
+
+    A dual-purpose-pin option is **cross-checked** by the packer: `gowin_pack`
+    raises `sspi_as_gpio has conflicting settings in nexpnr and gowin_pack`
+    when the two sides disagree (`gowin_pack.py:5471-5473`, `get_PINCFG_fuses`).
+    So a shape that passes `--sspi_as_gpio` to the packer must pass the same
+    option to nextpnr, and this is the parameter that carries it.
+    """
     cmd = [
         nextpnr,
         "--device", PART,
         "--chipdb", chipdb,
         "--vopt", f"cst={cst}",
+    ]
+    for opt in vopts:
+        cmd += ["--vopt", opt]
+    cmd += [
         "--json", json_in,
         "--write", json_out,
         "--top", top_module,
@@ -349,7 +361,8 @@ def run_openflow(design_dir, top_module="top", verilog="top.v", cst="top.cst",
                  json_name="top.json", pnr_json="top_pnr.json",
                  fs_out="top.fs", yosys=None, nextpnr=None, chipdb=None,
                  gowin_pack=None, extra_gpio=(), timing_allow_fail=True,
-                 report="top_report.json", timeout=DEFAULT_TIMEOUT_S):
+                 report="top_report.json", timeout=DEFAULT_TIMEOUT_S,
+                 vopts=()):
     """Run the three tools on one design directory and return the result.
 
     Every step's log is a real file inside `design_dir`; the first non-zero
@@ -383,7 +396,7 @@ def run_openflow(design_dir, top_module="top", verilog="top.v", cst="top.cst",
         steps.append(run_step(
             "nextpnr", nextpnr_command(
                 nextpnr_bin, chipdb_path, cst, json_name, pnr_json,
-                top_module, timing_allow_fail, report),
+                top_module, timing_allow_fail, report, vopts),
             design_dir, timeout))
     if steps[-1]["returncode"] == 0:
         steps.append(run_step(
