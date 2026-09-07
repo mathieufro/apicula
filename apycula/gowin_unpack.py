@@ -423,6 +423,19 @@ _iologic_outmode_alias = {
         'LVDSOUT': 'OVIDEO',
         }
 
+
+def c_static_dly_of(value_id):
+    """The `IODELAY` static delay step one `C_STATIC_DLY` value id stands for.
+
+    MEASURED on the GW5AST-138C (`P3.T21`, 28 vendor bitstreams): the
+    attribute enumerates the whole 0-255 range, with value id 2 for one step
+    and `1000 + n` for every `n >= 2`.  Step 0 sets no fuse and has no row, so
+    an absent attribute is a delay of zero, not a missing measurement.
+    """
+    if value_id >= 1000:
+        return value_id - 1000
+    return value_id - 1
+
 # BSRAM has 3 cells: BSRAM, BSRAM0 and BSRAM1
 # { (row, col) : idx }
 _bsram_cells = {}
@@ -828,6 +841,12 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
             # additional IOLOGIC components
             # XXX delays and FFs in IO
             # main component
+            # The delay line is a property of the IOLOGIC cell whatever the
+            # gearbox on it is doing, so it is read before the mode branches
+            # and survives the `continue` each of them takes.
+            if 'C_STATIC_DLY' in attrvals.keys():
+                bels.setdefault(name, set()).add(
+                        f"C_STATIC_DLY={c_static_dly_of(attrvals['C_STATIC_DLY'])}")
             if 'OUTMODE' in attrvals.keys():
                 # XXX skip oddr
                 if attrvals['OUTMODE'] in {attrids.iologic_attrvals['MODDRX1'], attrids.iologic_attrvals['ODDRX1']}:
