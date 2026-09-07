@@ -412,6 +412,17 @@ _iologic_inmode_alias = {
         'UNK76': 'IDES8',
         }
 
+# `OUTMODE` ids whose shipped name is not the mode the GW5A writes there.
+# MEASURED on the GW5AST-138C (`P3.T13`): `gowin_pack.get_out_iologic_attrs`
+# encodes an `OVIDEO` as `OUTMODE = LVDSOUT` (value 74) and the vendor writes
+# the same fuses, so every video serialiser decoded as a mode the mode table
+# has no primitive for and no `OVIDEO` was ever recovered.  Aliasing it on the
+# output path alone keeps id 74 unnamed in `INMODE`, where it is a different
+# mode.
+_iologic_outmode_alias = {
+        'LVDSOUT': 'OVIDEO',
+        }
+
 # BSRAM has 3 cells: BSRAM, BSRAM0 and BSRAM1
 # { (row, col) : idx }
 _bsram_cells = {}
@@ -828,8 +839,11 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 # skip aux cells
                 if attrvals['OUTMODE'] == attrids.iologic_attrvals['DDRENABLE']:
                     continue
-                if attrids.iologic_num2val[attrvals['OUTMODE']] in _iologic_mode.keys():
-                    bels.setdefault(name, set()).add(f"MODE={_iologic_mode[attrids.iologic_num2val[attrvals['OUTMODE']]]}")
+                out_val = attrids.iologic_num2val[attrvals['OUTMODE']]
+                out_mode = (_iologic_mode.get(out_val)
+                            or _iologic_outmode_alias.get(out_val))
+                if out_mode is not None:
+                    bels.setdefault(name, set()).add(f"MODE={out_mode}")
             elif 'INMODE' in attrvals.keys():
                 if attrvals['INMODE'] in {attrids.iologic_attrvals['MIDDRX1'], attrids.iologic_attrvals['IDDRX1']}:
                     if 'LSRIMUX_0' in attrvals.keys():
@@ -1278,9 +1292,47 @@ _iologic_ports = {
                    'Q6': 'Q2', 'Q7': 'Q3', 'Q8': 'Q4', 'Q9': 'Q5', 'Q10': 'F0',
                    'Q11': 'F1', 'Q12': 'F2', 'Q13': 'F3', 'Q14': 'F4', 'Q15': 'F5' },
 }
+
+# The GW5A IOLOGIC carries sixteen fabric outputs `Q0`-`Q15` where the earlier
+# families carry ten, and the input gearboxes do not sit on the ten the older
+# map names.  MEASURED on the GW5AST-138C by tracing each word ball of a
+# vendor bitstream back to the IOLOGIC wire that drives it (`P3.T12`/`P3.T14`,
+# `$OTC/evidence/ides/summary.md`):
+#
+#   IDDR/IDDRC  Q0,Q1  -> Q14,Q15      (wires F7, OF0)
+#   IDES4       Q0-Q3  -> Q8-Q11       (wires F0-F3)
+#   IDES8       Q0-Q7  -> Q8-Q15       (wires F0-F5, F7, OF0)
+#   IDES10      Q0-Q9  -> Q6-Q15
+#
+# `IVIDEO` is deliberately absent: no measured GW5A bitstream places one, and
+# guessing its window would name a wire nothing proved.
+_iologic_ports_gw5 = {
+        'IDDR':   {'D': 'D', 'Q14': 'Q0', 'Q15': 'Q1', 'CLK': 'CLK'},
+        'IDDRC':  {'D': 'D', 'Q14': 'Q0', 'Q15': 'Q1', 'CLK': 'CLK',
+                   'CLEAR': 'CLEAR'},
+        'IDES4':  dict({f'Q{8 + i}': f'Q{i}' for i in range(4)},
+                       D='D', RESET='RESET', CALIB='CALIB', PCLK='PCLK',
+                       FCLK='FCLK'),
+        'IDES8':  dict({f'Q{8 + i}': f'Q{i}' for i in range(8)},
+                       D='D', RESET='RESET', CALIB='CALIB', PCLK='PCLK',
+                       FCLK='FCLK'),
+        'IDES10': dict({f'Q{6 + i}': f'Q{i}' for i in range(10)},
+                       D='D', RESET='RESET', CALIB='CALIB', PCLK='PCLK',
+                       FCLK='FCLK'),
+}
+
+
+def iologic_ports_of(typ):
+    """The bel-pin -> primitive-port map of `typ` on the device being read."""
+    if chipdb.is_GW5_family(_device) and typ in _iologic_ports_gw5:
+        return _iologic_ports_gw5[typ]
+    return _iologic_ports[typ]
+
+
 def iologic_ports_by_type(typ, portmap):
     if typ not in {'IDES16', 'OSER16'}:
-        return { (_iologic_ports[typ][port], wire) for port, wire in portmap.items() if port in _iologic_ports[typ].keys() }
+        ports = iologic_ports_of(typ)
+        return { (ports[port], wire) for port, wire in portmap.items() if port in ports.keys() }
     elif typ in {'OSER16', 'IDES16'}:
         ports = { (port, wire) for port, wire in _iologic_ports[typ].items()}
         ports.add(('RESET', portmap['RESET']))

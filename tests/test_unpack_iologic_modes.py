@@ -32,3 +32,18 @@ def test_no_alias_shadows_a_named_mode():
     for spelling in gowin_unpack._iologic_inmode_alias:
         assert spelling.startswith('UNK'), spelling
         assert spelling not in gowin_unpack._iologic_mode, spelling
+
+
+def test_video_serialiser_is_named_from_the_id_the_packer_writes():
+    """`gowin_pack` encodes an `OVIDEO` as `OUTMODE = LVDSOUT` (74) on the
+    GW5A and the vendor writes the same fuses, so keying the mode table on
+    `VIDEOTX` alone recovered no video serialiser from any bitstream."""
+    assert attrids.iologic_attrvals['LVDSOUT'] == 74
+    assert gowin_unpack._iologic_outmode_alias['LVDSOUT'] == 'OVIDEO'
+
+
+def test_outmode_alias_does_not_reach_the_input_path():
+    """The two directions share one attribute-value table, and an id means a
+    different mode in each; an alias measured on one may not name the other."""
+    assert 'LVDSOUT' not in gowin_unpack._iologic_inmode_alias
+    assert 'UNK76' not in gowin_unpack._iologic_outmode_alias
