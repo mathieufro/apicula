@@ -7018,24 +7018,44 @@ class GW5AST_138C(GW5A):
     #========== IOLOGIC
     #==============================
     def common_iologic_handler(self, bel: IologicBelDesc) -> list[AttrVal]:
-        """ Two attributes of the generic handler are wrong on this die.
+        """ The attributes every IOLOGIC of this die carries.
 
-        The generic handler emits GSR unconditionally, DISGSR when the cell
-        carries no GSREN.  On the GW5AST-138C DISGSR is not the zero code: it
-        sets one fuse, and the vendor leaves that fuse clear on every ODDR,
-        IDDR and IDDRC measured.  Emitting it is a one-bit over-emission,
-        which the equivalence check counts as a difference rather than
-        forgiving, so GSR is emitted here only for the explicit opt-in.
+        Three things differ from the generic pre-5A handler, each measured:
 
-        Everything else the generic handler emits -- TSHX, UPDATE and the
-        IODELAY attributes -- is kept as it is, and TSHX at its default costs
-        no fuse on this die, so nothing is dropped that the vendor sets.
+        `TXCLK_POL` is its own IOLOGIC attribute on the Arora V families
+        (`attrids.iologic_attrids` 116), not the pre-5A `TSHX` (6).  MEASURED
+        (`P3.T13`, two vendor `OSER4` bitstreams differing in nothing else):
+        the vendor sets `TXCLK_POL=1` and one fuse, `(8,125)`, and leaves both
+        clear at `TXCLK_POL=0`.  `TSHX` in either spelling costs no fuse on
+        this die, so the pre-5A handler moved the parameter to an attribute
+        the bitstream does not have and the polarity never reached it.
+
+        `HWL` is likewise its own attribute (117) rather than the pre-5A
+        `UPDATE=SAME`.
+
+        `GSR` is emitted only for the explicit opt-in: `DISGSR` is not the
+        zero code here -- it sets one fuse, and the vendor leaves that fuse
+        clear on every `ODDR`, `IDDR` and `IDDRC` measured (`P3.T11`), so
+        emitting it unconditionally is a one-bit over-emission.
+
+        The `IODELAY` attributes are unchanged and still come from
+        `handle_iodelay`.
         """
-        attr_vals = [av for av in super().common_iologic_handler(bel)
-                     if av.attr != 'GSR']
-        if bel.cell.parms.get('GSREN', 'FALSE') == 'TRUE':
+        attr_vals = []
+        cell_parms = bel.cell.parms
+
+        # A Verilog parameter reaches here as the bit string yosys wrote, so
+        # it is read in base 2 the way the other GW5A device does.
+        if int(str(cell_parms.get('TXCLK_POL', '0')), 2):
+            attr_vals.append(AttrVal('TXCLK_POL', '1'))
+
+        if str(cell_parms.get('HWL', 'FALSE')).upper() == 'TRUE':
+            attr_vals.append(AttrVal('HWL', 'TRUE'))
+
+        if str(cell_parms.get('GSREN', 'FALSE')).upper() == 'TRUE':
             attr_vals.append(AttrVal('GSR', 'ENGSR'))
-        return attr_vals
+
+        return attr_vals + self.handle_iodelay(bel)
 
     def handle_iodelay(self, bel: IologicBelDesc) -> list[AttrVal]:
         """ This die carries the Arora V delay line, not the pre-5A one.

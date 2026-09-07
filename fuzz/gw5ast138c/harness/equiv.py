@@ -1909,6 +1909,37 @@ def _clkdiv2_recovered_via_chain(site_cells, z):
     return False
 
 
+def _iologic_aux_recovered_via_main(cell, netlist):
+    """Is this `IOLOGIC_DUMMY`'s main gearbox decoded at the same site?
+
+    A gearbox wider than a DDR pair takes both halves of its IOLOGIC tile:
+    `pack_iologic.cc` places the primitive on the A half and an
+    `IOLOGIC_DUMMY` on the B half, whose whole configuration is
+    `OUTMODE`/`INMODE` = `DDRENABLE`.  `gowin_unpack` skips exactly that value
+    by design (`if attrvals['OUTMODE'] == DDRENABLE: continue`) -- an aux cell
+    is not a design cell and must not appear in a decoded netlist -- so no
+    decode can ever name it, on any device.
+
+    What the bitstream does carry is the **main** cell's width, and a wide
+    mode is only legal with the aux half configured; so the aux cell is
+    recovered through the mode of the gearbox it belongs to, at the site its
+    own `MAIN_CELL` attribute names.  `None` means recovered; a string is why
+    it is not.
+    """
+    main = cell["attrs"].get("MAIN_CELL")
+    if not main:
+        return "IOLOGIC_DUMMY with no MAIN_CELL attribute"
+    site = tuple(cell["site"])
+    for other in netlist.cells:
+        if (other.x, other.y) != site:
+            continue
+        if str(other.type).startswith("IOLOGIC"):
+            return None
+    return (f"IOLOGIC_DUMMY of {main}: no IOLOGIC decoded at site "
+            f"{list(site)}, so the wide mode that needs this half is not in "
+            f"the bitstream either")
+
+
 def decode_check_c1(pnr_cells, netlist):
     """`c1` -- does the decode recover every cell the placement contains?
 
@@ -1974,6 +2005,21 @@ def decode_check_c1(pnr_cells, netlist):
                                 "bel": cell["bel"],
                                 "why": "used DQCE; recovered as the spine "
                                        "multiplexer pip it names in DQCE_PIP"})
+                continue
+            missing.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "site": list(cell["site"]),
+                            "why": why_not})
+            continue
+        if cell["type"] == "IOLOGIC_DUMMY":
+            why_not = _iologic_aux_recovered_via_main(cell, netlist)
+            if why_not is None:
+                skipped.append({"name": cell["name"], "type": cell["type"],
+                                "bel": cell["bel"],
+                                "why": "IOLOGIC aux half; gowin_unpack skips "
+                                       "OUTMODE/INMODE=DDRENABLE by design, "
+                                       "and the wide mode of the main cell at "
+                                       "the same site is what the bitstream "
+                                       "carries in its place"})
                 continue
             missing.append({"name": cell["name"], "type": cell["type"],
                             "bel": cell["bel"], "site": list(cell["site"]),
@@ -2722,11 +2768,24 @@ def _bitstream_cell_type(name):
 
 
 def bitstream_bel_exported(pnr_cells):
-    """`{name: {x, y, z, type, bel}}` for the bels nextpnr placed here."""
+    """`{name: {x, y, z, type, bel}}` for the bels nextpnr placed here.
+
+    An `IOLOGIC_DUMMY` is left out.  It is the aux half a gearbox wider than a
+    DDR pair takes beside its main cell, its whole configuration is
+    `OUTMODE`/`INMODE` = `DDRENABLE`, and `gowin_unpack` skips that value by
+    design -- so no bitstream decodes it, on any device, and asking `E1`
+    whether the vendor's decoded cell sits at its site is asking a question
+    the bitstream format cannot answer.  Its *main* cell is exported and is
+    compared at the same site; `decode_check_c1` recovers the aux half the
+    same way (MEASURED, `P3.T13`: `OSER8` and `OSER10` fell back to `E0` on
+    exactly this cell while every set-level count was zero).
+    """
     out = {}
     for cell in pnr_cells:
         bel, site = cell.get("bel"), cell.get("site")
         if bel is None or site is None:
+            continue
+        if cell.get("type") == "IOLOGIC_DUMMY":
             continue
         iologic = _IOLOGIC_BEL.match(bel)
         if iologic is not None:

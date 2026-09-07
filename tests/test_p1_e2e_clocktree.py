@@ -66,9 +66,12 @@ def test_clocktree_e2e_pins_both_placeable_primitives():
     ins_loc = clocking_e2e.SPEC.ins_loc
     assert ins_loc['dut_pll'] == clocking_e2e.PLL_SITE
     assert ins_loc['div0'] == 'BOTTOMSIDE%s' % f'[{clocking_e2e.INS_LOC_BASE + clocking_e2e.LANE}]'
-    # the open flow reads the macro form and not the SIDE[0~7] one (P1.T14)
+    # Both forms now reach the open flow: `nextpnr-himbaechel`'s .cst reader
+    # splits a SIDE[0~7] index into an HCLK block ordinal and a lane (`D107`),
+    # so the divider is constrained twice over -- by this line and by the
+    # matching `(* BEL *)` attribute, which name the same bel.
     assert gen.open_flow_reads_ins_loc(clocking_e2e.PLL_SITE)
-    assert not gen.open_flow_reads_ins_loc(ins_loc['div0'])
+    assert gen.open_flow_reads_ins_loc(ins_loc['div0'])
 
 
 def test_clocktree_e2e_uses_the_p1t39_pll_operating_point():

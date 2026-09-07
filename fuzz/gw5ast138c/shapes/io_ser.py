@@ -1,45 +1,48 @@
 """`io_ser` -- the output-serialiser family on the GW5AST-138C (`P3.T13`).
 
-`OSER4`, `OSER8`, `OSER10` and `OVIDEO`, one per run, on the dock's RGMII
-side (bank 2) because that is where a serialiser has a reason to exist on
-this board: `RGMII_TXD[3:0]` and `RGMII_GTXCLK` are the nets a 2:1 output
-gearbox drives at 125 MHz, and proving the family there proves the RGMII TX
+`OSER4`, `OSER8`, `OSER10` and `OVIDEO`, one per run.  `OSER4` in its `MODDRX21`
+(2:1 DDR) mode is the RGMII TX gearbox -- the thing `RGMII_TXD[3:0]` and
+`RGMII_GTXCLK` need at 125 MHz -- so closing this family closes the RGMII TX
 half of `S10`.
 
-`FCLK` is the board clock as the vendor's own IOLOGIC clock reaches an
-IOLOGIC on this die: over `BUFG`/global.  `G-FCLK-138C` (`P3.T08`) is the
-measurement behind that -- this die has **no** HCLK->FCLK edge
-(`dev.io2hclk == {}`) and none of `P3.T07`'s twelve vendor bitstreams
-configures a single `FCLK*` pip -- and apicula's own `examples/gw5a/oser4.v`
-and `ides4.v` drive `FCLK` off a plain net in exactly the same way.  `PCLK`
-is that clock divided by a `CLKDIV` in HCLK block 5: the gearbox's slow clock
-is `FCLK / (width / 2)` (UG304E p.62-69), which is `DIV_MODE` `2`, `3.5`, `4`
-and `5` for widths 4, 7, 8 and 10.  `CLKDIV` is used rather than a PLL
-because Phase 1 closed it at `E1` on this die and the PLL->HCLK path is a
-Phase-1 gap; a shape should not rest on an unproven primitive to test a
-different one, and it is pinned in **both** flows (`INS_LOC` for the vendor,
-`(* BEL *)` for `nextpnr`) so the `PCLK` net's endpoint set is the same on
-the two sides.
+**The row is measured in HCLK block 4, on bank 5, and not on the dock's own
+RGMII balls, for a measured reason.**  What makes the HCLK *lane* part of the
+comparison rather than each allocator's private choice is a `CLKDIV` pinned to
+a named lane of the gearbox's own block: it consumes that lane's
+`HCLK_MUX_ALPHA` wire, so the `FCLK` net has to land there on both sides
+(`D107`).  The RGMII balls are served by block 1, and block 1 has no modelled
+clock escape (`D100a`): a divider placed there cannot reach the gearbox's
+`PCLK` at all -- MEASURED, `nextpnr` reports `Failed to find a route for arc 0
+of net pclk`.  Bank 5's general-purpose 3.3 V balls are all in block 4, which
+`P1.T08d` mapped lane by lane, so that is where the family is measured.  The
+two `P3.T13` runs already spent on a bank-2 `OSER4` are what measured the
+consequence of *not* pinning the lane and are kept in `summary.md`.
 
-**Every producer and consumer of the primitive under test is a package
-ball** (`D105`).  A gearbox fed from fabric flops closes `E1` on cells and
-attributes and then differs on `conns`, because a fabric cell is placed
-independently by the two flows and `equiv.net_id` digests a net's endpoint
-*sites*; GowinSynthesis renames the flop, so `INS_LOC` cannot pin it either
-(MEASURED, `P3.T12`).  The parallel word therefore comes off two balls, even
-bits from one and odd bits from the other -- the two edges of the DDR word --
-and the serialised output drives a third.
+One `INS_LOC` line places the divider in **both** flows: `nextpnr-himbaechel`'s
+`.cst` reader now splits a `{SIDE}[0~7]` index into an HCLK block ordinal and a
+lane, so the vendor's own spelling is the open flow's constraint too and the
+`(* BEL *)` attribute this shape used to carry is gone.
+
+**Every producer and consumer of the primitive under test is a package ball**
+(`D105`).  A gearbox fed from fabric flops closes `E1` on cells and attributes
+and then differs on `conns`, because a fabric cell is placed independently by
+the two flows and `equiv.net_id` digests a net's endpoint *sites*;
+GowinSynthesis renames the flop, so `INS_LOC` cannot pin it either (MEASURED,
+`P3.T12`).  The parallel word therefore comes off two balls, even bits from one
+and odd bits from the other -- the two edges of the DDR word -- and the
+serialised output drives a third.
 
 The swept axis is the primitive's own documented parameter set, one axis per
-run (`F12`).  `prim_sim.v` declares `HWL` and `TXCLK_POL` on `OSER4`
-(`:10342`) and `OSER8` (`:10912`) and **no parameter at all** on `OSER10`
-(`:11303`) or `OVIDEO` (`:10718`), so the eight runs `spec-primitives.md` §2
-budgets are three points on each of the two parameterised widths and the
-default on each of the two that carry no parameter.  A `defparam` naming a
-parameter the primitive does not declare is a GowinSynthesis error, not a
-no-op, which is why the earlier `LSREN`/`GSREN` points are not here.
+run (`F12`).  `prim_sim.v` declares `HWL` and `TXCLK_POL` on `OSER4` (`:10342`)
+and `OSER8` (`:10912`) and **no parameter at all** on `OSER10` (`:11303`) or
+`OVIDEO` (`:10718`); a `defparam` naming a parameter the primitive does not
+declare is a GowinSynthesis error, not a no-op.  Both parameters are swept on
+`OSER4` and neither on `OSER8`: `gowin_pack` reads them in
+`common_iologic_handler`, which is one handler for every width, so a second
+width would re-measure the same code path with a run this row does not have --
+`P3.T13`'s cap is eight and two are already spent.
 """
-from ._io_base import (CLKDIV_BLOCK5_INS_LOC, GEARBOX_DIV_MODE, IoShape,
+from ._io_base import (GEARBOX_CLKDIV_INS_LOC, GEARBOX_DIV_MODE, IoShape,
                        clkdiv_rtl)
 
 #: `(width, attribute, value)` per sweep point, one axis per run (`F12`).
@@ -48,8 +51,6 @@ POINTS = {
     "oser4-txclk-pol": (4, "TXCLK_POL", "1'b1"),
     "oser4-hwl": (4, "HWL", '"true"'),
     "oser8-default": (8, None, None),
-    "oser8-txclk-pol": (8, "TXCLK_POL", "1'b1"),
-    "oser8-hwl": (8, "HWL", '"true"'),
     "oser10-default": (10, None, None),
     "ovideo-default": (7, None, None),
 }
@@ -61,25 +62,30 @@ PRIMITIVE_OF_WIDTH = {4: "OSER4", 7: "OVIDEO", 8: "OSER8", 10: "OSER10"}
 
 #: The balls, and why each is the one it is.
 #:
-#: `E21` is `IOR51A`, cell `(181,50)`, the **A** half of its tile.  That is
-#: not a preference: `db.shortval[ttyp]['IOLOGICB']` holds 3 fuse coordinates
-#: against `IOLOGICA`'s 100 on every IO tile type this package bonds, so an
-#: IOLOGIC is configurable on the A half only (`P3.T11`'s named gap, measured
-#: again here for tile types 245 and 87).  A serialiser on a `B` ball --
-#: `F20`, the board's `RGMII_GTXCLK` -- would have no fuse table to compare.
-OSER_BALL = "E21"          # IOR51A, cell (181,50), RGMII_TXD[1]
-DIN_EVEN_BALL = "D22"      # IOR49B, cell (181,48), RGMII_TXD[2]
-DIN_ODD_BALL = "E22"       # IOR49A, cell (181,48), RGMII_TXD[3]
-RESET_BALL = "F21"         # IOR55A, cell (181,54), RGMII_TXEN
+#: `AA9` is `IOB53A`, cell `(108,52)`, tile type 247: the **A** half, because
+#: `db.shortval[ttyp]['IOLOGICB']` holds 3 fuse coordinates against
+#: `IOLOGICA`'s 100 on every IO tile type this package bonds, so an IOLOGIC is
+#: configurable on the A half only (`P3.T11`'s named gap).  It is also in HCLK
+#: block 4 (bottom edge, columns 2..90) and on a tile type whose `IOLOGICA`
+#: bel carries a full port map -- the bottom edge also holds tile types 63 and
+#: 251, whose `IOLOGICA` has **no ports at all**, and a gearbox placed there
+#: fails in `nextpnr`'s global router with `Net 'pclk' has an invalid sink port
+#: dut.PCLK` (MEASURED here; `Y17`, `P20` and `N15` are those tile types).
+OSER_BALL = "AA9"          # IOB53A, cell (108,52), sk9822_da
+DIN_EVEN_BALL = "W15"      # IOB72A, sd_cs
+DIN_ODD_BALL = "W16"       # IOB72B, LCD_CTP[0], pair of W15
+RESET_BALL = "T16"         # IOB76A, LCD_CTP[2]
 RESETN_BALL = "AB13"       # IOB89B, Key_in[0], the CLKDIV's own reset
 FCLK_BALL = "V22"          # IOB104B, the board oscillator
 
 #: The one tile the `E0`/`E1` comparison is restricted to: the serialiser's
-#: own pad cell, which is the only cell an IOLOGIC can be realised in.  The
+#: own pad cell, which is the only cell an IOLOGIC can be realised in.  A
+#: `ScopeSpec` tile is `(x, y)` = `(col, row)`, the Himbaechel spelling, not
+#: the `(row, col)` the chipdb tables use.  The
 #: balls that feed it sit in other tiles and are pinned by `IO_LOC`, so every
 #: net of this tile has all of its endpoints at a site both flows agree on
 #: without either of them being compared here.
-SCOPE_TILES = ((181, 50),)
+SCOPE_TILES = ((52, 108),)
 
 _ACK_CLK = ("EMCCLK: 27 vendor runs on this device placed a design with clk "
             "on V22 and gw_sh returned 0 every time (P1.T08d, "
@@ -144,7 +150,7 @@ class IoSerShape(IoShape):
     """One output serialiser per run on the dock's RGMII balls."""
 
     name = "io_ser"
-    primitive = "OSER4/OSER8/OSER10/OVIDEO"
+    primitive = "OSER4 / OSER8 / OSER10 / OVIDEO"
     sweep_axis = "POINT"
     sweep_values = list(POINTS)
     baseline_value = BASELINE
@@ -162,11 +168,12 @@ class IoSerShape(IoShape):
     clocks = {"fclk": 8.0}
     config_role_acks = {FCLK_BALL: _ACK_CLK}
     scope_tiles = SCOPE_TILES
-    #: The vendor spelling of the `CLKDIV` site `clkdiv_rtl` pins by `BEL` for
-    #: the open flow.  Both flows have to place it, because the `PCLK` net
-    #: ends on the scoped tile's IOLOGIC and a divider placed freely would
-    #: give that net two identities.
-    ins_loc = {"pclk_div": CLKDIV_BLOCK5_INS_LOC}
+    #: The one placement constraint of the shape, read by **both** flows.  It
+    #: does two things at once: the `PCLK` net ends on the scoped tile's
+    #: IOLOGIC, so a freely placed divider would give that net two identities,
+    #: and the divider consumes its lane's `HCLK_MUX_ALPHA` wire, so pinning it
+    #: pins the lane the gearbox's `FCLK` lands on (`D107`).
+    ins_loc = {"pclk_div": GEARBOX_CLKDIV_INS_LOC}
 
     def rtl(self, sweep_value):
         width, attribute, value = POINTS[sweep_value]

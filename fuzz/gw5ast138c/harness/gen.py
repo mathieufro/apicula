@@ -306,7 +306,11 @@ def render_verilog(spec, sweep_value=None):
 #: would `log_error` the whole run on it rather than ignore the line.
 OPEN_FLOW_INS_LOC_FORMS = (
     re.compile(r"^R\d+C\d+\[\d\]\[[AB]\]$"),
-    re.compile(r"^(TOP|RIGHT|BOTTOM|LEFT)SIDE\[[01]\]$"),
+    # `SIDE[0~7]`: SUG1018-1.7E Table 2-2 numbers a side's HCLK lanes across
+    # its blocks, and `nextpnr-himbaechel`'s reader splits the index into a
+    # block ordinal and a lane, so the whole range resolves on a device with
+    # more than one block per side (`cst.cc getConstrainedHCLKBel`, `D107`).
+    re.compile(r"^(TOP|RIGHT|BOTTOM|LEFT)SIDE\[[0-7]\]$"),
     re.compile(r"^PLL_[LRB]\[\d\]$"),
 )
 
@@ -319,15 +323,14 @@ def open_flow_reads_ins_loc(site):
 def render_cst(spec, sweep_value=None, with_ins_loc=True):
     """Render a `.cst`: one `IO_LOC`/`IO_PORT` pair per pin, then `INS_LOC`.
 
-    `with_ins_loc=False` renders the **open-flow** copy (`top-open.cst`).
-    Measured on this device (`nextpnr-himbaechel` `cst.cc:130-140`): the reader
-    accepts only `{TOP,RIGHT,BOTTOM,LEFT}SIDE[0|1]`, so the 138C's own
-    `SIDE[0~7]` spelling (SUG1018-1.7E Table 2-2, row `GW5A(S)(T)-138`) falls
-    through to the placement-macro branch and `log_error`s the whole run with
-    `Unknown placement macro BOTTOMSIDE`.  The vendor needs the line and the
-    open flow cannot read it, so the two flows get two files; the open flow is
-    pinned by the RTL `(* BEL = ... *)` attribute instead, which nextpnr does
-    honour.  Fixing the reader is a nextpnr change and is not this task's.
+    `with_ins_loc=False` renders the **open-flow** copy (`top-open.cst`), which
+    keeps only the `INS_LOC` spellings `nextpnr-himbaechel`'s `.cst` reader can
+    resolve (`OPEN_FLOW_INS_LOC_FORMS`).  The 138C's own `SIDE[0~7]` spelling
+    (SUG1018-1.7E Table 2-2, row `GW5A(S)(T)-138`) is one of them since the
+    reader learned to split the index into an HCLK block ordinal and a lane, so
+    a CLKDIV -- and with it the HCLK lane an IOLOGIC's `FCLK` lands on -- is
+    pinned by the same line in both flows (`D107`).  A form the reader still
+    cannot take is dropped rather than passed, because it aborts the run.
 
     An `ins_loc` **value** may also be a callable `(sweep_value) -> site`, for
     a shape whose swept axis *is* the placement (`P1.T19` sweeps one PLL over

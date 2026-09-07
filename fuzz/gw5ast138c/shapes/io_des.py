@@ -1,8 +1,12 @@
 """`io_des` -- the input-deserialiser family on the GW5AST-138C (`P3.T14`).
 
-`IDES4`, `IDES8` and `IDES10`, one per run, on the dock's RGMII side, which is
-the RX half of `S10`: an RGMII receiver is a 1:2 input gearbox clocked from
-the PHY's `RXC`.
+`IDES4`, `IDES8` and `IDES10`, one per run.  `IDES4` is the RGMII RX gearbox --
+an RGMII receiver is a 1:2 input gearbox clocked from the PHY's `RXC` -- so
+this row is the RX half of `S10`.  It is measured on a bank-5 ball of HCLK
+block 4 rather than on the dock's own RGMII balls, for the measured reason
+`io_ser`'s module docstring gives: pinning the HCLK lane means pinning a
+`CLKDIV` in the gearbox's own block, and block 1, which serves the RGMII
+balls, has no modelled clock escape (`D100a`) for one to drive `PCLK` through.
 
 The divider is the whole point of the shape and the thing most easily got
 wrong, so it is stated once and derived everywhere: a `w`-bit gearbox's
@@ -11,11 +15,13 @@ quarter, `IDES10` at a fifth.  `_io_base.GEARBOX_DIV_MODE` holds those and the
 rendered `CLKDIV` carries the ratio into every design, so a wrong divider is
 visible in the artefact rather than hidden in a comment.
 
-`FCLK` comes from the board clock over `BUFG`/global, which is how the vendor
-clocks an IOLOGIC on this die (`G-FCLK-138C`, `P3.T08`: no HCLK->FCLK edge
-exists and no vendor bitstream configures an `FCLK*` pip) and how apicula's
-own `examples/gw5a/ides4.v` drives it.  `PCLK` comes from a `CLKDIV` in HCLK
-block 5, pinned in both flows, for the reason `io_ser` gives.
+`FCLK` comes from the board clock and reaches the gearbox over its HCLK block,
+which is what the vendor does on this die -- `G-FCLK-138C` (`P3.T08`) was
+measured on `ODDR`/`IDDR` designs, which need no fast-clock selection at all,
+and the first vendor gearbox bitstream refuted it for the gearboxes (`P3.F1`,
+`D106`).  `PCLK` comes from a `CLKDIV` on a **named lane** of that same block,
+placed in both flows by one `INS_LOC` line, which is what puts the lane inside
+the comparison (`D107`).
 
 **Every producer and consumer of the primitive under test is a package ball**
 (`D105`): the deserialised word leaves on ten balls rather than being reduced
@@ -33,7 +39,7 @@ one input of the primitive that changes its configuration -- it is what
 exists for (`P3.T11` finding 2).  Three widths times a pad-driven and a
 constant-tied `RESET` is the six runs `spec-primitives.md` §2 budgets.
 """
-from ._io_base import (CLKDIV_BLOCK5_INS_LOC, GEARBOX_DIV_MODE, IoShape,
+from ._io_base import (GEARBOX_CLKDIV_INS_LOC, GEARBOX_DIV_MODE, IoShape,
                        clkdiv_rtl)
 
 #: `(width, reset expression)` per sweep point, one axis per run (`F12`).
@@ -50,12 +56,16 @@ BASELINE = "ides4-reset-pad"
 
 PRIMITIVE_OF_WIDTH = {4: "IDES4", 8: "IDES8", 10: "IDES10"}
 
-#: The deserialiser's own pad.  `E22` is `IOR49A`, cell `(181,48)`: the **A**
-#: half, because an IOLOGIC is configurable on the A half only -- the B half's
-#: fuse table holds 3 coordinates against the A half's 100 on every IO tile
-#: type this package bonds (`P3.T11`'s named gap).
-IDES_BALL = "E22"          # IOR49A, cell (181,48), RGMII_TXD[3]
-RESET_BALL = "F21"         # IOR55A, RGMII_TXEN
+#: The deserialiser's own pad, and the balls around it.
+#:
+#: `AA9` is `IOB53A`, cell `(108,52)`, tile type 247: the **A** half, because
+#: an IOLOGIC is configurable on the A half only -- the B half's fuse table
+#: holds 3 coordinates against the A half's 100 on every IO tile type this
+#: package bonds (`P3.T11`'s named gap) -- and in HCLK block 4, whose lane the
+#: shape's `CLKDIV` pins in both flows (`D107`, `io_ser`'s module docstring
+#: gives the block-1 measurement behind the choice).
+IDES_BALL = "AA9"          # IOB53A, cell (108,52), sk9822_da
+RESET_BALL = "T16"         # IOB76A, LCD_CTP[2]
 RESETN_BALL = "AB13"       # IOB89B, Key_in[0], the CLKDIV's own reset
 FCLK_BALL = "V22"          # IOB104B, the board oscillator
 
@@ -68,10 +78,12 @@ WORD_BALLS = ("Y17", "W14", "Y14", "Y16", "AA16",
 #: on ten balls with `RESET` tied to a constant -- would carry a top-level
 #: input no cell reads, and the vendor may prune such a port out from under
 #: its own `IO_LOC`.
-TAP_BALL = "T16"           # IOB76A, LCD_CTP[2]
+TAP_BALL = "Y13"           # IOB87A, cmos_sda
 
-#: The deserialiser's own pad cell -- the only cell an IOLOGIC lives in.
-SCOPE_TILES = ((181, 48),)
+#: The gearbox's own pad cell -- the only cell an IOLOGIC lives in.  A
+#: `ScopeSpec` tile is `(x, y)` = `(col, row)`, the Himbaechel spelling, not
+#: the `(row, col)` the chipdb tables use.
+SCOPE_TILES = ((52, 108),)
 
 _ACK_CLK = ("EMCCLK: 27 vendor runs on this device placed a design with clk "
             "on V22 and gw_sh returned 0 every time (P1.T08d, "
@@ -119,10 +131,10 @@ def _port_block(width, reset):
 
 
 class IoDesShape(IoShape):
-    """One input deserialiser per run on the dock's RGMII balls."""
+    """One input deserialiser per run on a bank-5 ball of HCLK block 4."""
 
     name = "io_des"
-    primitive = "IDES4/IDES8/IDES10"
+    primitive = "IDES4 / IDES8 / IDES10"
     sweep_axis = "POINT"
     sweep_values = list(POINTS)
     baseline_value = BASELINE
@@ -143,7 +155,7 @@ class IoDesShape(IoShape):
     clocks = {"fclk": 8.0}
     config_role_acks = {FCLK_BALL: _ACK_CLK}
     scope_tiles = SCOPE_TILES
-    ins_loc = {"pclk_div": CLKDIV_BLOCK5_INS_LOC}
+    ins_loc = {"pclk_div": GEARBOX_CLKDIV_INS_LOC}
 
     def rtl(self, sweep_value):
         width, reset = POINTS[sweep_value]

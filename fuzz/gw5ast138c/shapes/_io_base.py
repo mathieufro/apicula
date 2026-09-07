@@ -322,15 +322,38 @@ class IoShape:
         return spec
 
 
-#: HCLK block 5 of the 138C, `(x, y)` in Himbaechel spelling -- MEASURED at
-#: cell `(row 108, col 117)` by `P1.T04` and the site every `P1` CLKDIV
-#: evidence row was taken at.  The serialiser and deserialiser shapes divide
-#: their `FCLK` here to make `PCLK`, so the gearbox ratio comes from a
-#: primitive this pipeline has already closed at `E1` rather than from a PLL
-#: it has not.
-CLKDIV_BLOCK5_XY = (117, 108)
-CLKDIV_BLOCK5_LANE = 0
-CLKDIV_BLOCK5_INS_LOC = "BOTTOMSIDE[4]"
+#: The HCLK block a gearbox row is measured in, and the lane its `FCLK`
+#: lands on -- MEASURED (`P3.T13`, `D107`).
+#:
+#: Block **4**, cell `(row 108, col 64)`, `(x, y) = (64, 108)` in Himbaechel
+#: spelling.  Not block 1, which serves the dock's RGMII balls: a `CLKDIV`
+#: placed there is what pins the lane, and block 1 has no modelled clock
+#: escape (`D100a`), so its divider's output cannot reach the gearbox's
+#: `PCLK` at all -- MEASURED, `nextpnr` reports `Failed to find a route for
+#: arc 0 of net pclk`.  The two bottom blocks are the pair `P1.T08d` mapped
+#: lane by lane, and every general-purpose 3.3 V ball of bank 5 this board
+#: brings out sits in block 4.
+GEARBOX_HCLK_BLOCK_XY = (64, 108)
+
+#: `INS_LOC` index of the first lane of that block: SUG1018-1.7E Table 2-2
+#: numbers a side's lanes across its blocks, so block 4 is `BOTTOMSIDE[0..3]`
+#: and block 5 `BOTTOMSIDE[4..7]` (`P1.T08d`,
+#: `$OTC/evidence/hclk/mux38-138c.md` 2).
+GEARBOX_HCLK_INS_LOC_BASE = 0
+
+#: The lane the row pins.  Any of the four would do; 2 is the lane the
+#: vendor's own unconstrained `OSER4` picked on block 1, so a run that
+#: reproduces it is telling us the constraint was read and not that both
+#: allocators happened to start at zero.
+GEARBOX_FCLK_LANE = 2
+
+#: The one line that pins the divider -- and with it the HCLK lane the
+#: gearbox's `FCLK` lands on -- in **both** flows.  `nextpnr-himbaechel`'s
+#: `.cst` reader splits the index into a block ordinal and a lane
+#: (`cst.cc getConstrainedHCLKBel`), so the vendor's own spelling is the open
+#: flow's constraint too and no `(* BEL *)` attribute is needed (`D107`).
+GEARBOX_CLKDIV_INS_LOC = "BOTTOMSIDE[%d]" % (GEARBOX_HCLK_INS_LOC_BASE
+                                             + GEARBOX_FCLK_LANE)
 
 #: `CLKDIV.DIV_MODE` per gearbox width: a `w`-bit gearbox runs its slow clock
 #: at `FCLK / (w / 2)` (UG304E p.62-69), and `3.5` is why `CLKDIV` documents a
@@ -341,17 +364,17 @@ GEARBOX_DIV_MODE = {4: "2", 7: "3.5", 8: "4", 10: "5"}
 def clkdiv_rtl(width, hclkin="fclk", clkout="pclk"):
     """A `CLKDIV` making a gearbox's `PCLK` from its `FCLK`.
 
-    Pinned by `BEL` for the open flow, as `P1.T14` measured is necessary:
-    `nextpnr-himbaechel`'s `.cst` reader takes only `{...}SIDE[0|1]`, so the
-    vendor's `INS_LOC` spelling cannot be handed to it (`cst.cc:130-140`).
+    It carries no placement attribute of its own: the `INS_LOC` line both
+    flows now read (`GEARBOX_CLKDIV_INS_LOC`) places it, which is what makes
+    the HCLK lane part of the comparison rather than each allocator's own
+    choice (`D107`).
     """
     return (
-        '    (* BEL = "X%dY%d/CLKDIV_%d" *) CLKDIV %s_div (\n'
+        '    CLKDIV %s_div (\n'
         '        .HCLKIN (%s),\n'
         '        .RESETN (resetn),\n'
         '        .CALIB  (1\'b0),\n'
         '        .CLKOUT (%s)\n'
         '    );\n'
         '    defparam %s_div.DIV_MODE = "%s";\n'
-        % (CLKDIV_BLOCK5_XY[0], CLKDIV_BLOCK5_XY[1], CLKDIV_BLOCK5_LANE,
-           clkout, hclkin, clkout, clkout, GEARBOX_DIV_MODE[width]))
+        % (clkout, hclkin, clkout, clkout, GEARBOX_DIV_MODE[width]))

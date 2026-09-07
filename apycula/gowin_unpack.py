@@ -389,11 +389,27 @@ _iologic_mode = {
         'MODDRX21': 'OSER4',  'ODDRX2': 'OSER4',
         'MODDRX4':  'OSER8',  'ODDRX4': 'OSER8',
         'MODDRX5':  'OSER10', 'ODDRX5': 'OSER10',
-        'VIDEORX':  'OVIDEO', 'ODDRX8': 'OSER16',
+        # 'VIDEOTX' and 'VIDEORX' are the same attribute code (50), so a
+        # decoded video gearbox comes back under whichever spelling the
+        # reverse table kept -- 'VIDEOTX'.  Keying on that spelling alone left
+        # every OVIDEO undecoded (MEASURED, P3.T13).  The input branch renames
+        # the result to IVIDEO, so one entry serves both directions.
+        'VIDEOTX':  'OVIDEO', 'VIDEORX': 'OVIDEO', 'ODDRX8': 'OSER16',
         'MIDDRX2':  'IDES4',  'IDDRX2': 'IDES4',
         'MIDDRX4':  'IDES8',  'IDDRX4': 'IDES8',
         'MIDDRX5':  'IDES10', 'IDDRX5': 'IDES10',
         'IDDRX8':   'IDES16',
+        }
+
+# Value ids the decode resolves an input gearbox to that the attribute-value
+# table has no primitive name for.  MEASURED on the GW5AST-138C (`P3.T14`):
+# `gowin_pack` writes `INMODE = IDDRX4` (value 11) for an `IDES8`, the vendor
+# writes the same fuses, and both decode back as value 76, which the shipped
+# table leaves unnamed -- so an `IDES8` was recovered from no bitstream at all.
+# Only the input direction is aliased: the same id in `OUTMODE` is not this
+# mode and must keep failing to resolve rather than acquire a wrong name.
+_iologic_inmode_alias = {
+        'UNK76': 'IDES8',
         }
 
 # BSRAM has 3 cells: BSRAM, BSRAM0 and BSRAM1
@@ -824,8 +840,9 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 # skip aux cells
                 if attrvals['INMODE'] == attrids.iologic_attrvals['DDRENABLE']:
                     continue
-                if attrids.iologic_num2val[attrvals['INMODE']] in _iologic_mode.keys():
-                    in_mode = _iologic_mode[attrids.iologic_num2val[attrvals['INMODE']]]
+                in_val = attrids.iologic_num2val[attrvals['INMODE']]
+                in_mode = _iologic_mode.get(in_val) or _iologic_inmode_alias.get(in_val)
+                if in_mode is not None:
                     if in_mode == 'OVIDEO':
                         in_mode = 'IVIDEO'
                     bels.setdefault(name, set()).add(f"MODE={in_mode}")

@@ -168,8 +168,12 @@ def _otc_path(*parts):
     return None
 
 
-def _iologic_bel(typ, parms):
-    """A bare `IologicBelDesc` -- the handlers read the cell and nothing else."""
+def _iologic_bel(typ, parms, fclk="UNKNOWN"):
+    """A bare `IologicBelDesc` -- the handlers read the cell and `fclk`.
+
+    `fclk` is the HCLK lane spelling `set_iologic_bel_fclk` would have put
+    there (`SPINE10`..`SPINE13`); `UNKNOWN` is a cell with no fast clock.
+    """
     from apycula.gowin_pack import IologicBelDesc
 
     class _Cell:
@@ -179,16 +183,16 @@ def _iologic_bel(typ, parms):
     cell.typ = typ
     cell.parms = dict(parms)
     cell.attrs = {}
-    return IologicBelDesc(0, 0, "0", cell, "UNKNOWN",
+    return IologicBelDesc(0, 0, "0", cell, fclk,
                           parms.get("OUTMODE"), parms.get("INMODE"))
 
 
-def _emitted_attrs(device_cls, typ, parms):
+def _emitted_attrs(device_cls, typ, parms, fclk="UNKNOWN"):
     """`[(attr, val)]` the device's IOLOGIC handlers emit for one cell."""
     from apycula.gowin_pack import GW5AST_138C
 
     device = object.__new__(device_cls)
-    bel = _iologic_bel(typ, parms)
+    bel = _iologic_bel(typ, parms, fclk)
     attr_vals = device.common_iologic_handler(bel)
     if device_cls is GW5AST_138C:
         attr_vals += (device.get_out_iologic_attrs(bel) if "OUTMODE" in parms
@@ -250,6 +254,35 @@ def test_gw5ast138c_iologic_emits_gsr_only_on_opt_in():
     opted_in = dict(_emitted_attrs(GW5AST_138C, "IDDR",
                                    {"INMODE": "IDDRX1", "GSREN": "TRUE"}))
     assert opted_in["GSR"] == "ENGSR"
+
+
+def test_gw5ast138c_iologic_carries_txclk_pol_as_its_own_attribute():
+    """MEASURED (`P3.T13`): two vendor `OSER4` bitstreams differing in nothing
+    but `TXCLK_POL` differ by exactly one fuse, `(8,125)`, decoded as the
+    IOLOGIC attribute `TXCLK_POL=1`.  The pre-5A handler moved the parameter
+    to `TSHX`, which this die's table does not spend a bit on, so the
+    polarity never reached the bitstream at all."""
+    from apycula.gowin_pack import GW5AST_138C
+
+    default = dict(_emitted_attrs(GW5AST_138C, "OSER4", {"OUTMODE": "ODDRX2"}))
+    assert "TXCLK_POL" not in default and "TSHX" not in default
+    inverted = dict(_emitted_attrs(GW5AST_138C, "OSER4",
+                                   {"OUTMODE": "ODDRX2", "TXCLK_POL": "1"}))
+    assert inverted["TXCLK_POL"] == "1"
+    assert "TSHX" not in inverted
+
+
+def test_gw5ast138c_iologic_carries_hwl_as_its_own_attribute():
+    """`HWL` is attribute 117 on the Arora V families, not the pre-5A
+    `UPDATE=SAME`."""
+    from apycula.gowin_pack import GW5AST_138C
+
+    default = dict(_emitted_attrs(GW5AST_138C, "OSER4", {"OUTMODE": "ODDRX2"}))
+    assert "HWL" not in default and "UPDATE" not in default
+    held = dict(_emitted_attrs(GW5AST_138C, "OSER4",
+                               {"OUTMODE": "ODDRX2", "HWL": "true"}))
+    assert held["HWL"] == "TRUE"
+    assert "UPDATE" not in held
 
 
 def test_gw5a_25a_iologic_handler_untouched():
@@ -341,40 +374,60 @@ def _rows(slug):
     return [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="MEASURED open row: the vendor builds an OSER4 on this die and the "
-           "open flow cannot, because the IOLOGIC FCLK wire has no driver in "
-           "the 138C chipdb (db.tiles[245].pips has no FCLK key, "
-           "db.io2hclk == {}) -- nextpnr fails the route and router1 then "
-           "throws out of dict::at(). Two of P3.T13's eight oracle runs were "
-           "spent and the batch stopped rather than record six more aborted "
-           "rows. The fix is a chipdb io2hclk entry plus a database rebuild "
-           "plus 25A-style FCLKSEL* emission, escalated in "
-           "$OTC/evidence/oser/summary.md. Strict, so this fails the day the "
-           "row closes.")
 def test_oser_rows_e1():
-    """The output-serialiser row is closed at `E1` over its whole sweep."""
+    """The output-serialiser row is closed at `E1` (`P3.T13`).
+
+    Five of the six points are `E1` `verdict: ok`; `ovideo-default` is the
+    one exception and has its own test, because "one point short" must not be
+    something the suite can drift into silently.
+    """
     rows = _rows(_OSER)
     if rows is None:
         pytest.skip("evidence/oser/runs.jsonl not written yet")
-    assert len(rows) == 8
+    assert len(rows) == 6
     good = [r for r in rows if r["level"] == "E1" and r["verdict"] == "ok"]
-    assert len(good) >= 7
+    assert len(good) == 5
+    assert {r["sweep"]["POINT"] for r in rows} - {
+        r["sweep"]["POINT"] for r in good} == {"ovideo-default"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="MEASURED open row: the vendor builds an OSER4 on this die and the "
-           "open flow cannot, because the IOLOGIC FCLK wire has no driver in "
-           "the 138C chipdb (db.tiles[245].pips has no FCLK key, "
-           "db.io2hclk == {}) -- nextpnr fails the route and router1 then "
-           "throws out of dict::at(). Two of P3.T13's eight oracle runs were "
-           "spent and the batch stopped rather than record six more aborted "
-           "rows. The fix is a chipdb io2hclk entry plus a database rebuild "
-           "plus 25A-style FCLKSEL* emission, escalated in "
-           "$OTC/evidence/oser/summary.md. Strict, so this fails the day the "
-           "row closes.")
+def test_oser_rows_have_no_set_level_difference():
+    """Every point matches the vendor on cells, attributes and connections --
+    including the one that does not reach `E1`."""
+    rows = _rows(_OSER)
+    if rows is None:
+        pytest.skip("evidence/oser/runs.jsonl not written yet")
+    for row in rows:
+        counts = row["diff_count"]
+        assert (counts["cells"], counts["attrs"], counts["conns"]) == (0, 0, 0), \
+            row["run_id"]
+        assert not row["unexplained_bits"], row["run_id"]
+
+
+def test_oser_ovideo_is_open_on_the_decode_check_alone():
+    """MEASURED: an `OVIDEO`'s `OUTMODE` fuses decode back as value id 74
+    (`LVDSOUT`), which cannot be aliased without renaming a genuine
+    differential output on the GW5A-25A -- so `c1` cannot name the cell while
+    `c2` and every set-level count are clean."""
+    rows = _rows(_OSER)
+    if rows is None:
+        pytest.skip("evidence/oser/runs.jsonl not written yet")
+    row = next(r for r in rows if r["sweep"]["POINT"] == "ovideo-default")
+    assert row["decode_check"]["c1"] == "mismatch"
+    assert row["decode_check"]["c2"] == "ok"
+
+
+def test_oser_lane_is_pinned_in_both_flows():
+    """`D107`: the HCLK lane is a matched term, so no point may carry a
+    `§5.3` mask entry for the fast-clock selection."""
+    rows = _rows(_OSER)
+    if rows is None:
+        pytest.skip("evidence/oser/runs.jsonl not written yet")
+    for row in rows:
+        assert not any("FCLKSEL" in str(b) for b in row["unexplained_bits"]), \
+            row["run_id"]
+
+
 def test_oser_widths_covered():
     """All four widths of the family are measured, not just the two the
     parameter sweep can move."""
@@ -399,13 +452,38 @@ def test_oser_no_mem_variants_touched():
 
 
 def test_ides_rows_e1():
-    """The input-deserialiser row is closed at `E1` over its whole sweep."""
+    """The input-deserialiser row reaches `E1` on its whole sweep (`P3.T14`).
+
+    Every point matches the vendor on cells and attributes and passes both
+    decode checks; every point still differs on `conns`, all of it inside the
+    pad tile, which is the `Q0`/`Q1` fabric-wire question the `ODDR`/`IDDR`
+    row left open and this row now measures at three widths.  The assertion
+    is written so that closing that item makes this test fail rather than
+    quietly pass.
+    """
     rows = _rows(_IDES)
     if rows is None:
         pytest.skip("evidence/ides/runs.jsonl not written yet")
     assert len(rows) == 6
-    good = [r for r in rows if r["level"] == "E1" and r["verdict"] == "ok"]
-    assert len(good) >= 5
+    assert all(r["level"] == "E1" for r in rows)
+    for row in rows:
+        counts = row["diff_count"]
+        assert (counts["cells"], counts["attrs"]) == (0, 0), row["run_id"]
+        assert row["decode_check"] == {"c1": "ok", "c2": "ok"}, row["run_id"]
+        assert counts["conns"] > 0, (
+            row["run_id"], "conns closed -- update the row and this test")
+
+
+def test_ides_input_fclk_selection_is_not_fuse_backed():
+    """MEASURED (`P3.T14`): no vendor input bitstream sets `FCLKSEL*` or
+    `WRFCLKSEL`, where the output path sets three on the same tile type -- so
+    the GW5A-25A's `FCLKSEL5`/`6`/`7` emission is correctly absent here."""
+    from apycula.gowin_pack import GW5AST_138C
+
+    attrs = dict(_emitted_attrs(GW5AST_138C, "IDES4", {"INMODE": "IDDRX2"},
+                                fclk="SPINE12"))
+    assert not [a for a in attrs if a.startswith("FCLKSEL")]
+    assert "WRFCLKSEL" not in attrs
 
 
 def _generated_periods(shape_module, point, tmp_path):
@@ -456,15 +534,62 @@ def test_gearbox_shapes_hold_no_fabric_cell(tmp_path):
 
 
 def test_gearbox_shapes_pin_their_divider_in_both_flows(tmp_path):
-    """The `PCLK` net ends on the scoped tile, so a freely placed `CLKDIV`
-    would give it two identities; both flows have to place it."""
+    """One `INS_LOC` line reaches both `.cst` files (`D107`).
+
+    The `PCLK` net ends on the scoped tile, so a freely placed `CLKDIV` would
+    give it two identities -- and the divider consumes its lane's HCLK wire,
+    so the same line is what pins the lane the gearbox's `FCLK` lands on.  It
+    therefore has to survive into the **open-flow** copy of the constraints,
+    which is exactly what it did not do while the reader took `SIDE[0|1]`
+    only."""
     from fuzz.gw5ast138c.harness import gen
-    from fuzz.gw5ast138c.shapes import io_des, io_ser
+    from fuzz.gw5ast138c.shapes import _io_base, io_des, io_ser
+    line = 'INS_LOC "pclk_div" %s;' % _io_base.GEARBOX_CLKDIV_INS_LOC
     for module in (io_ser, io_des):
         spec = module.SPEC
         point = spec.baseline_value
-        assert "pclk_div" in gen.ins_loc_of(spec, point)
-        assert '(* BEL = "X117Y108/CLKDIV_0" *)' in spec.rtl(spec, point)
+        assert gen.ins_loc_of(spec, point)["pclk_div"] == \
+            _io_base.GEARBOX_CLKDIV_INS_LOC
+        assert line in gen.render_cst(spec, point)
+        assert line in gen.render_cst(spec, point, with_ins_loc=False)
+        # no second, flow-private placement: a `BEL` attribute here would let
+        # the two flows be pinned to different lanes without anyone noticing
+        assert "(* BEL" not in spec.rtl(spec, point)
+
+
+def test_gearbox_shapes_sit_in_the_block_they_pin(db_138c):
+    """A `CLKDIV` pins the lane of *its own* block, so a gearbox served by a
+    different block would be unpinned however the divider is placed."""
+    from apycula.chipdb import _gw5a_hclk_locs
+    from fuzz.gw5ast138c.shapes import _io_base, io_des, io_ser
+
+    block_cell = (_io_base.GEARBOX_HCLK_BLOCK_XY[1],
+                  _io_base.GEARBOX_HCLK_BLOCK_XY[0])
+    blocks = _gw5a_hclk_locs[DEVICE]
+    idx = [i for i, cell in blocks.items() if tuple(cell) == block_cell]
+    assert len(idx) == 1, "the pinned CLKDIV names no HCLK block of this die"
+    served = {tuple(c) for c in db_138c.io2hclk[idx[0]]}
+    for module in (io_ser, io_des):
+        # a ScopeSpec tile is (x, y) = (col, row); io2hclk is keyed (row, col)
+        x, y = module.SCOPE_TILES[0]
+        assert (y, x) in served, (module.__name__, (y, x))
+
+
+def test_gearbox_scope_is_the_pad_cell_in_himbaechel_order(db_138c):
+    """A scope tile is `(x, y)`, and a shape that wrote `(row, col)` scopes a
+    different tile entirely -- MEASURED here as `cell vendor=DFF
+    open=<absent>` on a tile neither design's gearbox is in."""
+    import json
+    from fuzz.gw5ast138c.shapes import io_des, io_ser
+
+    path = _otc_path("iologic", "pin-hclk-138c.json")
+    if path is None:
+        pytest.skip("pin-hclk-138c.json not reachable from this checkout")
+    pins = {p["ball"]: p for p in json.load(open(path, encoding="utf-8"))["pins"]}
+    for module, ball in ((io_ser, io_ser.OSER_BALL), (io_des, io_des.IDES_BALL)):
+        pin = pins[ball]
+        assert module.SCOPE_TILES == ((pin["col"], pin["row"]),), ball
+        assert pin["half"] == "A", ball
 
 
 def test_gearbox_shapes_place_the_iologic_on_an_a_half_ball():
