@@ -3121,6 +3121,15 @@ def fse_iologic(device, fse, ttyp):
         return bels
     if device in {'GW5A-25A'} and ttyp in {48, 51, 263, 392, 399}:
         return bels
+    # These 138C tile types carry a shortval 21/22 record but sit under no
+    # bonded pin of any package this die ships in, and hold no IOB bel once
+    # fill_GW5A_io_bels has consolidated the differential pairs: IOLOGIC there
+    # would have no buffer to drive and no way into a .cst.
+    if device in {'GW5AST-138C'} and ttyp in {
+            60, 178, 179, 182, 183, 184, 185, 220, 239, 240, 242, 244, 246,
+            248, 250, 252, 253, 254, 255, 274, 278, 279, 280, 281, 282, 283,
+            284, 285, 374, 378, 379, 380, 381}:
+        return bels
     if 'shortval' in fse[ttyp].keys():
         if 21 in fse[ttyp]['shortval'].keys():
             bels['IOLOGICA'] = Bel()
