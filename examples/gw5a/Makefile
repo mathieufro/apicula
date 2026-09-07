@@ -26,7 +26,8 @@ primer25k: \
 	oser10-clkdiv-tlvds-primer25k.fs
 
 tangmega138k: \
-	big-shift-tangmega138k.fs attosoc-tangmega138k.fs uart-message-tangmega138k.fs
+	big-shift-tangmega138k.fs attosoc-tangmega138k.fs uart-message-tangmega138k.fs \
+	ae350-emb-tcm-tangmega138k.fs dualpin-tangmega138k.fs
 
 tangconsole138k: \
 	uart-message-tangmega138k.fs
@@ -90,6 +91,34 @@ attosoc-tangmega138k-synth.json: attosoc/attosoc.v attosoc/picorv32.v
 
 uart-message-tangmega138k-synth.json: uart-message-tangconsole138k.v
 	$(YOSYS) -D INV_BTN=0 -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+# The AE350 hard SoC.  There is deliberately no companion AE350_RAM example:
+# that block is not a resource gowin_pack can place on this device, so no
+# bitstream can express it and no example could be built.
+# The design uses only ordinary I/O, so the shared place-and-route and pack
+# rules above serve it unchanged -- in particular the SSPI pins stay with the
+# configuration controller, which is where an AE350 finds its boot flash.
+ae350-emb-tcm-tangmega138k-synth.json: ae350-emb-tcm.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+# The dual-purpose pins.  gowin_pack accepts eight of them; the six the pack
+# line below asks for are every one this device honours.  The two left out are
+# refusals, not oversights:
+#   --reconfign_as_gpio  the vendor tools decline RECONFIG_N on this device, so
+#                        there is no bitstream to reproduce;
+#   --i2c_as_gpio        the device has no I2CCFG block, so nextpnr emits no
+#                        I2C pin-configuration cell and gowin_pack rejects the
+#                        flag as disagreeing with it.
+# sspi_as_gpio has to be given to both tools: it is the one option nextpnr also
+# carries, and gowin_pack checks that the two agree.
+dualpin-tangmega138k-synth.json: dualpin.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+dualpin-tangmega138k.json: dualpin-tangmega138k-synth.json tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tangmega138k.cst --vopt sspi_as_gpio
+
+dualpin-tangmega138k.fs: dualpin-tangmega138k.json
+	gowin_pack --jtag_as_gpio --sspi_as_gpio --mspi_as_gpio --ready_as_gpio --done_as_gpio --cpu_as_gpio -d GW5AST-138C -o $@ $<
 
 # ============================================================
 # TangConsole138k
