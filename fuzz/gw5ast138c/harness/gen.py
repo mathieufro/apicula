@@ -142,6 +142,34 @@ def ins_loc_of(spec, sweep_value=None):
     return dict(value or {})
 
 
+def _per_point(value, spec, sweep_value):
+    """Resolve a `ShapeSpec` tool-option field for one sweep point.
+
+    A plain sequence is the same for every point; a callable
+    `(spec, sweep_value) -> sequence` is what lets a shape sweep the option
+    itself, exactly as `ins_loc_of` lets one sweep the placement.
+    """
+    if callable(value):
+        value = value(spec, sweep_value)
+    return list(value or ())
+
+
+def gwsh_options_of(spec, sweep_value=None):
+    """The `set_option` arguments the vendor run gets for one sweep point."""
+    return _per_point(spec.extra_gwsh_options, spec, sweep_value)
+
+
+def pack_flags_of(spec, sweep_value=None):
+    """The `gowin_pack` flags the open run gets for one sweep point."""
+    return _per_point(spec.extra_pack_flags, spec, sweep_value)
+
+
+def nextpnr_vopts_of(spec, sweep_value=None):
+    """The `nextpnr-himbaechel --vopt` settings for one sweep point."""
+    return _per_point(getattr(spec, "extra_nextpnr_vopts", ()), spec,
+                      sweep_value)
+
+
 def assert_cst_defaults(spec, sweep_value=None):
     """Raise on the first violation; return `[]` when the spec is clean.
 

@@ -360,8 +360,9 @@ def real_runner(run_id, design_dir, shape, sweep_value, level):
     gen.run(spec, design_dir, sweep_value)
 
     started = time.time()
-    oracle_result = oracle.run_oracle(design_dir, top_module=spec.top_module,
-                                      extra_options=spec.extra_gwsh_options)
+    oracle_result = oracle.run_oracle(
+        design_dir, top_module=spec.top_module,
+        extra_options=gen.gwsh_options_of(spec, sweep_value))
     oracle_fragment = oracle.evidence_row(
         oracle_result, run_id, primitive=spec.primitive, shape=shape)
     oracle_fragment["level"] = level
@@ -373,11 +374,10 @@ def real_runner(run_id, design_dir, shape, sweep_value, level):
             notes=f"oracle pre-flight: {oracle_result['preflight'].reason}",
             wall_clock_s={"oracle": time.time() - started})
 
-    open_result = openflow.run_openflow(design_dir,
-                                        top_module=spec.top_module,
-                                        extra_gpio=spec.extra_pack_flags,
-                                        vopts=getattr(
-                                            spec, "extra_nextpnr_vopts", ()))
+    open_result = openflow.run_openflow(
+        design_dir, top_module=spec.top_module,
+        extra_gpio=gen.pack_flags_of(spec, sweep_value),
+        vopts=gen.nextpnr_vopts_of(spec, sweep_value))
     wall = {"oracle": oracle_result["wall_clock_s"],
             "total": time.time() - started}
     open_logs = [step["log_path"] for step in open_result["steps"]
