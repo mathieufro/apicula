@@ -4907,17 +4907,20 @@ _AE350_SOC_CLOCK_PORTS = frozenset(
 #: tile's `LSR` line, which is what fixes them within the head of the input map.
 _AE350_SOC_RESET_PORTS = frozenset({'POR_N', 'HW_RSTN'})
 
-#: Die `(row, col)` of the `AE350_SOC` bel: row 0, first column of the band.
+#: Die `(row, col)` of the `AE350_SOC` bel. Not a band bound: the block's port
+#: taps span row 0 columns 145-181, and `Ae350SocOuts` also names columns 22,
+#: 23 and 87 -- clock-spine taps far to the left of them, as bound as any other
+#: bit. The map of record is `evidence/ae350/portmap-reconciled-138c.md`; there
+#: is deliberately no column filter anywhere in this file, because one would
+#: drop those three real taps to no purpose.
 _AE350_SOC_ANCHOR = (0, 159)
 
-#: The one die-column band the block reads from and drives into, measured.
-#: Kept as documentation of the footprint; it is deliberately *not* a filter on
-#: the port map. `Ae350SocOuts` also names columns 22, 23 and 87 -- clock-spine
-#: taps far to the left of the band -- and those bits are as bound as any
-#: other, so a band filter would drop three real taps to no purpose.
-_AE350_SOC_BAND_COLS = range(159, 181)
-
-#: Tile types carrying the block's configuration bits. They hold no ports.
+#: Tile types the block's port columns pass through. They are ordinary CLS
+#: logic tiles and carry no configuration of the block's own -- MEASURED
+#: (`evidence/ae350/fuse-set-138c.md`): over five AE350 bitstreams and one
+#: AE350-free control, no bit of them that some chipdb table does not already
+#: model is set. They are marked so a reader of `extra_func` can find the
+#: footprint, never as a fuse source.
 _AE350_SOC_CONFIG_TTYPS = (224, 228)
 
 #: An absent field in a `gw5aStuff` record: these tables are unsigned, so the

@@ -31,11 +31,16 @@ RESISTING_BITS = ('DDR_HWDATA10', 'GPIO_OE11', 'GPIO_OUT12')
 SPINE_COLS = (22, 23, 87)
 
 
-def test_ae350_anchor_is_the_first_column_of_the_measured_band():
-    """The bel follows the measurement, not the refuted split-band reading."""
-    assert chipdb._AE350_SOC_ANCHOR == (0, chipdb._AE350_SOC_BAND_COLS[0])
-    assert chipdb._AE350_SOC_BAND_COLS[0] == 159
-    assert chipdb._AE350_SOC_BAND_COLS[-1] == 180
+def test_ae350_anchor_is_the_measured_one_and_nothing_filters_by_column():
+    """The bel follows the measurement, and no column bound is left to drift.
+
+    A band constant would have to be one of two incompatible things -- the
+    anchor's own column or the span of the port taps -- and either way the
+    three clock-spine taps at columns 22, 23 and 87 fall outside it.  There is
+    no such constant.
+    """
+    assert chipdb._AE350_SOC_ANCHOR == (0, 159)
+    assert not hasattr(chipdb, '_AE350_SOC_BAND_COLS')
 
 
 def _live(record):
