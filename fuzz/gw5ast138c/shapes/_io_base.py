@@ -316,6 +316,7 @@ class IoShape:
             top_module=self.top_module,
             ins_loc=dict(self.ins_loc),
             clocks=dict(self.clocks),
+            diff_pads=tuple(self.diff_pads),
         )
         self.assert_envelope(spec)
         return spec

@@ -185,8 +185,20 @@ def assert_cst_defaults(spec, sweep_value=None):
 
     Returned for symmetry with the Hardware Gate's collector: a clean spec
     yields an empty error list, a dirty one never returns at all.
+
+    **Differential exemption (`P3.T23`).** `spec.diff_pads` names the ports
+    that are one half of a differential pad pair (`TLVDS`/`ELVDS`).  Such a
+    pad takes its electrical standard from the buffer primitive, never from
+    an `IO_TYPE` string, which is how the vendor's own board `.cst` spells
+    one (`tang_mega_138K_pins.cst`: `PULL_MODE`/`DRIVE`, no `IO_TYPE`).  A
+    port named there is exempt from rule (a)'s `IO_TYPE`-presence check and
+    from rule (b) entirely; it still owes a `BANK_VCCIO` entry (rule (a)'s
+    other half) and is still checked by rules (c)-(f) like any other pin --
+    the exemption narrows what "clean" means for a differential pad, it does
+    not turn the checks off.
     """
     for port, pin in spec.pins.items():
+        is_diff_pad = port in getattr(spec, "diff_pads", ())
         # (d) no config-role pin, ever -- checked before anything else so a
         # config pin never even gets a chance to look like a clean I/O.
         role = config_role_of_loc(pin.loc)
@@ -213,20 +225,24 @@ def assert_cst_defaults(spec, sweep_value=None):
                     % (port, pin.loc, pin.io_type, pin.bank,
                        "/".join(str(b) for b in DDR_BANKS))
                 )
-        # (a) every used pin carries IO_TYPE
-        if not pin.io_type:
+        # (a) every used pin carries IO_TYPE -- except one half of a
+        # differential pad, which carries none by vendor convention.
+        if not pin.io_type and not is_diff_pad:
             raise CstDefaultError(
                 "pin %r at %s (bank %d) has no IO_TYPE -- every used pin "
                 "carries one (D20a, spec.md 7.10(5))" % (port, pin.loc, pin.bank)
             )
-        # (a) every bank in use carries BANK_VCCIO
+        # (a) every bank in use carries BANK_VCCIO -- differential pads owe
+        # this too; only the IO_TYPE half of the rule is exempt.
         if pin.bank not in spec.bank_vccio:
             raise CstDefaultError(
                 "pin %r at %s is in bank %d, which has no BANK_VCCIO in the "
                 "shape's bank_vccio table (D20a)" % (port, pin.loc, pin.bank)
             )
-        # (b) non-DDR pins are LVCMOS33 with PULL_STRENGTH=MEDIUM
-        if pin.bank not in DDR_BANKS:
+        # (b) non-DDR pins are LVCMOS33 with PULL_STRENGTH=MEDIUM -- a
+        # differential pad names no IO_TYPE at all, so this rule does not
+        # apply to it.
+        if pin.bank not in DDR_BANKS and not is_diff_pad:
             if pin.io_type.upper() != DEFAULT_IO_TYPE:
                 raise CstDefaultError(
                     "pin %r at %s (bank %d): IO_TYPE=%s, expected %s on a "

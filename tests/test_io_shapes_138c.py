@@ -160,21 +160,35 @@ def test_io_shape_passes_the_harness_cst_assertion(name):
         assert gen.assert_cst_defaults(spec, point) == []
 
 
-def test_diff_io_pads_have_no_iotype_and_the_harness_refuses_them():
-    """The named gap `P3.T23` opens with.
+def test_diff_io_pads_pass_the_harness_cst_assertion_via_the_diff_exemption():
+    """Closes the named gap `P3.T23` opened with.
 
     `gen.assert_cst_defaults` rule (a) demands an `IO_TYPE` on every used pin
-    and rule (b) admits only `LVCMOS33` on a non-DDR pin.  Neither has a
-    differential exemption, and `harness/**` is frozen for this phase, so the
-    differential shape -- spelled the way the vendor's own board constraints
-    spell a TMDS pair, with no `IO_TYPE` -- is refused today.  This test
-    fails the moment the exemption lands, which is the reminder to delete it.
+    and rule (b) admits only `LVCMOS33` on a non-DDR pin. `diff_io`'s pads
+    carry no `IO_TYPE` -- spelled the way the vendor's own board constraints
+    spell a TMDS pair -- and are named in `spec.diff_pads`, which is what
+    exempts them from both rules while every other pin stays fully checked.
     """
     spec = diff_io.SPEC
     assert spec.pins["pad_p"].io_type is None
     assert spec.pins["pad_n"].io_type is None
+    assert set(spec.diff_pads) == {"pad_p", "pad_n"}
+    for point in spec.sweep_values:
+        assert gen.assert_cst_defaults(spec, point) == []
+
+
+def test_single_ended_pad_without_iotype_is_still_refused():
+    """The differential exemption is narrow: a single-ended pin (not named in
+    `spec.diff_pads`) with no `IO_TYPE` must still trip rule (a), exactly as
+    before the exemption landed."""
+    spec = io_basic.SPEC
+    port = next(iter(spec.pins))
+    bare_pins = dict(spec.pins)
+    bare_pins[port] = PinSpec(**{**vars(bare_pins[port]), "io_type": None})
+    bare_spec = dataclasses.replace(spec, pins=bare_pins)
+    assert not bare_spec.diff_pads
     with pytest.raises(gen.CstDefaultError):
-        gen.assert_cst_defaults(spec, spec.baseline_value)
+        gen.assert_cst_defaults(bare_spec, bare_spec.baseline_value)
 
 
 # -- per-shape properties ---------------------------------------------------

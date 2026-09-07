@@ -116,3 +116,10 @@ class ShapeSpec:
     #: option is cross-checked by `gowin_pack.get_PINCFG_fuses`, so a shape
     #: that sets one on the packer sets it here too or the pack step raises.
     extra_nextpnr_vopts: list = field(default_factory=list)
+    #: Ports that are one half of a differential pad pair (`TLVDS`/`ELVDS`).
+    #: A differential pad's electrical standard comes from the buffer
+    #: primitive, never from `IO_TYPE`, which is how the vendor's own board
+    #: `.cst` spells a TMDS pair.  `harness/gen.assert_cst_defaults` reads
+    #: this to narrow its `IO_TYPE` checks for exactly these ports (`P3.T23`);
+    #: every other pin is unaffected.
+    diff_pads: tuple = ()
