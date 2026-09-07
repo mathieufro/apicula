@@ -973,6 +973,32 @@ class BankDesc:
         return f'|BankDesc| x:{self.x}, y:{self.y}, attrs:{self.attrs}, has_outputs:{self.has_outputs}, has_lvds_outputs:{self.has_lvds_outputs}, lvds_BANK_VCCIO:{self.lvds_BANK_VCCIO}, set_attr_bels:{self.set_attr_bels}, bels:{self.bels}'
 
 ################################################################
+def c_static_dly_bits(parms: dict[str, str]) -> str:
+    """ The IODELAY static delay step of a cell, as eight bits, MSB first.
+
+    The primitive's parameter is ``C_STATIC_DLY`` -- that is the spelling in
+    `UG304-1.3.8E` Table 4-48, in yosys' ``cells_xtra_gw5a.v`` and in the
+    ``constids.inc`` name nextpnr emits.  This packer read ``C_STATIC_DELAY``
+    instead, a name nothing writes, so the step never reached it on any
+    device and every delay line was packed at zero.  The old spelling is still
+    accepted so that a netlist written against it keeps its meaning.
+
+    nextpnr passes the value through as the netlist holds it, which is a bit
+    string for a parameter that came from a vector and a decimal string for
+    one written as an integer; both are read here, bit string first.
+    """
+    value = parms.get('C_STATIC_DLY', parms.get('C_STATIC_DELAY'))
+    if value is None:
+        return '0' * 8
+    if isinstance(value, int):
+        step = value
+    else:
+        text = str(value).strip()
+        step = int(text, 2) if set(text) <= set('01') else int(text, 0)
+    if not 0 <= step <= 255:
+        raise Exception(f"IODELAY C_STATIC_DLY {step} is outside the 0..255 the primitive takes")
+    return format(step, '08b')
+
 class Device:
     """ Base chip. The fuses for a specific chip are set in a class that inherits from this one. """
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
@@ -2113,27 +2139,48 @@ class Device:
         main_cell_inmode = cell.parms.get('INMODE')
         return IologicBelDesc(bel.x, bel.y, bel.idx_str, bel.cell, fclk, main_cell_outmode, main_cell_inmode)
 
-    def handle_iodelay(self, bel: IologicBelDesc) -> list[AttrVal]:
-        """ Iodelay is a part of iologic """
-        attr_vals = []
+    def iodelay_enable_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The attributes that switch a delay line into the iologic path.
+
+        Empty when the cell has no delay line, which is what tells the two
+        `handle_iodelay*` callers there is nothing further to pack.
+        """
         iodelay = bel.cell.attrs.get('IODELAY')
         if iodelay == 'IN':
-            attr_vals.append(AttrVal("INDEL", "ENABLE"))
+            attr_vals = [AttrVal("INDEL", "ENABLE")]
         elif iodelay == 'OUT':
-            attr_vals.append(AttrVal("OUTDEL", "ENABLE"))
+            attr_vals = [AttrVal("OUTDEL", "ENABLE")]
         else:
-            return attr_vals
+            return []
         attr_vals.append(AttrVal("CLKOMUX", "ENABLE"))
         attr_vals.append(AttrVal("IMARG", "ENABLE"))
         attr_vals.append(AttrVal("INDEL_0", "ENABLE"))
         attr_vals.append(AttrVal("INDEL_1", "ENABLE"))
-
-        c_static_delay = bel.cell.parms.get('C_STATIC_DELAY')
-        if c_static_delay:
-            for i in range(1, 8):
-                if c_static_delay[-i] == '1':
-                    attr_vals.append(AttrVal(f"DELAY_DEL{i - 1}", "1"))
         return attr_vals
+
+    def handle_iodelay(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ Iodelay is a part of iologic """
+        attr_vals = self.iodelay_enable_attrs(bel)
+        if not attr_vals:
+            return attr_vals
+        return attr_vals + self.delay_step_attrs(c_static_dly_bits(bel.cell.parms))
+
+    #: Delay steps the `IOLOGIC` shortval table can express: `DELAY_DEL0` is
+    #: attribute 32 and `DELAY_DEL6` attribute 38, and 39 is `IMON`
+    #: (`attrids.iologic_attrids`).  There is no `DELAY_DEL7`, so a delay step
+    #: with bit 7 set has no representation and must not be silently truncated.
+    DELAY_STEP_BITS = 7
+
+    def delay_step_attrs(self, bits: str) -> list[AttrVal]:
+        """ The `DELAY_DEL*` attributes for one static delay step.
+
+        `bits` is the step as eight characters, most significant first.
+        """
+        if bits[-self.DELAY_STEP_BITS - 1] == '1':
+            raise Exception(f"IODELAY delay step 0b{bits} needs DELAY_DEL{self.DELAY_STEP_BITS},"
+                            " which the IOLOGIC attribute table does not have")
+        return [AttrVal(f"DELAY_DEL{i}", "1")
+                for i in range(self.DELAY_STEP_BITS) if bits[-i - 1] == '1']
 
     def common_iologic_handler(self, bel: IologicBelDesc) -> list[AttrVal]:
         attr_vals = []
@@ -5899,6 +5946,40 @@ class GW5A(Device):
         return super().__repr__()  + f"| extra_slots:{self.extra_slots}, _no_pullup_cfgs:{self._no_pullup_cfgs} "
 
 ################################################################
+    #==============================
+    #========== Iologic
+    #==============================
+    def handle_iodelay_gw5a(self, bel: IologicBelDesc, *, c_static_dly: int | None = None) -> list[AttrVal]:
+        """ Iodelay on the Arora V port set.
+
+        `UG304-1.3.8E` Table 4-47 gives this family a different delay line
+        from the one `Device.handle_iodelay` packs: the ports are
+        `DI, SDTAP, VALUE, DLYSTEP[7:0], DF, DO` with no `SETN` (`D23`), and
+        Table 4-48 adds the parameters `DYN_DLY_EN` and `ADAPT_EN`.
+
+        Only the static mode is modelled.  The enables of the other two modes
+        have no measured fuse on this family -- the `IOLOGIC` attribute table
+        has candidates (`DYNAMICCIBCONTROL`, `IODELAY_CIB`, `DELAYCHAIN`) but
+        nothing ties one of them to `DYN_DLY_EN` or `ADAPT_EN`, and a guessed
+        fuse is worse than a refusal -- so asking for either is refused by
+        name rather than packed as a static delay that silently does not move.
+
+        `c_static_dly` overrides the cell's own parameter; the DDR3 PHY sets
+        the DQ delay from its calibration rather than from the netlist.
+        """
+        attr_vals = self.iodelay_enable_attrs(bel)
+        if not attr_vals:
+            return attr_vals
+        for parm in ('DYN_DLY_EN', 'ADAPT_EN'):
+            if str(bel.cell.parms.get(parm, 'FALSE')).upper().strip('"') == 'TRUE':
+                raise Exception(f"IODELAY {parm}=TRUE on {self.device}: dynamic and adaptive"
+                                " delay have no measured fuse, only static delay is supported")
+        if c_static_dly is None:
+            bits = c_static_dly_bits(bel.cell.parms)
+        else:
+            bits = c_static_dly_bits({'C_STATIC_DLY': c_static_dly})
+        return attr_vals + self.delay_step_attrs(bits)
+
 class GW5A_25A(GW5A):
     """ GW5A-25A chip. Tangprimer25k board """
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
@@ -6955,6 +7036,18 @@ class GW5AST_138C(GW5A):
         if bel.cell.parms.get('GSREN', 'FALSE') == 'TRUE':
             attr_vals.append(AttrVal('GSR', 'ENGSR'))
         return attr_vals
+
+    def handle_iodelay(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ This die carries the Arora V delay line, not the pre-5A one.
+
+        The port set differs (`DLYSTEP[7:0]` in place of `SETN`, `D23`) and so
+        do the parameters, so the whole of `handle_iodelay` is replaced rather
+        than extended.  Routing it through the base
+        `common_iologic_handler`'s existing `self.handle_iodelay(bel)` call
+        keeps one -- and only one -- `common_iologic_handler` override on this
+        class, the one the GSR correction needs.
+        """
+        return self.handle_iodelay_gw5a(bel)
 
     def get_in_iologic_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
         """ The reset multiplexer of an IDDRC is inverting on this die.
