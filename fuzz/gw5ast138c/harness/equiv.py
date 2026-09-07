@@ -1885,6 +1885,33 @@ def _norm_param(value):
     return text
 
 
+def _param_values(value):
+    """Every number one parameter spelling can mean, as a set.
+
+    A parameter that came from a Verilog vector reaches the netlist as the bit
+    string yosys wrote -- `C_STATIC_DLY=1` on a 32-bit port is thirty-one
+    zeroes and a one -- while `gowin_unpack` recovers the attribute's value,
+    `1`.  Comparing those as text makes every enumerated attribute wider than
+    one bit look like a mismatch.  A spelling that is not a number at all
+    (`MODDRX1`, `ENABLE`) yields the empty set and is compared as text.
+    """
+    text = _norm_param(value)
+    values = set()
+    if re.fullmatch(r"[01]+", text):
+        values.add(int(text, 2))
+    if re.fullmatch(r"\d+", text):
+        values.add(int(text, 10))
+    return values
+
+
+def _params_agree(expected, recovered):
+    """Do the netlist's parameter and the decoded attribute mean the same?"""
+    if _norm_param(expected) == _norm_param(recovered):
+        return True
+    wanted, got = _param_values(expected), _param_values(recovered)
+    return bool(wanted and got and wanted & got)
+
+
 def _clkdiv2_recovered_via_chain(site_cells, z):
     """Does this site decode a `CLKDIV` at `DIV_MODE=2` **on lane `z`**? (`D103`)
 
@@ -2052,7 +2079,7 @@ def decode_check_c1(pnr_cells, netlist):
             continue
         have = dict(canon_attr(f) for f in attrs)
         for name, value in _expected_attrs(cell).items():
-            if name in have and _norm_param(have[name]) != _norm_param(value):
+            if name in have and not _params_agree(value, have[name]):
                 attr_mismatch.append({
                     "name": cell["name"], "attr": name,
                     "expected": value, "recovered": str(have[name])})

@@ -31,7 +31,9 @@ def _chipdb_path():
 
 CHIPDB = _chipdb_path()
 
-#: What `GW5A.get_unused_io_attrvals` emits for an unused pin on this device.
+#: What `GW5A.get_unused_io_attrvals` emits for an unused pin -- the set this
+#: device's own class no longer inherits, kept here because subtracting its
+#: drive half from it is what names the bits a drive default can program.
 UNUSED_IO_ATTRVALS = (
     ("OPENDRAIN", "OFF"), ("IO_TYPE", "LVCMOS33"), ("DRIVE", "8"),
     ("DRIVE_LEVEL", "8"), ("PADDI", "PADDI"), ("PULLMODE", "NONE"),
@@ -123,14 +125,10 @@ def test_bank_pull_strength_matches_the_vendor_bit_for_bit(unpacked):
             assert want.get("PULL_STRENGTH") == got.get("PULL_STRENGTH"), name
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="P3.T26 refused:unused_pin_drive_default -- the packer programs "
-           "DRIVE/DRIVE_LEVEL on every unused pin and the vendor programs "
-           "neither. Fixing it changes a default on class GW5A and is an "
-           "owner-visible thermal decision, so this test states the defect "
-           "and flips the day it is fixed.")
 def test_unused_pin_carries_no_drive_the_vendor_does_not(unpacked):
+    """`D108`: this stated the `refused:unused_pin_drive_default` defect as a
+    strict `xfail` until `GW5AST_138C.get_unused_io_attrvals` dropped the two
+    drive attributes; it is an ordinary assertion now that it holds."""
     db, vendor, opened = unpacked
     offenders = []
     for row in range(db.rows):

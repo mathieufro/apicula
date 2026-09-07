@@ -7343,6 +7343,22 @@ dirlut = {'N': (1, 0),
           'E': (0, -1),
           'S': (-1, 0),
           'W': (0, 1)}
+
+#: The length-1 wires that are one node under two spellings.
+#:
+#: A tile's `EW10` is the same piece of metal its eastern neighbour calls
+#: `E111` and its western neighbour calls `W111`, and `SN10` is the same for
+#: the vertical pair; `..20` is the second such wire of each axis.  Both
+#: spellings appear as pip endpoints in the tile tables -- an `IOLOGIC` output
+#: leaves the pad tile on `EW10` and is picked up next door on `W111` -- so
+#: without this the two halves of one net get two root names and a net that is
+#: routed over such a wire decodes as two.  The table is `tracing`'s own
+#: `inter_aliases`, keyed here by the root name `wire2global` has already
+#: computed.
+intertile_aliases = {'E11': 'EW10', 'W11': 'EW10',
+                     'E12': 'EW20', 'W12': 'EW20',
+                     'N11': 'SN10', 'S11': 'SN10',
+                     'N12': 'SN20', 'S12': 'SN20'}
 def wire2global(row, col, db, wire):
     if wire in {'VCC', 'VSS'}:
         return wire
@@ -7370,7 +7386,7 @@ def wire2global(row, col, db, wire):
         direction = uturnlut[direction]
     # map cross wires to their origin
     #name = diaglut.get(direction+num, direction+num)
-    return f"R{rootrow}C{rootcol}_{direction}{num}"
+    return f"R{rootrow}C{rootcol}_{intertile_aliases.get(direction + num, direction + num)}"
 
 # row and col is zero-based
 def rc2tbrl_0(db, row, col, num = ''):

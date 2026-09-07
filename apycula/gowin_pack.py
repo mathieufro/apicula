@@ -647,7 +647,18 @@ class ChipDB:
         return get_longval_fuses(self.db, self.get_ttyp(x, y), av, f'IOB{idx_str}')
 
     def get_iologic_attr_val(self, attrval: AttrVal, av: set[tuple[int, int]]):
-        add_attr_val(self.db, 'IOLOGIC', av, attrids.iologic_attrids[attrval.attr], attrids.iologic_attrvals[attrval.val])
+        """ An `IOLOGIC` attribute-value pair, by name or by value id.
+
+        Most values have a name in `attrids.iologic_attrvals`, but an
+        enumerated attribute whose range is wider than the shipped table names
+        -- the Arora V static delay step, 255 values of which one is named --
+        can only be addressed by its id, exactly as `get_osc_attr_val` already
+        addresses the oscillator divider.
+        """
+        val = attrval.val
+        if isinstance(val, str):
+            val = attrids.iologic_attrvals[val]
+        add_attr_val(self.db, 'IOLOGIC', av, attrids.iologic_attrids[attrval.attr], val)
 
     def get_iologic_fuses(self, x: int, y: int, av: set[tuple[int, int]], idx_str: str) -> set[Coord]:
         return get_shortval_fuses(self.db, self.get_ttyp(x, y), av, f'IOLOGIC{idx_str}')
@@ -1837,6 +1848,13 @@ class Device:
         if val != 'OFF' and bel.cell.typ in {'IBUF', 'IOBUF', 'TLVDS_IBUF', 'TLVDS_IOBUF', 'ELVDS_IBUF', 'ELVDS_IOBUF'}:
             self.chipdb.get_iob_attr_val(AttrVal('DDR_DYNTERM', 'ON'), av)
 
+    #: IO attributes a device emits **only** when the design asks for them.
+    #: An attribute listed here has no default: leaving its fuse unprogrammed
+    #: is the device's own idle state, and inventing a value for it would
+    #: configure a pad the design said nothing about.  Empty on every device
+    #: whose defaults have been measured against the vendor's.
+    design_only_io_attrs: tuple[str, ...] = ()
+
     def set_io_attrvals(self, bel: IoBelDesc, default_attrs: list[tuple[str, str]], defaults_only = False) -> set[int]:
         """ Set IO attributes in addition to those specified in default. Or use only default. """
         lvds = bel.cell.typ[1:].startswith('LVDS')
@@ -1852,6 +1870,11 @@ class Device:
             if attr == 'SINGLERESISTOR':
                 self.set_input_resistor(val, bel, av)
             self.chipdb.get_iob_attr_val(AttrVal(attr, val), av)
+        if not defaults_only:
+            for attr in self.design_only_io_attrs:
+                val = bel.cell.attrs.get(attr)
+                if val:
+                    self.chipdb.get_iob_attr_val(AttrVal(attr, val), av)
         return av
 
     def set_iobuf_attrs(self, bel: IoBelDesc, av: set[int]):
@@ -5973,7 +5996,9 @@ class GW5A(Device):
         for parm in ('DYN_DLY_EN', 'ADAPT_EN'):
             if str(bel.cell.parms.get(parm, 'FALSE')).upper().strip('"') == 'TRUE':
                 raise Exception(f"IODELAY {parm}=TRUE on {self.device}: dynamic and adaptive"
-                                " delay have no measured fuse, only static delay is supported")
+                                " delay move six IOLOGIC attributes the shipped table does not"
+                                " name, so neither mode has an attributable fuse set;"
+                                " only static delay is supported")
         if c_static_dly is None:
             bits = c_static_dly_bits(bel.cell.parms)
         else:
@@ -7006,6 +7031,20 @@ class GW5AST_138C(GW5A):
         for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
             if self.chipdb.get_ttyp(x, y) in self.clock_bridge_ttypes:
                 self.clock_bridge_xy.add((x, y))
+        # An input's hysteresis IS programmed by the vendor on this device, on
+        # every one of the 114 used inputs of the `P3.T26` corpus that carries
+        # the attribute at all, and always `ON`.  `GW5A`'s inherited `NONE` is
+        # the zero code, so the open flow left every receiver without the
+        # Schmitt trigger the vendor gives it.
+        self.default_ibuf_attrs = [
+            (attr, 'ON' if attr == 'HYSTERESIS' else val)
+            for attr, val in self.default_ibuf_attrs]
+        # `SLEWRATE` moves out of the output defaults into
+        # `design_only_io_attrs`; see that attribute for the measurement.
+        for name in ('default_obuf_attrs', 'default_tbuf_attrs',
+                     'default_iobuf_attrs'):
+            setattr(self, name, [(attr, val) for attr, val
+                                 in getattr(self, name) if attr != 'SLEWRATE'])
 
     def reject_iologic_unsupported(self):
         """ D39 state (1): named refusal for any IOLOGIC cell on GW5AST-138C.
@@ -7068,6 +7107,62 @@ class GW5AST_138C(GW5A):
         class, the one the GSR correction needs.
         """
         return self.handle_iodelay_gw5a(bel)
+
+    def iodelay_enable_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The delay line's own enable, and nothing else.
+
+        MEASURED (`P3.T21`/`P3.T22`, 28 vendor bitstreams of one `IODELAY` on
+        `AA9`): the vendor's `IOLOGICA` carries `INDEL=ENABLE` -- fuse
+        (20, 81) of the pad tile -- and no `CLKOMUX`.  The inherited pre-5A
+        set adds `CLKOMUX`, `IMARG`, `INDEL_0` and `INDEL_1`; of those only
+        `CLKOMUX` costs a fuse here, (21, 54), and it is one of the seventeen
+        bits the open bitstream set on every delay point and the vendor's set
+        on none.  `CLKOMUX` is not lost by dropping it: an output gearbox
+        already gets it from `get_out_iologic_attrs`, where it is measured.
+
+        The output direction has no measured point -- this die's only
+        `IODELAY` evidence is on an input ball -- so `OUTDEL` is treated the
+        same way as `INDEL` by symmetry, which is recorded rather than
+        claimed as measured.
+
+        Two vendor attributes stay unemitted because they cannot be named:
+        `attrids` handle 98 decodes as `IOLOGIC_UNKNOWN91` and handle 118's
+        value is the delay step itself, which `delay_step_attrs` writes.
+        """
+        iodelay = bel.cell.attrs.get('IODELAY')
+        if iodelay == 'IN':
+            return [AttrVal('INDEL', 'ENABLE')]
+        if iodelay == 'OUT':
+            return [AttrVal('OUTDEL', 'ENABLE')]
+        return []
+
+    @staticmethod
+    def c_static_dly_value(step: int) -> int:
+        """ The `C_STATIC_DLY` value id of one static delay step.
+
+        MEASURED (`P3.T22`, `$OTC/evidence/iodelay/summary.md`): this die
+        spends **one** enumerated `IOLOGIC` attribute -- 118, `C_STATIC_DLY`
+        -- on the whole 0..255 range, where GW1N/GW2A spend the seven one-bit
+        attributes `DELAY_DEL0`..`DELAY_DEL6`.  The device's own `logicinfo`
+        table carries exactly 255 value ids for it: `2` for step 1 and
+        `1000 + n` for every step `n >= 2`.  Step 0 has no row and programs no
+        fuse, which is why the sweep's baseline moves nothing.
+        """
+        return 2 if step == 1 else 1000 + step
+
+    def delay_step_attrs(self, bits: str) -> list[AttrVal]:
+        """ One `C_STATIC_DLY` attribute in place of the pre-5A `DELAY_DEL*`.
+
+        The fuses come from the attribute-value table like any other
+        attribute, never from a bit list: each weight lands in row 21 of the
+        pad tile, bit 0 at column 3 through bit 7 at column 10, and bit 7 is
+        fuse-backed here, so the base class's `DELAY_DEL7` refusal does not
+        apply to this device and is not inherited.
+        """
+        step = int(bits, 2)
+        if not step:
+            return []
+        return [AttrVal('C_STATIC_DLY', self.c_static_dly_value(step))]
 
     #: The `IOLOGIC_FCLK` attribute `nextpnr` writes, as an HCLK lane index.
     #: `set_iologic_bel_fclk` has already turned `HCLK_OUT<n>` into
@@ -7328,6 +7423,47 @@ class GW5AST_138C(GW5A):
     def get_default_io_type(self) -> str:
         """ Default IO_TYPE """
         return "LVCMOS33"
+
+    #: `SLEWRATE` has no default on this device: the vendor leaves the fuse
+    #: unprogrammed on all 143 used outputs of the 35-design corpus
+    #: (`$OTC/evidence/iob-bank/summary.md`), and `GW5A`'s inherited
+    #: `SLEWRATE=FAST` was therefore a rate the packer invented for every
+    #: output pad in every design.  A design that names `SLEW_RATE` still gets
+    #: what it asks for -- that is what `design_only_io_attrs` means.
+    design_only_io_attrs = ('SLEWRATE',)
+
+    #: Configuration functions whose pad keeps its pull-up when unused, even
+    #: though the pad also carries a parallel-data name that would otherwise
+    #: put it in `_no_pullup_cfgs`.  MEASURED: (R108C101)/`IOBB` is `D08` and
+    #: `SO`, and it is the one unused pad of all 35 designs where the open
+    #: flow programmed a `PULLMODE` fuse the vendor did not -- the vendor
+    #: leaves the serial-output pad at the pull-up every other configuration
+    #: pad of the group gets.  The other 865 site-observations of `NONE` are
+    #: bit-equal and are left exactly as they are.
+    _pullup_cfgs = frozenset({'SO'})
+
+    def get_unused_io_attrvals(self, io_cfg: IoCfg, bank_desc: BankDesc) -> list[AttrVal]:
+        """ The set the vendor programs on a floating pin, and no more.
+
+        MEASURED over 35 vendor/open bitstream pairs, 0 oracle runs
+        (`P3.T26`, `$OTC/evidence/iob-bank/summary.md`, `D108`): on an unused
+        pin the vendor programs `IO_TYPE`, `OPENDRAIN` and `PADDI`, plus a
+        `PULLMODE` of `UP` or `DOWN` on the configuration pads that ask for
+        one -- and **no drive strength at all**.  `GW5A`'s inherited set adds
+        `DRIVE` and `DRIVE_LEVEL`, which cost two fuses on every one of the
+        die's ~316 floating pads in every design: 22 020 bits over the corpus,
+        and the attribute class PR #423 was opened for.  `LOOP-BRIEF` §7
+        forbids shipping it, so this device drops both.
+
+        The `GW5A` base class keeps its own set unchanged -- the GW5A-25A and
+        the GW5AT-60B have no such measurement, and a default is not a thing
+        to change on a device nobody has measured (`S3`).
+        """
+        keep_pullup = bool(self._pullup_cfgs & set(io_cfg.cfgs))
+        attrvals = super().get_unused_io_attrvals(io_cfg, bank_desc)
+        return [AttrVal('PULLMODE', 'UP')
+                if keep_pullup and av.attr == 'PULLMODE' else av
+                for av in attrvals if av.attr not in ('DRIVE', 'DRIVE_LEVEL')]
 
     # debug
     def __repr__(self):
