@@ -106,7 +106,7 @@ class IodelayShape(IoShape):
     baseline_value = BASELINE
     ports = {
         "clk": ("V22", "input"),
-        "din": ("N15", "input"),
+        "din": ("AA9", "input"),
         "sdtap": ("AB13", "input", {"pull_mode": "UP"}),
         "value": ("Y13", "input"),
         "dout": ("P20", "output"),
@@ -114,6 +114,23 @@ class IodelayShape(IoShape):
     }
     clocks = {"clk": 20.0}
     config_role_acks = {"V22": _ACK_CLK}
+
+    #: The one tile the `E0`/`E1` comparison is restricted to: the IO cell the
+    #: delayed input ball sits in.  `IODELAY` is attributes on that cell's
+    #: IOLOGIC bel, not a bel of its own, so the tile under test is fixed by
+    #: the pin constraint and is known before the run.  `AA9` is `IOB53A` at
+    #: column 52 on row 108 (`$OTC/evidence/iologic/pin-hclk-138c.json`).
+    #: Without it the shape would inherit `IoShape.scope_tiles = ()`, which
+    #: `equiv.in_scope` reads as the empty set -- a comparison of nothing.
+    #:
+    #: The delayed ball is on this tile and not on `N15` (`IOB146A`, ttyp 63)
+    #: because ttyp 63 carries one IOB half only, and `chipdb.dat_portmap`
+    #: builds a GW5A IOLOGIC portmap only for a tile that has an `IOBB`
+    #: (`chipdb.py`, `if 'IOBB' in tile.bels`).  Fourteen of the 326 IOLOGIC
+    #: bels on this die -- ttyps 63, 64, 65, 86, 87 and 251 -- therefore carry
+    #: no ports at all, and an `IODELAY` placed on one reaches the router with
+    #: no wire for `DF` (MEASURED, `P3.T21`).  Named gap, `chipdb.py`-owned.
+    scope_tiles = ((52, 108),)
 
     def rtl(self, sweep_value):
         parameter, value = POINTS[sweep_value]
