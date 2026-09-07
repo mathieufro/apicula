@@ -420,7 +420,7 @@ class Netlist:
         # Therefore, we will postpone their generation until after normal IOs, once the standard has been clarified.
         yield_later = []
 
-        belre = re.compile(r"X(\d+)Y(\d+)/(?:GSR|LUT|DFF|IOB|MUX|ALU|ODDR|OSC[ZFHWOA]?|BUF[GS]|RAM16SDP4|RAM16SDP2|RAM16SDP1|PLL|IOLOGIC|CLKDIV2|CLKDIV|BSRAM|ALU|MULTALU18X18|MULTALU27X18|MULTALU36X18|MULTADDALU18X18|MULTADDALU12X12|MULT36X36|MULT18X18|MULT12X12|MULT9X9|PADD18|PADD9|BANDGAP|DQCE|DCS|USERFLASH|EMCU|DHCEN|MIPI_OBUF|MIPI_IBUF|DLLDLY|PINCFG|PLLA|ADC)(\w*)")
+        belre = re.compile(r"X(\d+)Y(\d+)/(?:GSR|LUT|DFF|IOB|MUX|ALU|ODDR|OSC[ZFHWOA]?|BUF[GS]|RAM16SDP4|RAM16SDP2|RAM16SDP1|PLL|IOLOGIC|CLKDIV2|CLKDIV|BSRAM|ALU|MULTALU18X18|MULTALU27X18|MULTALU36X18|MULTADDALU18X18|MULTADDALU12X12|MULT36X36|MULT18X18|MULT12X12|MULT9X9|PADD18|PADD9|BANDGAP|DQCE|DCS|USERFLASH|EMCU|DHCEN|MIPI_OBUF|MIPI_IBUF|DLLDLY|PINCFG|PLLA|ADC|AE350_SOC)(\w*)")
         for cell_name, cell_data in self.in_file['modules'][self.top_module_name]['cells'].items():
             cell = self.fill_cell_desc(cell_name, cell_data)
             bel_attr = cell.attrs.get('NEXTPNR_BEL')
@@ -1657,6 +1657,9 @@ class Device:
         self.error_not_supported_cell_type(bel)
 
     def get_EMCU_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        self.error_not_supported_cell_type(bel)
+
+    def get_AE350_SOC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         self.error_not_supported_cell_type(bel)
 
     def get_cfgs_types(self) -> set[int]:
@@ -6857,6 +6860,54 @@ class GW5AT_60B(GW5A):
 ################################################################
 class GW5AST_138C(GW5A):
     """ GW5AST-138C chip. Tangmega138k board """
+    #: MEASURED (`P2.T24`, `$OTC/evidence/ae350/config-fuses-138c.md`): the bits
+    #: the vendor sets in the AE350's interface bands and that no pip and no bel
+    #: fuse of those tile types accounts for. Keyed `(x, y)`, i.e. `(col, row)`,
+    #: values `(bit_row, bit_col)` inside the tile.
+    #:
+    #: They are the whole of the block's non-routing configuration reachable
+    #: from the banked runs: in the vendor bitstream that instantiates
+    #: `AE350_SOC` nine tiles of `ttyp` 224/228 carry unexplained set bits, and
+    #: in the bitstream that does not, no tile of either type carries a single
+    #: one. Their variation from tile to tile is real and unexplained -- one
+    #: AE350 design cannot separate an unconditional block enable from a
+    #: configuration that follows the ports a design uses -- so this table is
+    #: what the flow emits and what an `E0` diff is read against, not a claim
+    #: that the block has exactly 77 configuration bits.
+    AE350_SOC_CONFIG_FUSES = {
+        (156, 10): [(10, 24), (10, 31), (11, 31)],
+        (157, 10): [(10, 24), (10, 27), (10, 31), (10, 56), (10, 63), (10, 85),
+                    (10, 93), (10, 112), (10, 118), (11, 31), (11, 63),
+                    (11, 93), (11, 118)],
+        (158, 10): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
+                    (11, 31), (11, 63), (11, 93)],
+        (159, 10): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
+                    (11, 31), (11, 63), (11, 93)],
+        (160, 10): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
+                    (11, 31), (11, 63), (11, 93)],
+        (158, 28): [(10, 24), (10, 31), (10, 56), (10, 63), (10, 85), (10, 93),
+                    (10, 112), (10, 118), (11, 31), (11, 63), (11, 93),
+                    (11, 113), (11, 118)],
+        (159, 28): [(10, 24), (10, 27), (10, 31), (10, 56), (10, 63), (10, 85),
+                    (10, 93), (10, 112), (10, 118), (11, 31), (11, 63),
+                    (11, 93), (11, 118)],
+        (159, 46): [(10, 31), (10, 118), (11, 31), (11, 114), (11, 118)],
+        (159, 64): [(10, 118), (11, 114), (11, 118)],
+    }
+
+    #==============================
+    #========== AE350 SoC
+    #==============================
+    def get_AE350_SOC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ The hard block's configuration, in the interface bands.
+
+        The `EMCU` precedent sets no fuse at all; this block does, and where is
+        measured rather than assumed. The bits sit in tiles far from the bel,
+        so they are emitted against their own cells.
+        """
+        return [CellFuseBits(x, y, set(bits))
+                for (x, y), bits in self.AE350_SOC_CONFIG_FUSES.items()]
+
     #==============================
     #========== Clocks
     #==============================

@@ -6,10 +6,10 @@ all-sentinel on every GW5 device (`test_ae350_dat_tables.py` is the control for
 that). Slot *i* of a direction's table is bit *i* of that direction, counting
 `primitive.xml`'s 149 ports in declaration order with each bus LSB first.
 
-The input table stops short: it holds fewer records than the primitive has input
-bits, so the ordinal rule runs off its end into the neighbouring block's table
-and those bits name columns outside the AE350's band. They are placeholders, not
-guesses -- see `test_ae350_unmapped_bits_get_unroutable_placeholder_wires`.
+Both tables are read whole: every live record is bound, and the only bits left
+unmapped are the sentinel slots the device data itself marks absent. They are
+placeholders, not guesses -- see
+`test_ae350_unmapped_bits_get_unroutable_placeholder_wires`.
 """
 
 import os
@@ -23,10 +23,10 @@ from apycula import wirenames as wnames
 
 DEVICE = 'GW5AST-138C'
 
-#: Measured in `evidence/ae350/wire-map-138c.md` §4: the bits whose record lands
-#: inside the block's own band, per direction.
-BOUND_INPUT_BITS = 256
-BOUND_OUTPUT_BITS = 466
+#: Measured in `evidence/ae350/wire-map-138c.md` §4 and §6: the bits carrying a
+#: live record, per direction. The remainder are sentinel slots.
+BOUND_INPUT_BITS = 398
+BOUND_OUTPUT_BITS = 469
 #: `evidence/ae350/port-inventory.json`: 149 ports, 911 bits.
 INPUT_BITS = 416
 OUTPUT_BITS = 495
@@ -87,10 +87,10 @@ def test_fse_create_ae350_is_noop_for_gw5a_25a():
 
 
 def test_fse_create_ae350_registers_extra_func_for_138c():
-    """Exactly one `ae350` entry, in the row-0 tile at the first tapped column."""
+    """Exactly one `ae350` entry, in the row-0 tile at the band's first column."""
     dev = built_device()
     entries = [loc for loc, funcs in dev.extra_func.items() if 'ae350' in funcs]
-    assert entries == [(0, 145)]
+    assert entries == [(0, 159)]
 
 
 def test_from_fse_calls_ae350_exactly_once():
@@ -120,7 +120,7 @@ def test_ae350_clock_ports_are_tile_clk():
     for port in chipdb._AE350_SOC_CLOCK_PORTS:
         wire = block['ins'][port]
         assert not wire.startswith(chipdb._AE350_UNMAPPED_PREFIX)
-        node = dev.nodes[chipdb.wire2node[(0, 145, wire)]]
+        node = dev.nodes[chipdb.wire2node[(0, 159, wire)]]
         assert node[0] == 'TILE_CLK', f'{port} entered the fabric as {node[0]}'
 
 
@@ -155,11 +155,10 @@ def test_ae350_unmapped_bits_get_unroutable_placeholder_wires():
         wire = (block['ins'] if port in block['ins'] else block['outs'])[port]
         assert wire == f'{chipdb._AE350_UNMAPPED_PREFIX}{port}'
         assert wire not in wnames.wirenumbers
-        assert reason in {'unbound', 'outside-footprint', 'no-record',
+        assert reason in {'unbound', 'off-grid', 'no-record',
                           'unknown-wire-index'}
-    # The whole tail of the input table is missing, not a scattering of bits.
-    tail = [port for port in block['unmapped'] if port in block['ins']]
-    assert len(tail) == INPUT_BITS - BOUND_INPUT_BITS
+    unmapped_ins = [port for port in block['unmapped'] if port in block['ins']]
+    assert len(unmapped_ins) == INPUT_BITS - BOUND_INPUT_BITS
 
 
 def test_ae350_config_tiles_are_marked_as_the_blocks_own():
