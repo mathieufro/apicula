@@ -7159,9 +7159,10 @@ class GW5AST_138C(GW5A):
         if self.cli_args.args.cpu_as_gpio:
             attrvals.append(AttrVal('CPU_AS_GPIO_0', 'YES'))
             attrvals.append(AttrVal('CPU_AS_GPIO_1', 'YES'))
-            # XXX CPU_AS_GPIO_2 pending sweep: attrids defines handle 37 for
-            # this device; whether it moves a bit is a measurement, and until
-            # it is made no attribute is emitted for it.
+            # CPU_AS_GPIO_2 (attrids handle 37) is defined for this device and
+            # deliberately not emitted: MEASURED (P2.T29, evidence/dualpin) that
+            # neither it nor CPU_AS_GPIO_0/1 moves a bit the vendor also moves,
+            # and a used pin's configuration is the class PR #423 fixed.
         return attrvals
 
     #==============================

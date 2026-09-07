@@ -153,6 +153,34 @@ class Preflight:
     licence_lines: list = field(default_factory=list)
 
 
+#: A `gw_sh` Tcl error block: the message line, then `    while executing`,
+#: then the offending command.  MEASURED (`P2.T29`, `-use_reconfign_as_gpio 1`
+#: on this device): the message is a statement about the silicon --
+#: `configuration that does not support RECONFIG_N` -- and the vendor exits 1.
+#: That is a refusal, and `D30` gives a named refusal its own verdict; only an
+#: unexplained non-zero exit is a crash.
+_TCL_REFUSAL_RE = re.compile(
+    r"^(?P<message>\S.*)\n\s*while executing\n\s*\"(?P<command>[^\"]+)\"",
+    re.M)
+
+
+def vendor_refusal(log_text, returncode):
+    """The vendor's own words when it declined the design, else `None`.
+
+    Narrow by construction: it fires only on a non-zero exit whose log ends in
+    a Tcl error block, and it returns the vendor's message verbatim rather
+    than a paraphrase, because the message *is* the measurement.
+    """
+    if returncode == 0:
+        return None
+    match = None
+    for match in _TCL_REFUSAL_RE.finditer(log_text or ""):
+        pass
+    if match is None:
+        return None
+    return f"{match.group('message').strip()} ({match.group('command').strip()})"
+
+
 def preflight(log_text, returncode):
     """Assert a `gw_sh` log is trustworthy.
 
@@ -513,7 +541,8 @@ def run_oracle(design_dir, gowinhome=None, timeout=DEFAULT_TIMEOUT_S,
     artefacts = collect_artifacts(design_dir, require=pf.ok)
     return {"design_dir": design_dir, "gowinhome": home, "files": files,
             "preflight": pf, "artefacts": artefacts,
-            "log_path": run["log_path"], "returncode": run["returncode"],
+            "log_path": run["log_path"], "log_text": run["log_text"],
+            "returncode": run["returncode"],
             "wall_clock_s": run["wall_clock_s"]}
 
 

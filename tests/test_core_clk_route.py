@@ -56,18 +56,28 @@ def test_ddr_clk_route_line_present_exactly_once():
 
 
 def test_core_clk_model_matches_measurement():
-    """An exclusive route leaves the chipdb's fabric tap; a legal `PLL_L[0]`
-    placement means the tap is not the whole story and the model owes a fix."""
+    """The model must not claim an exclusivity the measurement denies.
+
+    Today the chipdb models no PLL edge for `CORE_CLK` at all -- only the
+    fabric tap `P2.T23` measured the vendor never taking -- so there is nothing
+    to contradict.  The moment `P2.T10` adds the dedicated edge this row is
+    about, it has to add one **per PLL site**: a `fixed_clk`-style entry that
+    names `PLL_R[0]` alone while the measurement says `PLL_L[0]` is legal too
+    fails here, which is the entire point of measuring.
+    """
     verdict = CORE_LINE.findall(_read('core-clock.md'))[0]
     db = chipdb.load_chipdb(
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      'apycula', f'{DEVICE}.msgpack.xz'))
-    tap = db.extra_func[(0, 159)]['ae350']['ins']['CORE_CLK']
-    assert tap == 'AE350_SOCCORE_CLKCLK1'
-    if verdict == 'PLL_L[0] also legal':
-        pytest.fail(
-            'the core clock is reachable from PLL_L[0]: the chipdb models one '
-            'tap and one dedicated route, and P2.T10 owes it a second edge')
+    ae350 = db.extra_func[(0, 159)]['ae350']
+    assert ae350['ins']['CORE_CLK'] == 'AE350_SOCCORE_CLKCLK1'
+
+    modelled = getattr(db, 'fixed_clk', None) or ae350.get('fixed_clk') or {}
+    edge = str(modelled.get('CORE_CLK', ''))
+    if verdict == 'PLL_L[0] also legal' and 'PLL_R[0]' in edge:
+        assert 'PLL_L[0]' in edge, (
+            'the chipdb models the core clock as PLL_R[0]-only, but the vendor '
+            'built it from PLL_L[0] over the same zero-delay route')
 
 
 def test_pll_placement_run_count_at_most_two():

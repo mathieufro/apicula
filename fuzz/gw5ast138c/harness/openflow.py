@@ -246,6 +246,17 @@ REFUSAL_PREFIX = "REFUSED: "
 REFUSED_EXIT = 3
 
 
+#: `gowin_pack` raises (and so exits 1) rather than exiting `REFUSED_EXIT`
+#: for its dual-purpose cross-check.  MEASURED (`P2.T29`, `--i2c_as_gpio` on
+#: this device): nextpnr models no I2C configuration pin here, so the packer
+#: flag and the placed netlist can never agree and the run cannot be made to
+#: pass -- a named refusal, not a crash.  The pattern is deliberately this
+#: narrow: every other packer exception stays `aborted`.
+_CROSS_CHECK_RE = re.compile(
+    r"^Exception:\s+(\w+_as_gpio has conflicting settings in "
+    r"nexpnr and gowin_pack\.)\s*$", re.M)
+
+
 def named_refusal(steps):
     """The packer's exact refusal text, or `None` if no step refused.
 
@@ -259,6 +270,12 @@ def named_refusal(steps):
         for line in reversed(step.get("log_text", "").splitlines()):
             if line.startswith(REFUSAL_PREFIX):
                 return line[len(REFUSAL_PREFIX):].strip()
+    for step in steps:
+        if step["returncode"] == 0:
+            continue
+        match = _CROSS_CHECK_RE.search(step.get("log_text", ""))
+        if match is not None:
+            return match.group(1)
     return None
 
 

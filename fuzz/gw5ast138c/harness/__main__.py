@@ -369,9 +369,15 @@ def real_runner(run_id, design_dir, shape, sweep_value, level):
     oracle_fragment["verdict"] = "aborted"
     oracle_fragment["notes"] = ""
     if not oracle_result["preflight"].ok:
+        # `D30`: the vendor declining a design is a measurement with its own
+        # verdict, and its exact words are the evidence.
+        refusal = oracle.vendor_refusal(oracle_result.get("log_text", ""),
+                                        oracle_result["preflight"].returncode)
         return evidence.adapt(
             oracle_fragment, base,
-            notes=f"oracle pre-flight: {oracle_result['preflight'].reason}",
+            verdict="refused" if refusal else "aborted",
+            notes=(f"vendor refused: {refusal}" if refusal else
+                   f"oracle pre-flight: {oracle_result['preflight'].reason}"),
             wall_clock_s={"oracle": time.time() - started})
 
     open_result = openflow.run_openflow(
