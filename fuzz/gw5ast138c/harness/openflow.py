@@ -216,6 +216,29 @@ def run_step(name, cmd, design_dir, timeout=DEFAULT_TIMEOUT_S, env=None):
 # 4. Timing report and provenance
 # --------------------------------------------------------------------------
 
+#: `gowin_pack` prints this prefix and exits `REFUSED_EXIT` when it declines to
+#: emit a fuse it has never measured (`D30`).  Anything else non-zero is a
+#: crash, and the two must not be recorded as the same thing.
+REFUSAL_PREFIX = "REFUSED: "
+REFUSED_EXIT = 3
+
+
+def named_refusal(steps):
+    """The packer's exact refusal text, or `None` if no step refused.
+
+    A refusal is a measurement -- `spec-harness.md` §6 gives it the verdict
+    `refused` and requires the packer's own words -- so it is read from the
+    step's log rather than reconstructed.
+    """
+    for step in steps:
+        if step["returncode"] != REFUSED_EXIT:
+            continue
+        for line in reversed(step.get("log_text", "").splitlines()):
+            if line.startswith(REFUSAL_PREFIX):
+                return line[len(REFUSAL_PREFIX):].strip()
+    return None
+
+
 def parse_fmax(log_text):
     """`[{clock, mhz, verdict, target_mhz}]` from a nextpnr log."""
     return [{"clock": clock, "mhz": float(mhz), "verdict": verdict,
@@ -370,6 +393,7 @@ def run_openflow(design_dir, top_module="top", verilog="top.v", cst="top.cst",
 
     nextpnr_log = next((s["log_text"] for s in steps if s["step"] == "nextpnr"),
                        "")
+    refusal = named_refusal(steps)
     fs_path = os.path.join(design_dir, fs_out)
     ok = all(s["returncode"] == 0 for s in steps) and os.path.isfile(fs_path)
     return {
@@ -378,6 +402,7 @@ def run_openflow(design_dir, top_module="top", verilog="top.v", cst="top.cst",
         "steps": [{k: v for k, v in s.items() if k != "log_text"}
                   for s in steps],
         "returncodes": {s["step"]: s["returncode"] for s in steps},
+        "refused": refusal,
         "fs_path": fs_path if os.path.isfile(fs_path) else None,
         "fs_bytes": os.path.getsize(fs_path) if os.path.isfile(fs_path) else 0,
         "fmax": parse_fmax(nextpnr_log),
