@@ -7141,6 +7141,11 @@ class GW5AST_138C(GW5A):
         attrvals = []
         if self.cli_args.args.jtag_as_gpio:
             attrvals.append(AttrVal('JTAG_AS_GPIO', 'YES'))
+        # Unlike the GW5A-25A and the GW5AT-60B, which hand SSPI to the fabric
+        # unconditionally, this device keeps its SSPI pins until the flag asks
+        # for them -- the AE350 boots from that port.
+        if self.cli_args.args.sspi_as_gpio:
+            attrvals.append(AttrVal('SSPI_AS_GPIO', 'YES'))
         if self.cli_args.args.mspi_as_gpio:
             attrvals.append(AttrVal('MSPI_AS_GPIO', 'YES'))
         if self.cli_args.args.ready_as_gpio:
@@ -7154,8 +7159,10 @@ class GW5AST_138C(GW5A):
         if self.cli_args.args.cpu_as_gpio:
             attrvals.append(AttrVal('CPU_AS_GPIO_0', 'YES'))
             attrvals.append(AttrVal('CPU_AS_GPIO_1', 'YES'))
-        # XXX
-        # add CPU + MSSPI pin usage - IOB175B
+            # CPU_AS_GPIO_2 (attrids handle 37) is defined for this device and
+            # deliberately not emitted: MEASURED (P2.T29, evidence/dualpin) that
+            # neither it nor CPU_AS_GPIO_0/1 moves a bit the vendor also moves,
+            # and a used pin's configuration is the class PR #423 fixed.
         return attrvals
 
     #==============================
