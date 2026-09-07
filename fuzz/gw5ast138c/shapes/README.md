@@ -72,3 +72,39 @@ nothing, if the shape fails the `.cst` assertion.
   justification string, or `gen.py` still refuses it.  The refusal is not
   weakened: it now takes evidence to lift, and the evidence is printed into
   the `.cst`.
+
+## The Phase-3 IO/IOLOGIC shapes (`_io_base.py`)
+
+`_io_base.IoShape` is the base every Phase-3 shape subclasses.  It adds a
+**board** envelope on top of the unconditional `.cst` assertion above, which
+is about the silicon: a shape may claim only balls the Tang Mega 138K brings
+out at 3.3 V (`SAFE_PINS`, enumerated from `tang_mega_138K_pins.cst` with the
+vendor's own bank numbers, cross-checked against the `.dat` `Bank` table for
+all 297 balls in `$OTC/evidence/iologic/pin-hclk-138c.json`), and may name
+only an `IO_TYPE` the vendor emits (`VENDOR_IO_TYPES`).  The two checks
+compose; `assert_envelope` never replaces `gen.assert_cst_defaults`.
+
+| Shape | Primitive under test | Balls | Sweep |
+|---|---|---|---|
+| `io_basic` | `ODDR` / `IDDR` | bank 4 (`V22` clk, `N15` in, `P20` out) | 6 points: each primitive's documented parameters, one axis per run |
+| `io_ser` | `OSER4` / `OSER8` / `OSER10` / `OVIDEO` | bank 2, the dock's RGMII TX side | 8 points: one attribute per width |
+| `io_des` | `IDES4` / `IDES8` / `IDES10` | bank 2, the dock's RGMII side | 6 points: one attribute per width |
+| `iodelay_a` | `IODELAY` (shape **A**) | bank 4/5, 3.3 V | 28 points: `C_STATIC_DLY` Gray-coded ×24, `DYN_DLY_EN` ×2, `ADAPT_EN` ×2 |
+| `diff_io` | `TLVDS_IBUF/OBUF/TBUF`, `ELVDS_OBUF/TBUF/IOBUF` | bank 3, the HDMI TMDS `TRUELVDS` pairs | 6 points: one type per run |
+
+`io_ser` and `io_des` make their `PCLK` by dividing `FCLK` in HCLK block 5:
+a `w`-bit gearbox runs its slow clock at `FCLK / (w / 2)` (UG304E p.62-69),
+which is `_io_base.GEARBOX_DIV_MODE`.  `CLKDIV` is used rather than a PLL
+because Phase 1 closed it at `E1` on this die and the PLL->HCLK path was one
+of its named gaps -- a shape should not rest on an unproven primitive to test
+a different one.
+
+**Known gap.** `gen.assert_cst_defaults` rules (a) and (b) demand an
+`IO_TYPE` on every used pin and admit only `LVCMOS33` on a non-DDR pin.  Both
+were written for single-ended pins and refuse a differential pad, which the
+vendor's own board constraint file gives no `IO_TYPE` at all.  `diff_io` is
+therefore spelled as the vendor spells it and is refused by the harness
+today; the exemption is a `harness/gen.py` change (Phase 0's file, frozen for
+Phase 3) that `P3.T23` carries, and
+`tests/test_io_shapes_138c.py::test_diff_io_pads_have_no_iotype_and_the_harness_refuses_them`
+pins the collision until it lands.
