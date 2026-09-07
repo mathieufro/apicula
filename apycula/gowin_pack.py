@@ -6934,6 +6934,44 @@ class GW5AST_138C(GW5A):
         raise Exception("IOLOGIC on GW5AST-138C requires HCLK: no IOLOGIC bel exists for this device yet")
 
     #==============================
+    #========== IOLOGIC
+    #==============================
+    def common_iologic_handler(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ Two attributes of the generic handler are wrong on this die.
+
+        The generic handler emits GSR unconditionally, DISGSR when the cell
+        carries no GSREN.  On the GW5AST-138C DISGSR is not the zero code: it
+        sets one fuse, and the vendor leaves that fuse clear on every ODDR,
+        IDDR and IDDRC measured.  Emitting it is a one-bit over-emission,
+        which the equivalence check counts as a difference rather than
+        forgiving, so GSR is emitted here only for the explicit opt-in.
+
+        Everything else the generic handler emits -- TSHX, UPDATE and the
+        IODELAY attributes -- is kept as it is, and TSHX at its default costs
+        no fuse on this die, so nothing is dropped that the vendor sets.
+        """
+        attr_vals = [av for av in super().common_iologic_handler(bel)
+                     if av.attr != 'GSR']
+        if bel.cell.parms.get('GSREN', 'FALSE') == 'TRUE':
+            attr_vals.append(AttrVal('GSR', 'ENGSR'))
+        return attr_vals
+
+    def get_in_iologic_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The reset multiplexer of an IDDRC is inverting on this die.
+
+        For a cell with an asynchronous clear the generic handler selects
+        LSRMUX_LSR=SIG and leaves LSRIMUX_0 at the placeholder UNKNOWN.  The
+        vendor selects INV and sets no LSRIMUX_0 at all; INV is one fuse the
+        generic set misses and SIG one it sets in its place, so the two
+        bitstreams differ by two bits in exactly this attribute.
+        """
+        attr_vals = super().get_in_iologic_attrs(bel)
+        if bel.cell.typ not in {'IDDR', 'IDDRC'} or bel.cell.typ == 'IDDR':
+            return attr_vals
+        return [AttrVal('LSRMUX_LSR', 'INV') if av.attr == 'LSRMUX_LSR' else av
+                for av in attr_vals if av.attr != 'LSRIMUX_0']
+
+    #==============================
     #========== Clocks
     #==============================
     def get_permitted_pll_freqs(self) -> tuple[float, float, float, float, float]:

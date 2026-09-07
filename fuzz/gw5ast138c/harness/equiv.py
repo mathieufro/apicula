@@ -378,12 +378,28 @@ _BEL_SUFFIX = re.compile(r"^(?P<name>.*?)(?P<idx>\d+)?(?P<side>[A-Z])?$")
 _LETTER_BELS = ("IOB", "IOLOGIC", "ODDR", "BUF")
 
 
+#: `nextpnr`'s IOLOGIC bel names: the tile half, then the direction.  Both
+#: halves of one site are the same apicula bel -- `gowin_unpack` decodes a
+#: tile's IOLOGIC as `IOLOGIC` at `z` 0 (`A`) or 1 (`B`) whichever direction
+#: the gearbox runs in -- so the direction letter carries no site index and
+#: must not be read as one.
+_IOLOGIC_BEL = re.compile(r"^IOLOGIC(?P<side>[AB])[IO]$")
+
+
 def split_bel_name(name):
     """`'DFF3'` -> `('DFF', 3)`; `'IOBA'` -> `('IOB', 0)`; `'ALU'` -> `('ALU', 0)`.
 
     `bel_z` is the numeric site index inside the tile as apicula names it: a
     trailing digit run, or the `A`/`B` side letter the IO and IOLOGIC bels use.
+
+    `'IOLOGICAO'` -> `('IOLOGIC', 0)`: the generic rule below would take the
+    trailing `O` of the direction for a side letter and answer
+    `('IOLOGICA', 14)`, which matches no decoded cell, so the four IOLOGIC bel
+    names are resolved first.
     """
+    iologic = _IOLOGIC_BEL.match(name)
+    if iologic is not None:
+        return "IOLOGIC", ord(iologic.group("side")) - ord("A")
     m = _BEL_SUFFIX.match(name)
     base = m.group("name")
     idx = m.group("idx")
@@ -2682,8 +2698,13 @@ def level_e1(exported, realised, scope=None):
 #: and the bel carries no index because a site holds exactly one (`P1.T41`).
 _BITSTREAM_BEL_RE = re.compile(r"^(CLKDIV2|CLKDIV|PLL)(?:_([0-9]+))?$")
 
-#: Cell-type prefixes of the bels this check covers.
-BITSTREAM_ADDRESSED_CELL_TYPES = ("CLKDIV2", "CLKDIV", "PLL")
+#: Cell-type prefixes of the bels this check covers.  `IOLOGIC` joins the
+#: HCLK cells because it has the same property they do: its site is an
+#: address in the bitstream and not a `CLS` coordinate, so `INS_LOC` -- which
+#: only spells `R<r>C<c>[cls][half]` -- cannot constrain it and the `.tr`
+#: half of `E1` has nothing to compare.  The vendor's own decoded placement
+#: is the evidence instead.
+BITSTREAM_ADDRESSED_CELL_TYPES = ("CLKDIV2", "CLKDIV", "PLL", "IOLOGIC")
 
 
 #: The `_<index>` suffix a bel or decoded-cell name carries, and nothing more.
@@ -2706,6 +2727,13 @@ def bitstream_bel_exported(pnr_cells):
     for cell in pnr_cells:
         bel, site = cell.get("bel"), cell.get("site")
         if bel is None or site is None:
+            continue
+        iologic = _IOLOGIC_BEL.match(bel)
+        if iologic is not None:
+            out[cell["name"]] = {
+                "x": site[0], "y": site[1],
+                "z": ord(iologic.group("side")) - ord("A"),
+                "type": "IOLOGIC", "bel": bel}
             continue
         m = _BITSTREAM_BEL_RE.match(bel)
         if m is None:
@@ -2750,14 +2778,14 @@ def level_e1_bitstream(exported, realised, scope=None):
                 "name": name, "in_scope": inside,
                 "exported": f"X{want['x']}Y{want['y']}/{want['bel']}",
                 "realised": (f"{got} at the same site" if got
-                             else "no HCLK cell decodes at that site in the "
-                                  "vendor bitstream")})
+                             else "no bitstream-addressed cell decodes at "
+                                  "that site in the vendor bitstream")})
     notes = ""
     level = "E1"
     if mismatched:
         level = "E0"
         first = mismatched[0]
-        notes = (f"EC9/HCLK: {len(mismatched)} HCLK bel(s) the open flow placed "
+        notes = (f"EC9/HCLK: {len(mismatched)} bitstream-addressed bel(s) the open flow placed "
                  f"are not where the vendor bitstream decodes them; first is "
                  f"{first['name']!r} at {first['exported']} -- {first['realised']}")
     elif not exported:

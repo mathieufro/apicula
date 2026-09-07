@@ -76,6 +76,20 @@ CLOCK_CANDIDATES = (
 DATA_IN_BALL = "AA15"
 DATA_OUT_BALL = "AB16"
 
+#: The two tiles the `E0`/`E1` comparison is restricted to: the cells the two
+#: data balls sit in, `(x, y)` as `P3.T06`'s measured pin table gives them
+#: (`$OTC/evidence/iologic/pin-hclk-138c.json`: `AA15` = `IOB83A` at column
+#: 82, `AB16` = `IOB80A` at column 79, both on row 108).
+#:
+#: An IOLOGIC is only ever realised in its own pad's cell, so the tile under
+#: test is fixed by the pin constraint and is known before the run -- it is
+#: not a placement the sweep discovers.  A shape that named no scope would
+#: compare **nothing**: `equiv.in_scope` reads an empty tile list as an empty
+#: set, and the whole-die alternative is not available either, because the
+#: vendor's bitstream configures every DFF on the die (138 576 decoded cells
+#: against the open flow's 384, MEASURED here).
+DATA_TILES = ((79, 108), (82, 108))
+
 #: The MEASURED evidence the `V22` config-role exemption rests on.
 _ACK_CLK = ("EMCCLK: 27 vendor runs on this device placed a design with clk "
             "on V22 and gw_sh returned 0 every time (P1.T08d, "
@@ -258,7 +272,7 @@ class IoBasicShape(IoShape):
     """`ODDR` and `IDDR` on two bank-4 balls, clocked from the board clock."""
 
     name = "io_basic"
-    primitive = "ODDR/IDDR"
+    primitive = "ODDR / IDDR"
     sweep_axis = "POINT"
     sweep_values = list(POINTS)
     baseline_value = BASELINE
@@ -283,6 +297,11 @@ class IoBasicShape(IoShape):
         self.clk_ball = self.clk_balls[0]
         self.ins_loc = dict(ins_loc or {})
         if not hclk_probe:
+            # The attribute sweep's IOLOGIC is in one of the two data balls'
+            # own cells and nowhere else; the probe's is placed by the placer
+            # over a ball the caller passes, so it keeps the base class's
+            # empty scope and is compared the way `P3.T07` compared it.
+            self.scope_tiles = DATA_TILES
             self.ports = {
                 "clk": (clk_ball, "input"),
                 "din": (DATA_IN_BALL, "input"),
