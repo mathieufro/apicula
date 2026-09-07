@@ -1882,7 +1882,16 @@ class Device:
     def process_IBUF(self, bank_desc: BankDesc, bel: IoBelDesc) -> list[CellFuseBits]:
         av = self.set_io_attrvals(bel, self.default_ibuf_attrs)
         fuses = []
-        self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", bank_desc.io_type), av)
+        # An LVDS pair that shares a bank with plain single-ended IBUFs must
+        # not drag those IBUFs to the LVDS standard: only OBUFs (real driven
+        # outputs) fix the bank-wide standard. An input-only bank has no
+        # output to fix it, so each IBUF keeps its own IO_TYPE (falling back
+        # to this device's ordinary default, never the bank's LVDS override).
+        if not bank_desc.has_outputs:
+            io_type = bel.cell.attrs.get('IO_TYPE', self.get_default_io_type())
+            self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", io_type), av)
+        else:
+            self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", bank_desc.io_type), av)
         self.chipdb.get_iob_attr_val(AttrVal("BANK_VCCIO", bank_desc.bank_vccio), av)
         fuses += self.get_iob_fuses(bel.x, bel.y, bel.idx_str, av)
         return fuses
