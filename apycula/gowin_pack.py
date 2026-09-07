@@ -569,6 +569,15 @@ class ChipDB:
     def get_dcs_spine(self, x: int, y: int, idx_int) -> str:
         return self.db.extra_func[y, x]['dcs'][idx_int]['clkout']
 
+    def dcs_control_wires_traced(self, x: int, y: int, idx_int) -> bool:
+        """ Were this DCS's `SELFORCE`/`CLKSEL` wires measured on this die?
+
+        Recorded per site by `chipdb.fse_create_dcs`.  A site built before the
+        flag existed answers `True`, which is the pre-5A model's own claim.
+        """
+        return self.db.extra_func[y, x]['dcs'][idx_int].get(
+            'control_wires_traced', True)
+
     def get_slot_idx(self, x: int, y: int, kind: str) -> int:
         return self.db.extra_func[y, x][kind]['slot_idx']
 
@@ -5512,6 +5521,28 @@ class GW5A(Device):
         # this with `gw5a_dcs_fuses`.
         self.error_not_supported_cell_type(bel)
 
+    def reject_untraced_dcs_control(self, bel: BelDesc) -> None:
+        """ Named refusal for a driven `SELFORCE`/`CLKSEL` on an untraced die.
+
+        Which wires a die routes the DCS control inputs over is measured per
+        device (`chipdb.dcs_control_wires_traced`).  Where it has not been,
+        the chipdb still names wires -- the pre-5A ones, so that two DCS in
+        one cell differ -- and a design that drives them would be routed into
+        a wire this die may not use at all.  `D30`: refuse by name rather than
+        emit a plausible wrong bitstream.
+        """
+        driven = sorted(port for port, bits in bel.cell.connections.items()
+                        if bits and (port == 'SELFORCE'
+                                     or port.startswith('CLKSEL')))
+        if driven and not self.chipdb.dcs_control_wires_traced(
+                bel.x, bel.y, bel.idx_int):
+            raise Exception(
+                f"DCS {', '.join(driven)} is driven on a device whose DCS "
+                "control wires have never been traced: the wire names come "
+                "from the pre-5A model, so the route into them is not the "
+                "route this die uses. Refusing rather than emitting an "
+                "unverified fuse (P1.T31).")
+
     def gw5a_dcs_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         """ A GW5A DCS's fuses are scattered across the die rather than held
         in the bel's own cell, so every cell is asked for them.  Which cells
@@ -5520,6 +5551,7 @@ class GW5A(Device):
         # DCSs without DCS_MODE are unused
         if 'DCS_MODE' not in bel.cell.attrs:
             return []
+        self.reject_untraced_dcs_control(bel)
         spine = self.chipdb.get_dcs_spine(bel.x, bel.y, bel.idx_int)
 
         av = self.get_dcs_attrvals(bel, spine)

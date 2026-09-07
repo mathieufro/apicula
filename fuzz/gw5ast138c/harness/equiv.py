@@ -102,6 +102,14 @@ class Netlist:
     #: `(row, col) -> {dest_global: src_global}`, kept because `E2`'s pip-set
     #: identity (`P0.T26`) needs a net's pips, not just their count.
     raw_pips: dict = field(default_factory=dict)
+    #: `(row, col) -> the decoded tile's fuse bitmap`, exactly the split
+    #: `chipdb.tile_bitmap` returns.  Kept because a fuse that no pip and no
+    #: cell attribute carries -- the `DHCE` gate bit is the phase's own
+    #: example -- is assertable only against the bits themselves.
+    tile_bitmap: dict = None
+    #: The chipdb this netlist was decoded with, so a check that needs a
+    #: fuse's *address* reads it from the same tables the decode used.
+    db: object = None
     #: `global_wire -> net_label`, the union-find map `_build_nets` already
     #: computes.  Kept because §5.3 row 5 masks a routing fuse only when the
     #: net it serves has the same endpoint set on both sides, and answering
@@ -497,7 +505,7 @@ def unpack_netlist(fs_path, device=DEVICE, db=None, noalu=False):
     bitmap, _hdr, _ftr, _slots = read_bitstream(fs_path)
     bm = _chipdb.tile_bitmap(db, bitmap)
 
-    netlist = Netlist(source=os.path.abspath(fs_path))
+    netlist = Netlist(source=os.path.abspath(fs_path), tile_bitmap=bm, db=db)
     bank_positions = set(db.bank_tiles.values())
     raw_pips = {}          # (row, col) -> {dest_global: src_global}
 
@@ -920,19 +928,22 @@ def dqce_recovered_via_pip(cell, netlist):
 DCS_SPINE_RE = re.compile(r"SPINE(\d+)")
 
 
-def dcs_clkout_node(spine_idx):
+def dcs_clkout_node(spine_idx, device=DEVICE):
     """The node a 138C `DCS` output really drives, or `None` off this die.
 
     MEASURED (`P1.T31`, `evidence/dcs/ports-138c.md`): a DCS output on this
     die does not stay on the spine it is named after -- it joins its half's
     `CBRIDGEOUT_<half><n>` and re-enters the clock plane through the other
-    bridge cell's multiplexer.  The two halves start at `SPINE8` and
-    `SPINE16`, eight spines each.
+    bridge cell's multiplexer.  Which spines make up which half is the
+    chipdb's own `_gw5_clock_plane_halves`, read here rather than restated,
+    so the check cannot drift from the tables that built the bitstream.
     """
-    for base, half in ((8, "TOP"), (16, "BOTTOM")):
-        if base <= spine_idx < base + 8:
-            return f"CBRIDGEOUT_{half}{spine_idx - base}"
-    return None
+    from apycula import chipdb as _chipdb
+
+    half = _chipdb.gw5_clock_plane_half(device, spine_idx)
+    if half is None:
+        return None
+    return f"CBRIDGEOUT_{half[0]}{half[1]}"
 
 
 def dcs_recovered_via_clkout(cell, netlist):
@@ -959,6 +970,47 @@ def dcs_recovered_via_clkout(cell, netlist):
         if any(src.endswith(suffix) for src in tile_pips.values()):
             return None
     return f"the DCS output node {node} drives nothing in the decoded bitstream"
+
+
+#: The post-PnR attribute `globals.cc route_dhcen_net` writes on the few
+#: `DHCEN` placeholders the route actually gates, and the only thing
+#: `gowin_pack.GW5AST_138C.get_DHCEN_fuses` keys on.
+DHCEN_USED_ATTR = "DHCEN_USED"
+
+
+def dhcen_gate_realised(cell, netlist):
+    """`None` if this used DHCE's gate fuse is in the bitstream, else why not.
+
+    A `DHCE` leaves no cell and no pip behind: its whole signature is the
+    enable bit of the HCLK input multiplexer it sits on, whose sources nothing
+    in the modelled fabric drives (`chipdb.gw5a_dhce_gate_fuses`).  Asking the
+    decoded netlist for it would assert something no decode can return, so the
+    fuse is read from the decoded tile's own bits, at the address the chipdb
+    gives -- the same table `gowin_pack` wrote it from.
+
+    This is the guard `P1.T38b` needed and did not have: the open flow set no
+    gate fuse at all for ten marked cells and `c1` reported `ok`.
+    """
+    from apycula import chipdb as _chipdb
+
+    if netlist.db is None or netlist.tile_bitmap is None:
+        return (f"{DHCEN_USED_ATTR} is set, but this comparison carries no "
+                "decoded tile bitmap, so the gate fuse cannot be asserted")
+    x, y = cell["site"]
+    _base, idx = split_bel_name(cell["bel"])
+    site = (netlist.db.extra_func.get((y, x), {}).get("dhcen", {}) or {}).get(idx)
+    if site is None or "gate" not in site:
+        return f"no GW5A DHCE site {idx} at (X{x}Y{y}) in the chipdb"
+    want = _chipdb.gw5a_dhce_gate_fuses(netlist.db.hclk_pips[y, x], site["gate"])
+    if not want:
+        return f"the DHCE site {idx} at (X{x}Y{y}) names no gate fuse"
+    tile = netlist.tile_bitmap.get((y, x))
+    unset = sorted(coord for coord in want
+                   if tile is None or not tile[coord[0]][coord[1]])
+    if unset:
+        return (f"{DHCEN_USED_ATTR} is set but the gate fuse {unset} of "
+                f"{site['gate']} is not in the decoded bitstream")
+    return None
 
 
 def unused_clock_mux_placeholder(cell):
@@ -1776,11 +1828,24 @@ def decode_check_c1(pnr_cells, netlist):
                             "why": "not placed on any bel"})
             continue
         if cell["name"].startswith(PACKER_DHCEN_PREFIX):
-            skipped.append({"name": cell["name"], "type": cell["type"],
-                            "bel": cell["bel"],
-                            "why": "nextpnr DHCEN placeholder; writes a fuse "
-                                   "only when route_dhcen_net marks it "
-                                   "DHCEN_USED"})
+            if DHCEN_USED_ATTR not in cell["attrs"]:
+                skipped.append({"name": cell["name"], "type": cell["type"],
+                                "bel": cell["bel"],
+                                "why": "nextpnr DHCEN placeholder; writes a "
+                                       "fuse only when route_dhcen_net marks "
+                                       f"it {DHCEN_USED_ATTR}"})
+                continue
+            why_not = dhcen_gate_realised(cell, netlist)
+            if why_not is None:
+                skipped.append({"name": cell["name"], "type": cell["type"],
+                                "bel": cell["bel"],
+                                "why": "used DHCE; recovered as the gate fuse "
+                                       "of its HCLK input multiplexer, which "
+                                       "no cell and no pip carries"})
+                continue
+            missing.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "site": list(cell["site"]),
+                            "why": why_not})
             continue
         why_unused = unused_clock_mux_placeholder(cell)
         if why_unused:
@@ -2601,6 +2666,20 @@ def level_e1_bitstream(exported, realised, scope=None):
             "mismatched": mismatched, "unobserved": [], "notes": notes}
 
 
+#: The token `spec.md` `EC9` defines as "this primitive class drops from `E1`
+#: to `E0`".  A row that closes at `E1` must never publish it: read literally,
+#: `EC9` on an `E1` row asserts the opposite of the row's own level.  It is
+#: rewritten to `_SILENT_HALF_PREFIX` whenever the *other* half carried the
+#: level, which is the only way an `EC9` note and an `E1` verdict can meet.
+_EC9_TOKEN_RE = re.compile(r"^EC9(/\w+)?: ")
+_SILENT_HALF_PREFIX = "silent half"
+
+
+def _demote_ec9(note):
+    """An `EC9` note reworded for a row that closed `E1` on the other half."""
+    return _EC9_TOKEN_RE.sub(f"{_SILENT_HALF_PREFIX}: ", note, count=1)
+
+
 def merge_e1(cls_part, hclk_part):
     """Fold the CLS and HCLK halves of `E1` into one verdict.
 
@@ -2608,6 +2687,13 @@ def merge_e1(cls_part, hclk_part):
     one half actually observed a constrained cell **in scope**.  A half that
     observed nothing in scope is silent, not a failure: a CLKDIV shape has no
     CLS cell in the HCLK tile, and a CLS shape has no CLKDIV.
+
+    The silent half is also the half with something to say -- it is the only
+    one that writes a note -- so a plain join publishes the failure text of
+    the half that abstained and suppresses the evidence of the half that
+    carried the level.  An `E1` merge therefore leads with its positive
+    evidence and demotes the silent half's `EC9` token, which by `spec.md`
+    means `E0`.
     """
     if not hclk_part["checked"]:
         return cls_part
@@ -2616,6 +2702,15 @@ def merge_e1(cls_part, hclk_part):
                      (cls_part["level"] == "E1" or hclk_part["level"] == "E1")
                      ) else "E0"
     notes = " | ".join(n for n in (cls_part["notes"], hclk_part["notes"]) if n)
+    if level == "E1":
+        in_scope = [m for m in cls_part["matched"] + hclk_part["matched"]
+                    if m.get("in_scope", True)]
+        where = f", first {in_scope[0]['site']}" if in_scope else ""
+        positive = (f"E1 from the bitstream-addressed bel: {len(in_scope)} "
+                    f"matched in scope{where}")
+        notes = " | ".join([positive] + [
+            f"({_demote_ec9(n)})"
+            for n in (cls_part["notes"], hclk_part["notes"]) if n])
     return {"level": level,
             "checked": cls_part["checked"] + hclk_part["checked"],
             "matched": cls_part["matched"] + hclk_part["matched"],
