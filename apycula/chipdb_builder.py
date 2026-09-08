@@ -449,6 +449,8 @@ def main():
 
     chipdb.dat_portmap(dat, db, device)
     chipdb.add_hclk_bels(dat, db, device)
+    # Last, because an ADC tap joins whatever node its wire already has.
+    chipdb.fse_adc_join_nodes(db, device)
 
 
     # XXX GW1NR-9 has interesting IOBA pins on the bottom side

@@ -56,8 +56,17 @@ def test_chipdb_adc_absent_is_skipped(stuff, capsys, monkeypatch):
 
 
 def test_chipdb_adc_skipped_for_devices_without_one():
-    """The pre-existing device gate is untouched: no warning, no bel."""
-    chipdb.fse_create_adc(_ExplodingDev(), 'GW5AST-138C', {}, _Dat(None))
+    """The device gate is untouched: no warning, no bel, no table read."""
+    chipdb.fse_create_adc(_ExplodingDev(), 'GW2A-18', {}, _Dat(None))
+
+
+def test_chipdb_adc_138c_takes_its_own_branch():
+    """The 138C reads its own located tables, never the 25A's."""
+    class _NoAdc:
+        def locate_adc_tables(self, _wirenames):
+            return []
+
+    chipdb.fse_create_adc(_ExplodingDev(), 'GW5AST-138C', {}, _NoAdc())
 
 
 def test_chipdb_adc_absent_port_row_is_recognised():

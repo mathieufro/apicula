@@ -2581,23 +2581,88 @@ def _gowin_install_label():
 
 # ADC in GW5A series are placed in slots AND in the main grid.
 #
-# The GW5AST-138C is deliberately NOT here, and the reason is measured rather
-# than inherited (`P3.T28`/`P3.T29`, `evidence/adc/summary.md`).  Four vendor
-# runs build an ADC on that die with zero errors, so the block exists -- two of
-# them in fact, `ADCLRC` in the lower-right corner (configuration fuses in
-# tiles (108,180) and (108,181)) and `ADCULC` in the upper-left, one site each,
-# named by the vendor's own resource report.  What is missing is the portmap:
-# `fse_create_adc` builds one from `Adc25kIns`/`Adc25kOuts`, which are 25A
-# tables, and the die's own `AdcLRCIns`/`AdcLRCOuts`/`AdcULCOuts` read zeros and
-# ASCII bytes at their declared bases -- the base has drifted between IDE
-# releases the way `Ae350SocIns`' and `CibFabricNode`'s did.  A bel whose
-# portmap comes from a mis-based table is worse than no bel: nextpnr binds it
-# and then dies in the router on a wire that was never that port's, with
-# nothing to say it read the wrong offset.  So no bel is created and
-# `gowin_pack` refuses `ADCLRC`/`ADCULC` by name (`GW5A._refuse_adc`, `D30`);
-# `evidence/adc/summary.md` carries the surviving candidate bases and the one
-# vendor run that would separate them.
+# The GW5AST-138C carries **two** ADCs, not the 25A's one: `ADCLRC` in the
+# lower-right corner and `ADCULC` in the upper-left, one site each, named by
+# the vendor's own resource report and localised by bitstream diff (`P3.T28`,
+# configuration fuses in tiles (108,180)/(108,181) for `ADCLRC`, (1,1) for
+# `ADCULC`).  Their port tables are the die's own `AdcLRC*`/`AdcULC*`, whose
+# declared bases have drifted between IDE releases exactly as `Ae350SocIns`'
+# had; `Datfile.locate_adc_tables` locates them by the block's port-group
+# geometry instead of addressing them, and the vendor's ADC bitstreams confirm
+# the result (`P3.T28b`, `evidence/adc/summary.md`).
+#
+# What is still missing is not the portmap but the **configuration**: the
+# `.fse` carries no `ADC` fuse table for this die at all, and the bits the
+# `VSENCTL`/`DIV_CTL` diffs move sit in the unattributed `unknown_136`,
+# `unknown_137` and `unknown_138` shortval tables of tiles (108,167),
+# (108,180) and (108,181).  So the bels exist -- placement and routing are
+# modelled -- and `gowin_pack` refuses to *configure* one by name until that
+# attribute sweep is run.
+def _adc_bel_sites(dev):
+    """`{bel name: (row, col)}` -- the corner tile that carries each ADC.
+
+    Both are corner cells whose tile *type* occurs once on the die, and that
+    is not a convenience: `save_chipdb` shares one `Tile` per type, so a bel
+    added to a cell of a shared type silently appears at every cell of that
+    type -- 16 200 of them for the plain CLS type the upper-left ADC's
+    neighbourhood is otherwise made of.  `_adc_site_is_unique` is what keeps
+    that from ever being true again.
+    """
+    return {"ADCLRC": (dev.rows - 1, dev.cols - 1), "ADCULC": (0, 0)}
+
+
+def _adc_site_is_unique(dev, row, col):
+    """Whether `(row, col)`'s tile type occurs nowhere else on the die."""
+    ttyp = dev.grid[row][col]
+    return sum(dev.grid[r][c] == ttyp
+               for r in range(dev.rows) for c in range(dev.cols)) == 1
+
+
+def _adc_add_port(dev, name, row, col, portmap, port, entry, wire_type, taps):
+    """Bind one ADC port to its fabric wire, aliasing across cells.
+
+    The alias is only *recorded* here. Joining it to a Himbaechel node waits
+    for `fse_adc_join_nodes`, because a wire may belong to one node only and
+    two of this die's ADC taps are already spoken for: the fabric wire nodes
+    are built after the hard blocks, and the two ADCs share one tap outright
+    (both `DRSTN` ports read `C1` of the same cell).
+    """
+    wrow, wcol, wire = entry[0] - 1, entry[1] - 1, entry[2]
+    if (wrow, wcol) == (row, col):
+        portmap[port] = wire
+        return
+    alias = f'{name}{port}{wire}'
+    portmap[port] = alias
+    taps.append(((row, col, alias), (wrow, wcol, wire), wire_type))
+
+
+def fse_adc_join_nodes(dev, device):
+    """Join every recorded ADC alias to the node its fabric tap belongs to.
+
+    Called from `chipdb_builder` after `dat_portmap`/`add_hclk_bels`, i.e.
+    after the last pass that creates a node: an alias joins the tap's own
+    node when it has one and opens a new node otherwise, so no wire ever ends
+    up in two nodes -- which the Himbaechel database generator asserts on.
+    """
+    if device != "GW5AST-138C":
+        return
+    owner = {wire: node for node, (_type, wires) in dev.nodes.items()
+             for wire in wires}
+    for extra in dev.extra_func.values():
+        for alias, tap, wire_type in extra.get('adc', {}).pop('taps', ()):
+            node = owner.get(tap)
+            if node is None:
+                node = f'X{tap[1]}Y{tap[0]}/ADC_{tap[2]}'
+                dev.nodes.setdefault(node, (wire_type, {tap}))
+                owner[tap] = node
+            dev.nodes[node][1].add(alias)
+            owner[alias] = node
+
+
 def fse_create_adc(dev, device, fse, dat):
+    if device == "GW5AST-138C":
+        _fse_create_adc_5a138(dev, dat)
+        return
     if device not in {"GW5A-25A"}:
         return
     if not _adc_description_present(dat):
@@ -2648,6 +2713,48 @@ def fse_create_adc(dev, device, fse, dat):
             portmap[nam] = f'ADC{nam}{wire}'
             # Himbaechel node
             dev.nodes.setdefault(f'X{col}Y{row}/ADC{nam}{wire}', (wire_type, {(row, col, f'ADC{nam}{wire}')}))[1].add((wrow, wcol, wire))
+
+
+def _fse_create_adc_5a138(dev, dat):
+    """The 138C's `ADCLRC` and `ADCULC`, from the located port tables.
+
+    The two blocks are told apart by the die row their own `CLK` input tap
+    names: the lower-right block taps the last fabric row, the upper-left one
+    the first.  Anything else -- a table order, a name -- would be an
+    assumption; this is the block's own geometry.
+    """
+    blocks = dat.locate_adc_tables(wnames.wirenames_5ast138c)
+    if not blocks:
+        print("warning: GW5AST-138C: the device data of "
+              f"{_gowin_install_label()} describes no ADC port table matching "
+              "the block's port-group geometry; skipping ADC bel creation.",
+              file=sys.stderr)
+        return
+    sites = _adc_bel_sites(dev)
+    for block in blocks:
+        clk_row = block['inputs']['CLK'][0] - 1
+        name = 'ADCLRC' if clk_row > dev.rows // 2 else 'ADCULC'
+        row, col = sites[name]
+        if not _adc_site_is_unique(dev, row, col):
+            raise ValueError(
+                f"{name}: site ({row}, {col}) has a tile type shared with "
+                "other cells; one bel there would become thousands after "
+                "save_chipdb shares the tile")
+        dev[row, col].bels[name] = Bel()
+        adc = dev.extra_func.setdefault((row, col), {}).setdefault('adc', {})
+        adc['primitive'] = name
+        adc['ins_base'] = block['ins_base']
+        adc['outs_base'] = block['outs_base']
+        taps = adc.setdefault('taps', [])
+        portmap = adc.setdefault('inputs', {})
+        for port, entry in block['inputs'].items():
+            _adc_add_port(dev, name, row, col, portmap, port, entry,
+                          'TILE_CLK' if port == 'CLK' else 'ADC_I', taps)
+        portmap = adc.setdefault('outputs', {})
+        for port, entry in block['outputs'].items():
+            _adc_add_port(dev, name, row, col, portmap, port, entry,
+                          'ADC_O', taps)
+
 
 
 # GW5A PLLs do not use the main grid, but are located in so-called slots, so it

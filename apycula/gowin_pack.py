@@ -5348,29 +5348,33 @@ class GW5A(Device):
     #: What the vendor measured about each hard block this device model does
     #: not carry yet, so the refusal can say which fact it is refusing on.
     _UNMODELLED_BLOCKS = {
-        'ADCLRC': ("the vendor builds it on this device (one site, in the "
-                   "lower-right corner), but the die's own AdcLRC* .dat "
-                   "tables read at their declared bases give zeros: the base "
-                   "has drifted and the portmap would be wrong"),
-        'ADCULC': ("the vendor builds it on this device (one site, in the "
-                   "upper-left corner), but the die's own AdcULC* .dat "
-                   "tables read at their declared bases give zeros: the base "
-                   "has drifted and the portmap would be wrong"),
+        'ADCLRC': ("its port map is anchored and its bel exists, but the "
+                   ".fse carries no ADC fuse table for this die: the bits the "
+                   "VSENCTL and DIV_CTL diffs move sit in the unattributed "
+                   "unknown_136/unknown_137/unknown_138 shortval tables of "
+                   "tiles (108,167), (108,180) and (108,181)"),
+        'ADCULC': ("its port map is anchored and its bel exists, but the "
+                   ".fse carries no ADC fuse table for this die: the bits the "
+                   "VSENCTL and DIV_CTL diffs move sit in the unattributed "
+                   "unknown_136/unknown_137/unknown_138 shortval tables of "
+                   "the corner it shares with ADCLRC"),
     }
 
     def _refuse_adc(self, bel: BelDesc) -> list[CellFuseBits]:
-        """Refuse an ADC by name, saying which fact the refusal rests on.
+        """Refuse to *configure* an ADC, saying what is missing.
 
-        `P3.T29`: four vendor runs place `ADCLRC`/`ADCULC` on the GW5AST-138C
-        with zero errors, so this is a gap in the model and not a limit of the
-        die -- see `evidence/adc/summary.md`, which also carries the bitstream
-        diffs that localise both blocks and the surviving candidate `.dat`
-        bases. Emitting a fuse from a mis-based table would produce a wrong
-        bitstream with no error (`D30`).
+        The refusal is no longer about the port map: `P3.T28b` anchors both
+        blocks' input and output tables and `chipdb` builds both bels, so
+        `nextpnr` can place and route an ADC on this die. What no measurement
+        covers yet is the block's sixteen parameters -- `VSENCTL`, `DIV_CTL`,
+        `SAMPLE_CNT_SEL` and the rest -- whose fuses have no attributed table.
+        Emitting a guess would produce a wrong bitstream with no error
+        (`D30`), so the packer stops here and names the sweep that would
+        close it (`evidence/adc/summary.md`).
         """
         typ = bel.cell.typ
         raise PackRefused(
-            f"{typ} is not implemented on {self.device_name}: "
+            f"{typ} cannot be configured on {self.device_name}: "
             f"{self._UNMODELLED_BLOCKS[typ]}. Refusing rather than emitting "
             "an unverified fuse.")
 
