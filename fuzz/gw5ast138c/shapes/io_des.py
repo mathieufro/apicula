@@ -58,12 +58,13 @@ PRIMITIVE_OF_WIDTH = {4: "IDES4", 8: "IDES8", 10: "IDES10"}
 
 #: The deserialiser's own pad, and the balls around it.
 #:
-#: `AA9` is `IOB53A`, cell `(108,52)`, tile type 247: the **A** half, because
-#: an IOLOGIC is configurable on the A half only -- the B half's fuse table
-#: holds 3 coordinates against the A half's 100 on every IO tile type this
-#: package bonds (`P3.T11`'s named gap) -- and in HCLK block 4, whose lane the
-#: shape's `CLKDIV` pins in both flows (`D107`, `io_ser`'s module docstring
-#: gives the block-1 measurement behind the choice).
+#: `AA9` is `IOB53A`, cell `(108,52)`, tile type 247: the **A** half, and in
+#: HCLK block 4, whose lane the shape's `CLKDIV` pins in both flows (`D107`,
+#: `io_ser`'s module docstring gives the block-1 measurement behind the
+#: choice).  The half is a choice and no longer a limit: "an IOLOGIC is
+#: configurable on the A half only" was read out of a three-coordinate stub
+#: table and is RETRACTED -- the hundred-coordinate `IOLOGICB` table lives in
+#: the adjacent aux cell, and `shapes/io_des_b.py` measures an `IDES4` there.
 IDES_BALL = "AA9"          # IOB53A, cell (108,52), sk9822_da
 RESET_BALL = "T16"         # IOB76A, LCD_CTP[2]
 RESETN_BALL = "AB13"       # IOB89B, Key_in[0], the CLKDIV's own reset
