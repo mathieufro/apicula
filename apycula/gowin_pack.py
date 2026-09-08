@@ -5372,6 +5372,41 @@ class GW5A(Device):
     def get_IDES16_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         return self._refuse_io16(bel)
 
+    #: What the vendor measured about each hard block this device model does
+    #: not carry yet, so the refusal can say which fact it is refusing on.
+    _UNMODELLED_BLOCKS = {
+        'ADCLRC': ("the vendor builds it on this device (one site, in the "
+                   "lower-right corner), but the die's own AdcLRC* .dat "
+                   "tables read at their declared bases give zeros: the base "
+                   "has drifted and the portmap would be wrong"),
+        'ADCULC': ("the vendor builds it on this device (one site, in the "
+                   "upper-left corner), but the die's own AdcULC* .dat "
+                   "tables read at their declared bases give zeros: the base "
+                   "has drifted and the portmap would be wrong"),
+    }
+
+    def _refuse_adc(self, bel: BelDesc) -> list[CellFuseBits]:
+        """Refuse an ADC by name, saying which fact the refusal rests on.
+
+        `P3.T29`: four vendor runs place `ADCLRC`/`ADCULC` on the GW5AST-138C
+        with zero errors, so this is a gap in the model and not a limit of the
+        die -- see `evidence/adc/summary.md`, which also carries the bitstream
+        diffs that localise both blocks and the surviving candidate `.dat`
+        bases. Emitting a fuse from a mis-based table would produce a wrong
+        bitstream with no error (`D30`).
+        """
+        typ = bel.cell.typ
+        raise PackRefused(
+            f"{typ} is not implemented on {self.device_name}: "
+            f"{self._UNMODELLED_BLOCKS[typ]}. Refusing rather than emitting "
+            "an unverified fuse.")
+
+    def get_ADCLRC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        return self._refuse_adc(bel)
+
+    def get_ADCULC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        return self._refuse_adc(bel)
+
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         super().__init__(cli_args, pnr)
         # PLLA, ADC etc

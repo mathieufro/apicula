@@ -2580,6 +2580,23 @@ def _gowin_install_label():
 
 
 # ADC in GW5A series are placed in slots AND in the main grid.
+#
+# The GW5AST-138C is deliberately NOT here, and the reason is measured rather
+# than inherited (`P3.T28`/`P3.T29`, `evidence/adc/summary.md`).  Four vendor
+# runs build an ADC on that die with zero errors, so the block exists -- two of
+# them in fact, `ADCLRC` in the lower-right corner (configuration fuses in
+# tiles (108,180) and (108,181)) and `ADCULC` in the upper-left, one site each,
+# named by the vendor's own resource report.  What is missing is the portmap:
+# `fse_create_adc` builds one from `Adc25kIns`/`Adc25kOuts`, which are 25A
+# tables, and the die's own `AdcLRCIns`/`AdcLRCOuts`/`AdcULCOuts` read zeros and
+# ASCII bytes at their declared bases -- the base has drifted between IDE
+# releases the way `Ae350SocIns`' and `CibFabricNode`'s did.  A bel whose
+# portmap comes from a mis-based table is worse than no bel: nextpnr binds it
+# and then dies in the router on a wire that was never that port's, with
+# nothing to say it read the wrong offset.  So no bel is created and
+# `gowin_pack` refuses `ADCLRC`/`ADCULC` by name (`GW5A._refuse_adc`, `D30`);
+# `evidence/adc/summary.md` carries the surviving candidate bases and the one
+# vendor run that would separate them.
 def fse_create_adc(dev, device, fse, dat):
     if device not in {"GW5A-25A"}:
         return
@@ -4505,6 +4522,21 @@ def fse_create_logic2clk(dev, device, dat: Datfile):
                     add_node(dev, node, "GLOBAL_CLK", brow, bcol, gate)
 
 def fse_create_osc(dev, device, fse):
+    # `GW5AST-138C` skips because the die HAS NO OSCILLATOR, measured, not
+    # assumed (`P3.T30`/`P3.T31`, `evidence/osc/summary.md`): three vendor runs
+    # covering both primitives the GW5A cell library declares are refused by
+    # name before place-and-route, `ERROR (RP0008) : There is no OSCA resource
+    # in current device, please change device` (and the same for `OSCB`).
+    #
+    # The near-miss this records: that die's `.fse` DOES carry the oscillator's
+    # `shortval` table 51 -- 63 rows, in exactly one cell, (108, 0), tile type
+    # 48 -- so the loop below would happily have built a bel there out of real
+    # fuse rows, for a resource the vendor refuses to place.  A fuse table in
+    # the device file says the *family* has the block, not that this *die*
+    # bonds it.
+    #
+    # `GW5AT-60B` is untouched and unmeasured: nothing here says anything
+    # about it.
     if device in {'GW5AT-60B', 'GW5AST-138C'}:
         return
     skip_nodes = False
