@@ -4351,9 +4351,14 @@ def fse_create_io16(dev, device):
     # or even) along the side of the chip one at a time and compiling with the
     # IDE.
 
-    # It is unlikely that someone will need to repeat this work since OSER16 /
-    # IDES16 were only in three chips and these primitives simply do not exist
-    # in the latest series.
+    # This work does have to be repeated for the GW5A series: OSER16 and
+    # IDES16 are NOT gone from the latest chips.  One vendor run per primitive
+    # on the GW5AST-138C builds each with zero errors, and the vendor's own PnR
+    # resource report names what it realised -- `IOLOGIC 2/285 | --OSER16 1`
+    # and `IOLOGIC 1/285 | --IDES16 1`, so the two are asymmetric there, OSER16
+    # taking the A+B pad pair and IDES16 a single IOLOGIC.  Until that table is
+    # measured for a GW5A device, `gowin_pack` refuses both by name rather than
+    # emitting an unverified fuse (`GW5A._refuse_io16`, `D30`).
 
     df = dev.extra_func
     if device in {'GW1N-9', 'GW1N-9C'}:

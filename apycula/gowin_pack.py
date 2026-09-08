@@ -5340,6 +5340,38 @@ DYN_SELECT_ATTRS = (
 
 class GW5A(Device):
     """ GW5A series """
+    #: The 16-bit gearboxes, named in the refusal rather than left to the
+    #: generic "Not supported cell type" (`V16`).
+    _IO16_MEASURED = {
+        'OSER16': 'two IOLOGIC cells (the A+B pad pair)',
+        'IDES16': 'one IOLOGIC cell',
+    }
+
+    def _refuse_io16(self, bel: BelDesc) -> list[CellFuseBits]:
+        """Refuse a 16-bit gearbox by name, and say why it is a gap not a limit.
+
+        `P3.T16` put one `OSER16` and one `IDES16` design through `gw_sh` on
+        the GW5AST-138C: both built with zero errors, and the vendor's PnR
+        resource report names the primitive it realised. So the silicon has
+        both, and a refusal saying the *device* does not support them would be
+        false. What is missing is here: the chipdb creates no `OSER16`/`IDES16`
+        bel for a GW5A device and there is no measured fuse set for either, so
+        emitting a plausible one would produce a wrong bitstream with no error
+        (`D30`).
+        """
+        typ = bel.cell.typ
+        raise PackRefused(
+            f"{typ} is not implemented on {self.device_name}: the vendor "
+            f"builds it on this device, using {self._IO16_MEASURED[typ]} "
+            "(P3.T16), but apicula has no bel and no measured fuse set for "
+            "it. Refusing rather than emitting an unverified fuse.")
+
+    def get_OSER16_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        return self._refuse_io16(bel)
+
+    def get_IDES16_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        return self._refuse_io16(bel)
+
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         super().__init__(cli_args, pnr)
         # PLLA, ADC etc
