@@ -62,10 +62,12 @@ PRIMITIVE_OF_WIDTH = {4: "OSER4", 7: "OVIDEO", 8: "OSER8", 10: "OSER10"}
 
 #: The balls, and why each is the one it is.
 #:
-#: `AA9` is `IOB53A`, cell `(108,52)`, tile type 247: the **A** half, because
-#: `db.shortval[ttyp]['IOLOGICB']` holds 3 fuse coordinates against
-#: `IOLOGICA`'s 100 on every IO tile type this package bonds, so an IOLOGIC is
-#: configurable on the A half only (`P3.T11`'s named gap).  It is also in HCLK
+#: `AA9` is `IOB53A`, cell `(108,52)`, tile type 247: the **A** half.  That
+#: `db.shortval[247]['IOLOGICB']` holds 3 fuse coordinates against
+#: `IOLOGICA`'s 100 was once read as "an IOLOGIC is configurable on the A half
+#: only"; the conclusion is RETRACTED -- the hundred-coordinate table is the
+#: adjacent aux cell's, and `shapes/io_ser_b.py` measures an `OSER4` on a `B`
+#: half.  The half here is a choice, not a limit.  `AA9` is also in HCLK
 #: block 4 (bottom edge, columns 2..90) and on a tile type whose `IOLOGICA`
 #: bel carries a full port map -- the bottom edge also holds tile types 63 and
 #: 251, whose `IOLOGICA` has **no ports at all**, and a gearbox placed there

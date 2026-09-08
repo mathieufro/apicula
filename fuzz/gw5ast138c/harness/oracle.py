@@ -454,16 +454,24 @@ def diff_pads_of(text):
     return names
 
 
-def check_cst_defaults(text, pin_banks):
+def check_cst_defaults(text, pin_banks, ddr_context=False):
     """The three unconditional rules `P0.T20` makes generation-time (F21).
 
     1. every used pin carries `IO_TYPE` -- except a port the file declares as
        one half of a differential pad (`DIFF_PAD`, see `diff_pads_of`);
     2. every bank named carries a `BANK_VCCIO` -- differential pads owe this
        one too;
-    3. no `LVCMOS*` on any bank 6 or 7 pin — the PR #423 thermal-hazard
-       class (F73). A bank/pull change on this silicon is a live thermal
-       hazard, not a cosmetic one.
+    3. **no ball of bank 6 or 7 may be named at all** -- those are the DDR3
+       banks (`D20c`, `D54`), and a bank/pull change on this silicon is a live
+       thermal hazard, not a cosmetic one (F73, PR #423).
+
+    Rule 3 is about the **ball**, not about a string.  It used to key on
+    `IO_TYPE=LVCMOS*`, which let a `.cst` naming a DDR ball with any other
+    standard -- `SSTL15`, the one DDR3 actually uses -- through the file-level
+    gate entirely; only the shape layer stopped it, and the shape layer is
+    bypassed by anything that writes a `.cst` directly.  A caller that really
+    is packing DDR3 (Phase 5b) declares it with `ddr_context=True`; nothing in
+    Phase 3 does.
 
     Returns a list of error strings; empty means the `.cst` is admissible.
     """
@@ -486,11 +494,12 @@ def check_cst_defaults(text, pin_banks):
         banks_seen.setdefault(bank, False)
         if "BANK_VCCIO" in port.attrs:
             banks_seen[bank] = True
-        io_type = str(port.attrs.get("IO_TYPE", "")).upper()
-        if bank in (6, 7) and io_type.startswith("LVCMOS"):
+        if bank in (6, 7) and not ddr_context:
+            io_type = str(port.attrs.get("IO_TYPE", "")) or "no IO_TYPE"
             errors.append(
-                f'port "{port.port}" (pin {port.pin}) sets {io_type} on bank {bank} '
-                f"- LVCMOS* on banks 6/7 is the PR #423 thermal-hazard class (F73)"
+                f'port "{port.port}" places ball {port.pin} on bank {bank}, a DDR3 '
+                f"bank - no design outside a declared DDR context may name a "
+                f"bank 6/7 ball ({io_type}; D20c, D54, F73/PR #423)"
             )
     for bank, ok in sorted(banks_seen.items()):
         if not ok:
@@ -498,11 +507,11 @@ def check_cst_defaults(text, pin_banks):
     return errors
 
 
-def assert_cst_defaults(cst_path, gowinhome=None):
+def assert_cst_defaults(cst_path, gowinhome=None, ddr_context=False):
     """Raise `CstDefaultError` naming every violation in `cst_path`."""
     with open(cst_path) as fh:
         text = fh.read()
-    errors = check_cst_defaults(text, load_pin_banks(gowinhome))
+    errors = check_cst_defaults(text, load_pin_banks(gowinhome), ddr_context)
     if errors:
         raise CstDefaultError(f"{cst_path}: " + "; ".join(errors))
     return True

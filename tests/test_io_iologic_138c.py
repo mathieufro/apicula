@@ -45,6 +45,16 @@ def _iologic_bel_counts(db):
     return counts
 
 
+#: Each of the three IOLOGIC sweeps carries the shape's six points...
+SWEEP_POINTS = 6
+
+#: ...plus one point on the **B** half of a pad pair (`P3.F3`).  The sweeps
+#: were confined to `A`-half balls by a conclusion that has since been
+#: retracted -- see `shapes/io_basic_b.py` -- so each slug now also carries the
+#: measurement that settles the other half of the column.
+B_HALF_POINTS = 1
+
+
 @pytest.fixture(scope="module")
 def db_138c():
     try:
@@ -308,8 +318,8 @@ def test_oddr_iddr_sweep_is_complete_at_e1():
     rows = _oddr_iddr_rows()
     if rows is None:
         pytest.skip("evidence/oddr-iddr/runs.jsonl not written yet")
-    assert len(rows) == 6
-    assert len([r for r in rows if r["level"] == "E1"]) == 6
+    assert len(rows) == SWEEP_POINTS + B_HALF_POINTS
+    assert len([r for r in rows if r["level"] == "E1"]) == len(rows)
 
 
 def test_oddr_iddr_rows_e1():
@@ -326,9 +336,9 @@ def test_oddr_iddr_rows_e1():
     rows = _oddr_iddr_rows()
     if rows is None:
         pytest.skip("evidence/oddr-iddr/runs.jsonl not written yet")
-    assert len(rows) == 6
+    assert len(rows) == SWEEP_POINTS + B_HALF_POINTS
     good = [r for r in rows if r["level"] == "E1" and r["verdict"] == "ok"]
-    assert len(good) == 6
+    assert len(good) == len(rows)
     assert all(r["diff_count"]["conns"] == 0 for r in rows)
 
 
@@ -380,9 +390,9 @@ def test_oser_rows_e1():
     rows = _rows(_OSER)
     if rows is None:
         pytest.skip("evidence/oser/runs.jsonl not written yet")
-    assert len(rows) == 6
+    assert len(rows) == SWEEP_POINTS + B_HALF_POINTS
     good = [r for r in rows if r["level"] == "E1" and r["verdict"] == "ok"]
-    assert len(good) == 5
+    assert len(good) == len(rows) - 1
     assert {r["sweep"]["POINT"] for r in rows} - {
         r["sweep"]["POINT"] for r in good} == {"ovideo-default"}
 
@@ -464,7 +474,7 @@ def test_ides_rows_e1():
     rows = _rows(_IDES)
     if rows is None:
         pytest.skip("evidence/ides/runs.jsonl not written yet")
-    assert len(rows) == 6
+    assert len(rows) == SWEEP_POINTS + B_HALF_POINTS
     assert all(r["level"] == "E1" for r in rows)
     for row in rows:
         counts = row["diff_count"]

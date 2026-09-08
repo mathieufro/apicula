@@ -129,3 +129,45 @@ def test_oracle_collector_globs_never_assumes_basename(tmp_path):
     import inspect
     src = inspect.getsource(oracle)
     assert src.count('top.sdf') == 0
+
+
+_BANK6_SSTL15_CST = '''\
+IO_LOC "dq" AA1;
+IO_PORT "dq" IO_TYPE=SSTL15 BANK_VCCIO=1.5 PULL_MODE=NONE;
+'''
+
+_BANK6_LVCMOS_CST = '''\
+IO_LOC "dq" AA1;
+IO_PORT "dq" IO_TYPE=LVCMOS33 BANK_VCCIO=3.3 PULL_MODE=NONE;
+'''
+
+
+def _bank6_pin_banks():
+    """`AA1` is a bank-6 ball; one safe ball keeps the other rules quiet."""
+    return {'AA1': 6, 'J14': 3}
+
+
+@pytest.mark.parametrize('cst', [_BANK6_SSTL15_CST, _BANK6_LVCMOS_CST])
+def test_cst_refuses_a_ddr_bank_ball_whatever_its_io_type(cst):
+    """Rule 3 is about the ball, not about the IO standard string.
+
+    While it keyed on `LVCMOS*`, a `.cst` naming a DDR3 ball with `SSTL15` --
+    the standard DDR3 actually uses -- passed the file-level gate outright,
+    and only the shape layer stopped it; anything writing a `.cst` directly
+    bypasses that layer.
+    """
+    errors = oracle.check_cst_defaults(cst, _bank6_pin_banks())
+    assert len(errors) == 1
+    assert 'AA1' in errors[0]
+    assert 'bank 6' in errors[0]
+
+
+def test_cst_admits_a_ddr_bank_ball_only_in_a_declared_ddr_context():
+    """Phase 5b owns banks 6/7 and says so; Phase 3 never sets this."""
+    assert oracle.check_cst_defaults(
+        _BANK6_SSTL15_CST, _bank6_pin_banks(), ddr_context=True) == []
+
+
+def test_cst_still_admits_a_safe_bank_ball():
+    cst = 'IO_LOC "d" J14;\nIO_PORT "d" IO_TYPE=LVCMOS33 BANK_VCCIO=3.3;\n'
+    assert oracle.check_cst_defaults(cst, _bank6_pin_banks()) == []

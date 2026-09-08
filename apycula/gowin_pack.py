@@ -7142,6 +7142,42 @@ class GW5AST_138C(GW5A):
         return (self.default_tlvds_obuf_p_attrs if idx_str == 'A'
                 else self.default_tlvds_obuf_attrs)
 
+    #==============================
+    #========== DDR3 banks
+    #==============================
+    #: The DDR3 banks of this die (`D20c`, `D54`).  Their rail is the DDR3
+    #: rail, and PR #423's class of defect -- a pull/drive configuration on an
+    #: unfused bank -- is a live thermal hazard there, so nothing outside a
+    #: declared DDR context may configure a pad on them.
+    ddr3_banks: frozenset[int] = frozenset({6, 7})
+
+    #: Set only by the DDR3 work that owns those banks (Phase 5b).  A design
+    #: that means to drive them says so; it is never inferred from an IO
+    #: standard, because the standard is a string the design chooses and the
+    #: ball is not.
+    ddr_context: bool = False
+
+    def add_io_to_bank(self, bel: IoBelDesc):
+        """Refuse any pad on a DDR3 bank, by name and whatever its IO_TYPE.
+
+        The rule is about the **ball**, not about a string: keying it on
+        `LVCMOS*` -- as the `.cst` gate did -- lets exactly the standard DDR3
+        uses (`SSTL15`) through, which is the configuration the hazard is
+        about.  The harness's shape layer refuses these balls too, but it is
+        bypassed by anything that hands the packer a placed netlist directly,
+        so the packer states the rule itself.
+        """
+        bank = self.get_bel_bank(bel)
+        if bank in self.ddr3_banks and not self.ddr_context:
+            pin = chipdb.loc2pin_name(self.chipdb.db, bel.y, bel.x)
+            raise PackRefused(
+                f"IO cell {bel.cell.name} at X{bel.x}Y{bel.y}/IOB{bel.idx_str} "
+                f"(pad {pin}{bel.idx_str}) is on bank {bank}, a DDR3 bank of "
+                f"GW5AST-138C: no design outside a declared DDR context may "
+                f"configure a bank 6/7 pad, whatever its IO_TYPE "
+                f"(D20c, D54, F73/PR #423)")
+        super().add_io_to_bank(bel)
+
     def reject_iologic_unsupported(self):
         """ D39 state (1): named refusal for any IOLOGIC cell on GW5AST-138C.
         No IOLOGIC bel exists for this device until Phase 3 lands the HCLK

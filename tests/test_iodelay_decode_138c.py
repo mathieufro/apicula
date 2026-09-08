@@ -52,3 +52,20 @@ def test_bit_seven_is_fuse_backed(chipdb_138c):
 def chipdb_138c():
     from fuzz.gw5ast138c.harness import equiv
     return equiv.load_db(equiv.DEVICE)
+
+
+def test_attr_name_118_is_c_static_dly():
+    """Code 118 has exactly one name, so decode cannot depend on dict order.
+
+    `get_attr_name` resolves a code by first match over the attribute-name
+    table.  While a second name for 118 existed, `C_STATIC_DLY` won only
+    because of where its line sat in the file, and any alphabetical tidy of
+    `attrids.py` would have silently reverted every IODELAY decode.
+    """
+    names = [n for n, code in attrids.iologic_attrids.items() if code == 118]
+    assert names == ['C_STATIC_DLY']
+
+    shuffled = dict(sorted(attrids.iologic_attrids.items()))
+    assert gowin_unpack.get_attr_name(shuffled, 118, 'IOLOGIC') == 'C_STATIC_DLY'
+    reversed_order = dict(reversed(list(attrids.iologic_attrids.items())))
+    assert gowin_unpack.get_attr_name(reversed_order, 118, 'IOLOGIC') == 'C_STATIC_DLY'
