@@ -670,6 +670,131 @@ class Datfile:
             return False
         return words[previous + 1] != words[first + 1]
 
+    # ------------------------------------------------------------------
+    # The 138C's two ADC blocks (`P3.T28b`)
+    # ------------------------------------------------------------------
+    #
+    # `AdcLRC*`/`AdcULC*` drift between `.dat` releases the way `Ae350SocIns`'
+    # did, so they are *located* rather than addressed. What locates them is
+    # the block's own port geometry, which is far more specific than a
+    # plausibility filter:
+    #
+    #  * a hard block **reads** the wires a fabric tile's routing drives into
+    #    it (`A`-`D`, `CLK`, `CE`, `LSR`) and **drives** the tile's own output
+    #    wires (`F`, `Q`, `OF`) -- the direction the chipdb's own `BSRAM`
+    #    portmap states (`AD*` -> `C0`-`C7`, `DO*` -> `F0`-`F5`/`Q0`-`Q5`),
+    #    not the one the table *names* suggest;
+    #  * the input table is `0x28` slots and the ADC has exactly 29 fabric
+    #    input bits, in three runs the table separates with an unbound slot:
+    #    seven controls (`VSENCTL[2:0]`, `ADCEN`, `CLK`, `DRSTN`, `ADCREQI`),
+    #    ten `FSCAL_VALUE` and twelve `OFFSET_VALUE`, i.e. 7/10/12 at slots
+    #    9-15, 17-26 and 28-39 with 16 and 27 unbound; and
+    #  * the output table is `0x12` slots and holds the 17 outputs the vendor's
+    #    own `ADCLRC_DB`/`ADCULC_DB` declare -- `ADCRDY`, an unbound slot,
+    #    then `ADCVALUE[13:0]` as one cell's `F0`-`F5`/`OF0`-`OF7` run, then
+    #    `ADC1BIT` and `ADCCLKO`.
+    #
+    # Those two fingerprints together are unique: they match at exactly two
+    # bases in the whole 5-series table block of a 1.9.12.03 GW5AST-138C, one
+    # per ADC, and the slot-13 record lands on a `CLK` wire in both -- an
+    # independent check on the phase, which is the part a region match alone
+    # cannot give (`evidence/adc/summary.md`).
+    #
+    # The vendor's own ADC bitstreams confirm the result rather than the
+    # search: in the `ADCLRC` run the cell the output table names drives
+    # exactly `F0`-`F5` and `OF0`-`OF7`, 14 of 14 `ADCVALUE` bits, and the
+    # cells the input table names carry the `VSENCTL`/`ADCEN`/`CLK` pips; in
+    # the `ADCULC` run the same holds for that block's own cells.
+    ADC_IN_SLOTS = 0x28
+    ADC_OUT_SLOTS = 0x12
+    #: `slot -> port` for the located input table, in the primitive's own
+    #: declaration order (`prim_syns/gw5a/primitive.xml`).
+    ADC_IN_PORTS = dict(zip(
+        list(range(9, 16)) + list(range(17, 27)) + list(range(28, 40)),
+        ["VSENCTL0", "VSENCTL1", "VSENCTL2", "ADCEN", "CLK", "DRSTN",
+         "ADCREQI"]
+        + [f"FSCAL_VALUE{i}" for i in range(10)]
+        + [f"OFFSET_VALUE{i}" for i in range(12)]))
+    #: `slot -> port` for the located output table.
+    ADC_OUT_PORTS = dict(zip(
+        [0] + list(range(2, 16)) + [16, 17],
+        ["ADCRDY"] + [f"ADCVALUE{i}" for i in range(14)]
+        + ["ADC1BIT", "ADCCLKO"]))
+    _ADC_IN_WIRE = re.compile(r"(?:[A-D]\d|CLK\d|CE\d|LSR\d|SEL\d)")
+    _ADC_OUT_WIRE = re.compile(r"(?:F|Q|OF)\d")
+    _ADC_VALUE_WIRES = (["F%d" % i for i in range(6)]
+                        + ["OF%d" % i for i in range(8)])
+
+    @classmethod
+    def _adc_records(cls, words, wirenames, base, slots):
+        """`slots` records from `base`, `None` where the slot is unbound."""
+        out = []
+        for k in range(slots):
+            row, col, wire = words[base + 3 * k: base + 3 * k + 3]
+            if (row, col, wire) == (0xffff, 0xffff, 0xffff):
+                out.append(None)
+            else:
+                out.append((row, col, wirenames.get(wire)))
+        return out
+
+    @classmethod
+    def _adc_ins_match(cls, records):
+        """The 7/10/12 port-group fingerprint of an ADC input table."""
+        if records[16] is not None or records[27] is not None:
+            return False
+        for slot in cls.ADC_IN_PORTS:
+            record = records[slot]
+            if record is None or not record[2]:
+                return False
+            if not cls._ADC_IN_WIRE.fullmatch(record[2]):
+                return False
+        return records[13][2].startswith("CLK")
+
+    @classmethod
+    def _adc_outs_match(cls, records):
+        """`ADCRDY`, an unbound slot, then one cell's `ADCVALUE` run."""
+        if records[1] is not None:
+            return False
+        if records[0] is None or not cls._ADC_OUT_WIRE.fullmatch(
+                records[0][2] or ""):
+            return False
+        value = records[2:16]
+        if any(record is None for record in value):
+            return False
+        return (len({(row, col) for row, col, _ in value}) == 1
+                and [wire for _, _, wire in value] == cls._ADC_VALUE_WIRES)
+
+    def locate_adc_tables(self, wirenames):
+        """Every ADC port table pair this `.dat` describes, located.
+
+        Returns `[{'ins_base', 'outs_base', 'inputs', 'outputs'}, ...]`, one
+        entry per block in table order; `inputs`/`outputs` are `{port:
+        (row, col, wire)}` in the `.dat`'s own one-based cell coordinates.
+        Empty when the device describes no ADC, which is not an error: the
+        GW5A-25A's tables live elsewhere and pre-5-series devices have none.
+        """
+        words = self._rs_words()
+        span = 3 * (self.ADC_IN_SLOTS + self.ADC_OUT_SLOTS)
+        found = []
+        for base in range(len(words) - span):
+            ins = self._adc_records(words, wirenames, base, self.ADC_IN_SLOTS)
+            if not self._adc_ins_match(ins):
+                continue
+            outs_base = base + 3 * self.ADC_IN_SLOTS
+            outs = self._adc_records(words, wirenames, outs_base,
+                                     self.ADC_OUT_SLOTS)
+            if not self._adc_outs_match(outs):
+                continue
+            found.append({
+                "ins_base": base,
+                "outs_base": outs_base,
+                "inputs": {port: ins[slot]
+                           for slot, port in self.ADC_IN_PORTS.items()},
+                "outputs": {port: outs[slot]
+                            for slot, port in self.ADC_OUT_PORTS.items()},
+            })
+        return found
+
     def read_scaledGrid16i(self, numRows, numCols, rowScaling, colScaling, baseOffset):
         ret = []
 

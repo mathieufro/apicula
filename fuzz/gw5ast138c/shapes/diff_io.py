@@ -1,0 +1,215 @@
+"""`diff_io` -- the differential IO types on the GW5AST-138C (`P3.T23`/`P3.T25`).
+
+`TLVDS_IBUF`, `TLVDS_OBUF` and `TLVDS_TBUF`, then `ELVDS_OBUF`, `ELVDS_TBUF`
+and `ELVDS_IOBUF`, one type per run, on the board's only true-LVDS pairs --
+the HDMI TMDS pairs of bank 3 (`TRUELVDS` in the package pinout, and the only
+`SAFE_PINS` entries with a `PAIR`).  UG304E documents no `ELVDS_IBUF`; the
+input side of the E family is `ELVDS_IOBUF` (`spec-primitives.md` §2), so
+that is what the sweep carries.
+
+`TLVDS_IOBUF` is deliberately **absent**: `chipdb.fse_create_diff_types`
+removes it for every device outside `{GW5A-25A, GW2A-18, GW2A-18C, GW1N-4}`
+with no recorded rationale, and whether that removal is right on this die is
+`P3.T24`'s adjudication against the oracle -- not something a shape may
+presume either way.
+
+**Known collision with the frozen `.cst` assertion.**  `harness/gen.py`'s
+rules (a) and (b) require *every* used pin to carry an `IO_TYPE` and admit
+only `LVCMOS33` on a non-DDR pin.  Both were written for single-ended pins,
+before a differential shape existed, and both refuse a differential pad --
+which the vendor's own `tang_mega_138K_pins.cst` gives no `IO_TYPE` at all.
+Granting them a differential exemption is a `harness/gen.py` change, and
+`harness/**` is Phase 0's and frozen for Phase 3 (`P3.T10` "Must NOT
+change"), so this shape spells the pads as the vendor does and `P3.T23`
+carries the harness amendment as its first step.  `test_io_shapes_138c.py`
+pins the collision so it is a named, measured gap rather than a surprise at
+batch time.
+"""
+from ._io_base import IoShape
+
+#: The buffer primitive per sweep point -- one type per run, and the swept
+#: axis *is* the type identity.  The pads carry no `IO_TYPE`: a differential
+#: standard comes from the primitive, which is how the vendor's own board
+#: constraints spell the TMDS pairs.  (`LVDS25E`, sometimes quoted as an
+#: ELVDS requirement, is only apicula's default `IO_TYPE` for an ELVDS buffer
+#: -- `gowin_pack.py:1658-1660`, `spec-primitives.md:125` -- and the real
+#: vendor `IO_TYPE`/VCCIO matrix is recorded from the oracle by `P3.T25`.)
+POINTS = {
+    "tlvds-ibuf": "TLVDS_IBUF",
+    "tlvds-obuf": "TLVDS_OBUF",
+    "tlvds-tbuf": "TLVDS_TBUF",
+    "elvds-obuf": "ELVDS_OBUF",
+    "elvds-tbuf": "ELVDS_TBUF",
+    "elvds-iobuf": "ELVDS_IOBUF",
+}
+
+#: Every point any `DiffIoShape` subclass can build.  `TLVDS_IOBUF` is here
+#: and deliberately **not** in `POINTS`: `diff_io`'s own sweep must stay free
+#: of it until `P3.T24` adjudicates the `fse_create_diff_types` removal, and
+#: `diff_io_iobuf` is the one-point shape that asks the oracle.
+ALL_POINTS = dict(POINTS, **{"tlvds-iobuf": "TLVDS_IOBUF"})
+
+#: `diff_io` sweeps the TLVDS half; `diff_io_elvds` the ELVDS half.  They are
+#: two shapes over one `POINTS` table so each row can be batched -- and
+#: re-batched -- on its own without re-spending the other's oracle runs.
+TLVDS_POINTS = ("tlvds-ibuf", "tlvds-obuf", "tlvds-tbuf")
+
+BASELINE = "tlvds-obuf"
+
+#: Ports of each type (`cells_sim.v:585,593`, `cells_xtra_gw5a.v:45-70`).
+#: Written out rather than inferred: an `IOBUF`'s `IO`/`IOB` are `inout` and
+#: a `TBUF`'s are `output`, and getting that wrong changes which pad fuses
+#: the vendor sets.
+_BODIES = {
+    "TLVDS_IBUF": """\
+    TLVDS_IBUF dut (
+        .O  (rx),
+        .I  (pad_p),
+        .IB (pad_n)
+    );
+""",
+    "TLVDS_OBUF": """\
+    TLVDS_OBUF dut (
+        .I  (din),
+        .O  (pad_p),
+        .OB (pad_n)
+    );
+""",
+    "TLVDS_TBUF": """\
+    TLVDS_TBUF dut (
+        .I   (din),
+        .OEN (oen),
+        .O   (pad_p),
+        .OB  (pad_n)
+    );
+""",
+    "ELVDS_OBUF": """\
+    ELVDS_OBUF dut (
+        .I  (din),
+        .O  (pad_p),
+        .OB (pad_n)
+    );
+""",
+    "ELVDS_TBUF": """\
+    ELVDS_TBUF dut (
+        .I   (din),
+        .OEN (oen),
+        .O   (pad_p),
+        .OB  (pad_n)
+    );
+""",
+    "ELVDS_IOBUF": """\
+    ELVDS_IOBUF dut (
+        .O   (rx),
+        .IO  (pad_p),
+        .IOB (pad_n),
+        .I   (din),
+        .OEN (oen)
+    );
+""",
+    "TLVDS_IOBUF": """\
+    TLVDS_IOBUF dut (
+        .O   (rx),
+        .IO  (pad_p),
+        .IOB (pad_n),
+        .I   (din),
+        .OEN (oen)
+    );
+""",
+}
+
+#: Types whose buffer has an `O` receiver output, and so can drive `dout`.
+HAS_RECEIVER = frozenset({"TLVDS_IBUF", "ELVDS_IOBUF", "TLVDS_IOBUF"})
+
+#: Which direction each type gives the pad pair, which is what the `.cst`
+#: renders and what `DRIVE` is legal on (`CT1108`, measured `P0.T19`).
+PAD_DIRECTION = {
+    "TLVDS_IBUF": "input",
+    "TLVDS_OBUF": "output",
+    "TLVDS_TBUF": "output",
+    "ELVDS_OBUF": "output",
+    "ELVDS_TBUF": "output",
+    # `IO`/`IOB` are `inout` on an IOBUF (`cells_sim.v`), so the pad ports
+    # are declared `inout` too -- an `output` declaration is a port-direction
+    # mismatch the synthesiser reads as a driver conflict.
+    "ELVDS_IOBUF": "inout",
+    "TLVDS_IOBUF": "inout",
+}
+
+_TEMPLATE = """\
+// Generated by fuzz.gw5ast138c.harness.gen from shapes/diff_io.py -- do not edit.
+// Shape: {shape} (primitive under test: {primitive})
+// Sweep: {axis} = {point}
+`default_nettype none
+
+module {top} (
+    input  wire din,
+    input  wire oen,
+    output wire dout,
+    {pad_decl} wire pad_p,
+    {pad_decl} wire pad_n
+);
+
+    wire rx;
+
+    // Every net stays inside the IO tiles: the buffer's `I`/`OEN` come
+    // straight off package balls and `dout` is driven by the buffer's `O`
+    // where it has one, by `din` where it has not.  A context flop here
+    // would be a fabric cell neither flow is constrained to place
+    // identically -- the `P3.T12` residue `D105` closed by rule.
+    assign dout = {dout_src};
+
+{body}
+endmodule
+
+`default_nettype wire
+"""
+
+
+class DiffIoShape(IoShape):
+    """One differential buffer per run on the board's TMDS pairs."""
+
+    name = "diff_io"
+    # The `spec-primitives.md` row id, so an evidence row and its spec row
+    # match by name (`tools/check_evidence.py`).
+    primitive = "TLVDS_IBUF / OBUF / TBUF"
+    sweep_axis = "POINT"
+    sweep_values = list(TLVDS_POINTS)
+    baseline_value = BASELINE
+    ports = {
+        "din": ("N15", "input"),
+        "oen": ("AB13", "input", {"pull_mode": "UP"}),
+        "dout": ("P20", "output"),
+        # No `DRIVE` and no `IO_TYPE` on the pads: the swept axis changes the
+        # pair's direction (an `IBUF` point reads them, an `OBUF` point drives
+        # them) while `ShapeSpec.pins` is fixed for the whole sweep, so the
+        # shape emits nothing direction-dependent -- `DRIVE` on an input is
+        # `CT1108` (measured `P0.T19`).
+        "pad_p": ("J14", "output", {"io_type": None, "drive": None}),
+        "pad_n": ("H14", "output", {"io_type": None, "drive": None}),
+    }
+    #: The one tile the `E0`/`E1` comparison is restricted to: the IO cell the
+    #: differential pair sits in.  Both halves of a `TRUELVDS` pair share a
+    #: cell -- `J14` is `IOR103A` and `H14` is `IOR103B`, column 181, row 102
+    #: (`$OTC/evidence/iologic/pin-hclk-138c.json`) -- so the buffer under
+    #: test is one tile, known before the run from the pin constraint.
+    #: Without it the shape would inherit `IoShape.scope_tiles = ()`, which
+    #: `equiv.in_scope` reads as the empty set: a comparison of nothing that
+    #: reports `cells` 0 because it looked at no cell (`P3.T11` fixed the same
+    #: hole in `io_basic`).
+    scope_tiles = ((181, 102),)
+    diff_pads = ("pad_p", "pad_n")
+
+    def rtl(self, sweep_value):
+        primitive = ALL_POINTS[sweep_value]
+        direction = PAD_DIRECTION[primitive]
+        pad_decl = {"input": "input ", "output": "output",
+                    "inout": "inout "}[direction]
+        return _TEMPLATE.format(
+            shape=self.name, primitive=primitive, axis=self.sweep_axis,
+            point=sweep_value, top=self.top_module, pad_decl=pad_decl,
+            dout_src="rx" if primitive in HAS_RECEIVER else "din",
+            body=_BODIES[primitive])
+
+
+SPEC = DiffIoShape().spec()

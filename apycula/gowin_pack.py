@@ -600,6 +600,16 @@ class ChipDB:
     def get_adc_bus(self, x: int, y: int) -> str:
         return self.db.extra_func[y, x]['adcio']['bus']
 
+    def get_adc_config(self, x: int, y: int) -> dict[str, dict[int, set]]:
+        """`{parameter: {value: bits}}` measured for the ADC at `(x, y)`.
+
+        Empty when the site's configuration table was never swept, which is
+        what makes an unattributed parameter a refusal instead of a silent
+        default.
+        """
+        return self.db.extra_func.get((y, x), {}).get('adc', {}).get(
+            'config', {})
+
     def get_const_fuses(self, x: int, y: int) -> set[Coord]:
         return self.db.const.get(self.get_ttyp(x, y), set())
 
@@ -647,7 +657,32 @@ class ChipDB:
         return get_longval_fuses(self.db, self.get_ttyp(x, y), av, f'IOB{idx_str}')
 
     def get_iologic_attr_val(self, attrval: AttrVal, av: set[tuple[int, int]]):
-        add_attr_val(self.db, 'IOLOGIC', av, attrids.iologic_attrids[attrval.attr], attrids.iologic_attrvals[attrval.val])
+        """ An `IOLOGIC` attribute-value pair, by name or by value id.
+
+        Most values have a name in `attrids.iologic_attrvals`, but an
+        enumerated attribute whose range is wider than the shipped table names
+        -- the Arora V static delay step, 255 values of which one is named --
+        can only be addressed by its id, exactly as `get_osc_attr_val` already
+        addresses the oscillator divider.
+        """
+        val = attrval.val
+        if isinstance(val, str):
+            val = attrids.iologic_attrvals[val]
+        add_attr_val(self.db, 'IOLOGIC', av, attrids.iologic_attrids[attrval.attr], val)
+
+    def get_iologic_fuse_cell(self, x: int, y: int, idx_str: str) -> Coord:
+        """ The cell one IOLOGIC half's fuses are written into.
+
+        On the Arora V families a pad pair's `B` half lives in the next cell
+        even though `nextpnr` sees one, and its IOLOGIC fuses follow its pad's
+        (`chipdb` `fuse_cell_offset`).  Everywhere else this is the cell
+        itself.
+        """
+        bel = self.get_tiledata(x, y).bels.get(f'IOLOGIC{idx_str}')
+        off = bel.fuse_cell_offset if bel is not None else None
+        if idx_str != 'B' or not off:
+            return (x, y)
+        return (x + off[1], y + off[0])
 
     def get_iologic_fuses(self, x: int, y: int, av: set[tuple[int, int]], idx_str: str) -> set[Coord]:
         return get_shortval_fuses(self.db, self.get_ttyp(x, y), av, f'IOLOGIC{idx_str}')
@@ -973,6 +1008,32 @@ class BankDesc:
         return f'|BankDesc| x:{self.x}, y:{self.y}, attrs:{self.attrs}, has_outputs:{self.has_outputs}, has_lvds_outputs:{self.has_lvds_outputs}, lvds_BANK_VCCIO:{self.lvds_BANK_VCCIO}, set_attr_bels:{self.set_attr_bels}, bels:{self.bels}'
 
 ################################################################
+def c_static_dly_bits(parms: dict[str, str]) -> str:
+    """ The IODELAY static delay step of a cell, as eight bits, MSB first.
+
+    The primitive's parameter is ``C_STATIC_DLY`` -- that is the spelling in
+    `UG304-1.3.8E` Table 4-48, in yosys' ``cells_xtra_gw5a.v`` and in the
+    ``constids.inc`` name nextpnr emits.  This packer read ``C_STATIC_DELAY``
+    instead, a name nothing writes, so the step never reached it on any
+    device and every delay line was packed at zero.  The old spelling is still
+    accepted so that a netlist written against it keeps its meaning.
+
+    nextpnr passes the value through as the netlist holds it, which is a bit
+    string for a parameter that came from a vector and a decimal string for
+    one written as an integer; both are read here, bit string first.
+    """
+    value = parms.get('C_STATIC_DLY', parms.get('C_STATIC_DELAY'))
+    if value is None:
+        return '0' * 8
+    if isinstance(value, int):
+        step = value
+    else:
+        text = str(value).strip()
+        step = int(text, 2) if set(text) <= set('01') else int(text, 0)
+    if not 0 <= step <= 255:
+        raise Exception(f"IODELAY C_STATIC_DLY {step} is outside the 0..255 the primitive takes")
+    return format(step, '08b')
+
 class Device:
     """ Base chip. The fuses for a specific chip are set in a class that inherits from this one. """
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
@@ -1811,6 +1872,13 @@ class Device:
         if val != 'OFF' and bel.cell.typ in {'IBUF', 'IOBUF', 'TLVDS_IBUF', 'TLVDS_IOBUF', 'ELVDS_IBUF', 'ELVDS_IOBUF'}:
             self.chipdb.get_iob_attr_val(AttrVal('DDR_DYNTERM', 'ON'), av)
 
+    #: IO attributes a device emits **only** when the design asks for them.
+    #: An attribute listed here has no default: leaving its fuse unprogrammed
+    #: is the device's own idle state, and inventing a value for it would
+    #: configure a pad the design said nothing about.  Empty on every device
+    #: whose defaults have been measured against the vendor's.
+    design_only_io_attrs: tuple[str, ...] = ()
+
     def set_io_attrvals(self, bel: IoBelDesc, default_attrs: list[tuple[str, str]], defaults_only = False) -> set[int]:
         """ Set IO attributes in addition to those specified in default. Or use only default. """
         lvds = bel.cell.typ[1:].startswith('LVDS')
@@ -1826,6 +1894,11 @@ class Device:
             if attr == 'SINGLERESISTOR':
                 self.set_input_resistor(val, bel, av)
             self.chipdb.get_iob_attr_val(AttrVal(attr, val), av)
+        if not defaults_only:
+            for attr in self.design_only_io_attrs:
+                val = bel.cell.attrs.get(attr)
+                if val:
+                    self.chipdb.get_iob_attr_val(AttrVal(attr, val), av)
         return av
 
     def set_iobuf_attrs(self, bel: IoBelDesc, av: set[int]):
@@ -1856,7 +1929,16 @@ class Device:
     def process_IBUF(self, bank_desc: BankDesc, bel: IoBelDesc) -> list[CellFuseBits]:
         av = self.set_io_attrvals(bel, self.default_ibuf_attrs)
         fuses = []
-        self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", bank_desc.io_type), av)
+        # An LVDS pair that shares a bank with plain single-ended IBUFs must
+        # not drag those IBUFs to the LVDS standard: only OBUFs (real driven
+        # outputs) fix the bank-wide standard. An input-only bank has no
+        # output to fix it, so each IBUF keeps its own IO_TYPE (falling back
+        # to this device's ordinary default, never the bank's LVDS override).
+        if not bank_desc.has_outputs:
+            io_type = bel.cell.attrs.get('IO_TYPE', self.get_default_io_type())
+            self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", io_type), av)
+        else:
+            self.chipdb.get_iob_attr_val(AttrVal("IO_TYPE", bank_desc.io_type), av)
         self.chipdb.get_iob_attr_val(AttrVal("BANK_VCCIO", bank_desc.bank_vccio), av)
         fuses += self.get_iob_fuses(bel.x, bel.y, bel.idx_str, av)
         return fuses
@@ -1943,10 +2025,18 @@ class Device:
         fuses += self.get_iob_fuses(bel.x, bel.y, bel.idx_str, av)
         return fuses
 
+    def tlvds_obuf_attrs(self, idx_str: str) -> list[tuple[str, str]]:
+        """ The `TLVDS_OBUF` default set for one half of the pad pair.
+
+        A family whose two halves are configured alike -- every family but
+        the 138C, measured -- answers with the one list for both.
+        """
+        return self.default_tlvds_obuf_attrs
+
     def process_TLVDS_OBUF(self, bank_desc: BankDesc, bel: IoBelDesc) -> list[CellFuseBits]:
         self.check_tlvds_placement(bel)
 
-        av = self.set_io_attrvals(bel, self.default_tlvds_obuf_attrs)
+        av = self.set_io_attrvals(bel, self.tlvds_obuf_attrs(bel.idx_str))
         fuses = []
         io_type = bel.cell.attrs.get('IO_TYPE')
         if io_type:
@@ -2113,27 +2203,48 @@ class Device:
         main_cell_inmode = cell.parms.get('INMODE')
         return IologicBelDesc(bel.x, bel.y, bel.idx_str, bel.cell, fclk, main_cell_outmode, main_cell_inmode)
 
-    def handle_iodelay(self, bel: IologicBelDesc) -> list[AttrVal]:
-        """ Iodelay is a part of iologic """
-        attr_vals = []
+    def iodelay_enable_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The attributes that switch a delay line into the iologic path.
+
+        Empty when the cell has no delay line, which is what tells the two
+        `handle_iodelay*` callers there is nothing further to pack.
+        """
         iodelay = bel.cell.attrs.get('IODELAY')
         if iodelay == 'IN':
-            attr_vals.append(AttrVal("INDEL", "ENABLE"))
+            attr_vals = [AttrVal("INDEL", "ENABLE")]
         elif iodelay == 'OUT':
-            attr_vals.append(AttrVal("OUTDEL", "ENABLE"))
+            attr_vals = [AttrVal("OUTDEL", "ENABLE")]
         else:
-            return attr_vals
+            return []
         attr_vals.append(AttrVal("CLKOMUX", "ENABLE"))
         attr_vals.append(AttrVal("IMARG", "ENABLE"))
         attr_vals.append(AttrVal("INDEL_0", "ENABLE"))
         attr_vals.append(AttrVal("INDEL_1", "ENABLE"))
-
-        c_static_delay = bel.cell.parms.get('C_STATIC_DELAY')
-        if c_static_delay:
-            for i in range(1, 8):
-                if c_static_delay[-i] == '1':
-                    attr_vals.append(AttrVal(f"DELAY_DEL{i - 1}", "1"))
         return attr_vals
+
+    def handle_iodelay(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ Iodelay is a part of iologic """
+        attr_vals = self.iodelay_enable_attrs(bel)
+        if not attr_vals:
+            return attr_vals
+        return attr_vals + self.delay_step_attrs(c_static_dly_bits(bel.cell.parms))
+
+    #: Delay steps the `IOLOGIC` shortval table can express: `DELAY_DEL0` is
+    #: attribute 32 and `DELAY_DEL6` attribute 38, and 39 is `IMON`
+    #: (`attrids.iologic_attrids`).  There is no `DELAY_DEL7`, so a delay step
+    #: with bit 7 set has no representation and must not be silently truncated.
+    DELAY_STEP_BITS = 7
+
+    def delay_step_attrs(self, bits: str) -> list[AttrVal]:
+        """ The `DELAY_DEL*` attributes for one static delay step.
+
+        `bits` is the step as eight characters, most significant first.
+        """
+        if bits[-self.DELAY_STEP_BITS - 1] == '1':
+            raise Exception(f"IODELAY delay step 0b{bits} needs DELAY_DEL{self.DELAY_STEP_BITS},"
+                            " which the IOLOGIC attribute table does not have")
+        return [AttrVal(f"DELAY_DEL{i}", "1")
+                for i in range(self.DELAY_STEP_BITS) if bits[-i - 1] == '1']
 
     def common_iologic_handler(self, bel: IologicBelDesc) -> list[AttrVal]:
         attr_vals = []
@@ -2227,6 +2338,12 @@ class Device:
             attr_vals.append(AttrVal('CLKIDDRMUX_ECLK', 'ECLK0'))
         return attr_vals
 
+    def iologic_fuse_bits(self, bel: IologicBelDesc, av: set[tuple[int, int]]) -> list[CellFuseBits]:
+        """ The fuses of one IOLOGIC half, in the cell that holds them. """
+        x, y = self.chipdb.get_iologic_fuse_cell(bel.x, bel.y, bel.idx_str)
+        bits = self.chipdb.get_iologic_fuses(x, y, av, bel.idx_str)
+        return [CellFuseBits(x, y, bits)] if bits else []
+
     def set_iologic_attrvals(self, bel: IologicBelDesc, attr_vals: list[AttrVal]) -> set[int]:
         av = set()
         for attr_val in attr_vals:
@@ -2243,11 +2360,7 @@ class Device:
         attr_vals += self.get_out_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def common_in_iologic_handler(self, bel: IologicBelDesc) -> list[CellFuseBits]:
         iol_bel = self.make_IologicBelDesc(bel)
@@ -2256,11 +2369,7 @@ class Device:
         attr_vals += self.get_in_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
 
     def get_ODDR_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
@@ -2269,11 +2378,7 @@ class Device:
         attr_vals += self.get_out_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_ODDRC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         return self.get_ODDR_fuses(bel)
@@ -2296,11 +2401,7 @@ class Device:
         attr_vals += self.get_in_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IDDRC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         return self.get_IDDR_fuses(bel)
@@ -2327,33 +2428,21 @@ class Device:
             attr_vals += self.get_in_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IOLOGICI_EMPTY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         iol_bel = self.make_IologicBelDesc(bel)
         attr_vals = self.common_iologic_handler(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IOLOGICO_EMPTY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         iol_bel = self.make_IologicBelDesc(bel)
         attr_vals = self.common_iologic_handler(iol_bel)
 
-
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        av = self.set_iologic_attrvals(iol_bel, attr_vals)
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IOLOGIC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         self.error_not_supported_cell_type(bel)
@@ -5253,6 +5342,63 @@ DYN_SELECT_ATTRS = (
 
 class GW5A(Device):
     """ GW5A series """
+    def get_IOLOGIC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ The `IOLOGIC` half a 16-bit gearbox is decomposed into.
+
+        `nextpnr` presents `OSER16`/`IDES16` as ordinary `IOLOGIC` cells so
+        the fuse path is the gearbox path already measured for `OSER4`-`10`
+        and `IDES4`-`10`; the direction is read off the parameter the packer
+        wrote, exactly as the GW1N devices do it.
+        """
+        mod_bel = self.make_IologicBelDesc(bel)
+        if 'OUTMODE' in bel.cell.parms:
+            return self.common_out_iologic_handler(mod_bel)
+        return self.common_in_iologic_handler(mod_bel)
+
+    def _adc_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """Configure an ADC from the parameters that were measured.
+
+        The block's ports -- `VSENCTL`, `ADCEN`, `FSCAL_VALUE`,
+        `OFFSET_VALUE` and the rest -- are fabric inputs, not fuses: an
+        eight-point `VSENCTL` sweep moves only pips into the block's own
+        `A`/`B` wires, so routing already carries them and there is nothing
+        here to emit for them.  Of the seventeen *parameters*, one was swept
+        over its complete axis and is emitted from the die's own tables;
+        every other one is refused by name, because a guess at a
+        configuration fuse is a wrong bitstream with no error (`D30`).
+        """
+        typ = bel.cell.typ
+        config = self.chipdb.get_adc_config(bel.x, bel.y)
+        bits = set()
+        for parm, raw in sorted(bel.cell.parms.items()):
+            values = config.get(parm)
+            if values is None:
+                raise PackRefused(
+                    f"{typ}.{parm} cannot be set on {self.device_name}: no "
+                    "sweep has attributed its configuration fuses, and only "
+                    f"{sorted(config) or 'no parameter'} of this block is "
+                    "measured. Refusing rather than emitting an unverified "
+                    "fuse.")
+            value = int(str(raw), 2)
+            if value not in values:
+                raise PackRefused(
+                    f"{typ}.{parm} = {value} is outside the measured axis "
+                    f"{sorted(values)} on {self.device_name}. Refusing "
+                    "rather than emitting an unverified fuse.")
+            # A round trip through the chipdb turns each coordinate into a
+            # list; a fuse set is addressed by coordinate, so it is retupled
+            # here rather than everywhere it is compared.
+            bits.update(map(tuple, values[value]))
+        if not bits:
+            return []
+        return [CellFuseBits(bel.x, bel.y, bits)]
+
+    def get_ADCLRC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        return self._adc_fuses(bel)
+
+    def get_ADCULC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        return self._adc_fuses(bel)
+
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         super().__init__(cli_args, pnr)
         # PLLA, ADC etc
@@ -5899,6 +6045,42 @@ class GW5A(Device):
         return super().__repr__()  + f"| extra_slots:{self.extra_slots}, _no_pullup_cfgs:{self._no_pullup_cfgs} "
 
 ################################################################
+    #==============================
+    #========== Iologic
+    #==============================
+    def handle_iodelay_gw5a(self, bel: IologicBelDesc, *, c_static_dly: int | None = None) -> list[AttrVal]:
+        """ Iodelay on the Arora V port set.
+
+        `UG304-1.3.8E` Table 4-47 gives this family a different delay line
+        from the one `Device.handle_iodelay` packs: the ports are
+        `DI, SDTAP, VALUE, DLYSTEP[7:0], DF, DO` with no `SETN` (`D23`), and
+        Table 4-48 adds the parameters `DYN_DLY_EN` and `ADAPT_EN`.
+
+        Only the static mode is modelled.  The enables of the other two modes
+        have no measured fuse on this family -- the `IOLOGIC` attribute table
+        has candidates (`DYNAMICCIBCONTROL`, `IODELAY_CIB`, `DELAYCHAIN`) but
+        nothing ties one of them to `DYN_DLY_EN` or `ADAPT_EN`, and a guessed
+        fuse is worse than a refusal -- so asking for either is refused by
+        name rather than packed as a static delay that silently does not move.
+
+        `c_static_dly` overrides the cell's own parameter; the DDR3 PHY sets
+        the DQ delay from its calibration rather than from the netlist.
+        """
+        attr_vals = self.iodelay_enable_attrs(bel)
+        if not attr_vals:
+            return attr_vals
+        for parm in ('DYN_DLY_EN', 'ADAPT_EN'):
+            if str(bel.cell.parms.get(parm, 'FALSE')).upper().strip('"') == 'TRUE':
+                raise Exception(f"IODELAY {parm}=TRUE on {self.device}: dynamic and adaptive"
+                                " delay move six IOLOGIC attributes the shipped table does not"
+                                " name, so neither mode has an attributable fuse set;"
+                                " only static delay is supported")
+        if c_static_dly is None:
+            bits = c_static_dly_bits(bel.cell.parms)
+        else:
+            bits = c_static_dly_bits({'C_STATIC_DLY': c_static_dly})
+        return attr_vals + self.delay_step_attrs(bits)
+
 class GW5A_25A(GW5A):
     """ GW5A-25A chip. Tangprimer25k board """
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
@@ -6925,6 +7107,40 @@ class GW5AST_138C(GW5A):
         for x, y in itertools.product(range(self.chipdb.cols), range(self.chipdb.rows)):
             if self.chipdb.get_ttyp(x, y) in self.clock_bridge_ttypes:
                 self.clock_bridge_xy.add((x, y))
+        # An input's hysteresis IS programmed by the vendor on this device, on
+        # every one of the 114 used inputs of the `P3.T26` corpus that carries
+        # the attribute at all, and always `ON`.  `GW5A`'s inherited `NONE` is
+        # the zero code, so the open flow left every receiver without the
+        # Schmitt trigger the vendor gives it.
+        self.default_ibuf_attrs = [
+            (attr, 'ON' if attr == 'HYSTERESIS' else val)
+            for attr, val in self.default_ibuf_attrs]
+        # `SLEWRATE` moves out of the output defaults into
+        # `design_only_io_attrs`; see that attribute for the measurement.
+        for name in ('default_obuf_attrs', 'default_tbuf_attrs',
+                     'default_iobuf_attrs'):
+            setattr(self, name, [(attr, val) for attr, val
+                                 in getattr(self, name) if attr != 'SLEWRATE'])
+        # The P half of a `TLVDS_OBUF` is the one differential configuration
+        # that differs from the inherited GW5A set.  MEASURED (`P3.T23`, one
+        # vendor/open pair per type on the TMDS pair at `(181,102)`,
+        # `IOB103A`): there the vendor programs `ODMUX_1='1'` and leaves
+        # `PERSISTENT` clear, while the inherited set programs
+        # `ODMUX_1='UNKNOWN'` -- the zero code, which costs no fuse and so
+        # reaches the bitstream as nothing -- and `PERSISTENT='OFF'`.  Those
+        # two attributes are what `gowin_unpack`'s mode rule reads, so the
+        # over-emission turned a pure output into an `IOBUF`: an input path
+        # enabled on a pad the design only drives.  The N half keeps the
+        # inherited set, which the same measurement found exact, and so do
+        # `TLVDS_TBUF` and `TLVDS_IBUF`.
+        self.default_tlvds_obuf_p_attrs = [
+            (attr, '1' if attr == 'ODMUX_1' else val)
+            for attr, val in self.default_tlvds_obuf_attrs
+            if attr != 'PERSISTENT']
+
+    def tlvds_obuf_attrs(self, idx_str: str) -> list[tuple[str, str]]:
+        return (self.default_tlvds_obuf_p_attrs if idx_str == 'A'
+                else self.default_tlvds_obuf_attrs)
 
     def reject_iologic_unsupported(self):
         """ D39 state (1): named refusal for any IOLOGIC cell on GW5AST-138C.
@@ -6932,6 +7148,196 @@ class GW5AST_138C(GW5A):
         row and deletes the fse_iologic guard (chipdb.py) that this refusal
         mirrors. """
         raise Exception("IOLOGIC on GW5AST-138C requires HCLK: no IOLOGIC bel exists for this device yet")
+
+    #==============================
+    #========== IOLOGIC
+    #==============================
+    def common_iologic_handler(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The attributes every IOLOGIC of this die carries.
+
+        Three things differ from the generic pre-5A handler, each measured:
+
+        `TXCLK_POL` is its own IOLOGIC attribute on the Arora V families
+        (`attrids.iologic_attrids` 116), not the pre-5A `TSHX` (6).  MEASURED
+        (`P3.T13`, two vendor `OSER4` bitstreams differing in nothing else):
+        the vendor sets `TXCLK_POL=1` and one fuse, `(8,125)`, and leaves both
+        clear at `TXCLK_POL=0`.  `TSHX` in either spelling costs no fuse on
+        this die, so the pre-5A handler moved the parameter to an attribute
+        the bitstream does not have and the polarity never reached it.
+
+        `HWL` is likewise its own attribute (117) rather than the pre-5A
+        `UPDATE=SAME`.
+
+        `GSR` is emitted only for the explicit opt-in: `DISGSR` is not the
+        zero code here -- it sets one fuse, and the vendor leaves that fuse
+        clear on every `ODDR`, `IDDR` and `IDDRC` measured (`P3.T11`), so
+        emitting it unconditionally is a one-bit over-emission.
+
+        The `IODELAY` attributes are unchanged and still come from
+        `handle_iodelay`.
+        """
+        attr_vals = []
+        cell_parms = bel.cell.parms
+
+        # A Verilog parameter reaches here as the bit string yosys wrote, so
+        # it is read in base 2 the way the other GW5A device does.
+        if int(str(cell_parms.get('TXCLK_POL', '0')), 2):
+            attr_vals.append(AttrVal('TXCLK_POL', '1'))
+
+        if str(cell_parms.get('HWL', 'FALSE')).upper() == 'TRUE':
+            attr_vals.append(AttrVal('HWL', 'TRUE'))
+
+        if str(cell_parms.get('GSREN', 'FALSE')).upper() == 'TRUE':
+            attr_vals.append(AttrVal('GSR', 'ENGSR'))
+
+        return attr_vals + self.handle_iodelay(bel)
+
+    def handle_iodelay(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ This die carries the Arora V delay line, not the pre-5A one.
+
+        The port set differs (`DLYSTEP[7:0]` in place of `SETN`, `D23`) and so
+        do the parameters, so the whole of `handle_iodelay` is replaced rather
+        than extended.  Routing it through the base
+        `common_iologic_handler`'s existing `self.handle_iodelay(bel)` call
+        keeps one -- and only one -- `common_iologic_handler` override on this
+        class, the one the GSR correction needs.
+        """
+        return self.handle_iodelay_gw5a(bel)
+
+    def iodelay_enable_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The delay line's own enable, and nothing else.
+
+        MEASURED (`P3.T21`/`P3.T22`, 28 vendor bitstreams of one `IODELAY` on
+        `AA9`): the vendor's `IOLOGICA` carries `INDEL=ENABLE` -- fuse
+        (20, 81) of the pad tile -- and no `CLKOMUX`.  The inherited pre-5A
+        set adds `CLKOMUX`, `IMARG`, `INDEL_0` and `INDEL_1`; of those only
+        `CLKOMUX` costs a fuse here, (21, 54), and it is one of the seventeen
+        bits the open bitstream set on every delay point and the vendor's set
+        on none.  `CLKOMUX` is not lost by dropping it: an output gearbox
+        already gets it from `get_out_iologic_attrs`, where it is measured.
+
+        The output direction has no measured point -- this die's only
+        `IODELAY` evidence is on an input ball -- so `OUTDEL` is treated the
+        same way as `INDEL` by symmetry, which is recorded rather than
+        claimed as measured.
+
+        Two vendor attributes stay unemitted because they cannot be named:
+        `attrids` handle 98 decodes as `IOLOGIC_UNKNOWN91` and handle 118's
+        value is the delay step itself, which `delay_step_attrs` writes.
+        """
+        iodelay = bel.cell.attrs.get('IODELAY')
+        if iodelay == 'IN':
+            return [AttrVal('INDEL', 'ENABLE')]
+        if iodelay == 'OUT':
+            return [AttrVal('OUTDEL', 'ENABLE')]
+        return []
+
+    @staticmethod
+    def c_static_dly_value(step: int) -> int:
+        """ The `C_STATIC_DLY` value id of one static delay step.
+
+        MEASURED (`P3.T22`, `$OTC/evidence/iodelay/summary.md`): this die
+        spends **one** enumerated `IOLOGIC` attribute -- 118, `C_STATIC_DLY`
+        -- on the whole 0..255 range, where GW1N/GW2A spend the seven one-bit
+        attributes `DELAY_DEL0`..`DELAY_DEL6`.  The device's own `logicinfo`
+        table carries exactly 255 value ids for it: `2` for step 1 and
+        `1000 + n` for every step `n >= 2`.  Step 0 has no row and programs no
+        fuse, which is why the sweep's baseline moves nothing.
+        """
+        return 2 if step == 1 else 1000 + step
+
+    def delay_step_attrs(self, bits: str) -> list[AttrVal]:
+        """ One `C_STATIC_DLY` attribute in place of the pre-5A `DELAY_DEL*`.
+
+        The fuses come from the attribute-value table like any other
+        attribute, never from a bit list: each weight lands in row 21 of the
+        pad tile, bit 0 at column 3 through bit 7 at column 10, and bit 7 is
+        fuse-backed here, so the base class's `DELAY_DEL7` refusal does not
+        apply to this device and is not inherited.
+        """
+        step = int(bits, 2)
+        if not step:
+            return []
+        return [AttrVal('C_STATIC_DLY', self.c_static_dly_value(step))]
+
+    #: The `IOLOGIC_FCLK` attribute `nextpnr` writes, as an HCLK lane index.
+    #: `set_iologic_bel_fclk` has already turned `HCLK_OUT<n>` into
+    #: `SPINE1<n>`, and on this die -- unlike the pre-5A families -- the spine
+    #: number IS the lane of the cell's own HCLK block, because the block a
+    #: cell can use is fixed by its position (`chipdb.gw5_hclk_arcs`).
+    _fclk_lane = {'SPINE10': 0, 'SPINE11': 1, 'SPINE12': 2, 'SPINE13': 3}
+
+    def fclk_select_attrs(self, bel: IologicBelDesc, sel: str,
+                          sel_) -> list[AttrVal]:
+        """ The fast-clock selection of one IOLOGIC half.
+
+        MEASURED (`P3.T13`, `$OTC/evidence/oser/attr-gap.tsv`): the vendor's
+        `OSER4` at `IOLOGICA` of (50, 181) carries `WRFCLKSEL=UNK102`,
+        `FCLKSEL1=HCLK2` and `FCLKSEL2=HCLK2_`, and those three are exactly the
+        two fuses -- (0,123) and (3,131) -- by which the packer's set was a
+        strict subset of the vendor's.  Two selection attributes, not the
+        GW5A-25A's four: this die spells the lane once plain and once with the
+        trailing underscore, and has no `FCLKSEL0`/`FCLKSEL3` row for it.
+
+        `sel_` is the attribute that takes the underscored spelling, or None
+        for a path that has only the plain one.
+        """
+        lane = self._fclk_lane.get(bel.fclk)
+        if lane is None:
+            return []
+        attr_vals = [AttrVal('WRFCLKSEL', 'UNK102'),
+                     AttrVal(sel, f'HCLK{lane}')]
+        if sel_ is not None:
+            attr_vals.append(AttrVal(sel_, f'HCLK{lane}_'))
+        return attr_vals
+
+    def get_out_iologic_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ Add the fast-clock selection the generic GW5A handler cannot make.
+
+        The base handler models the pre-5A `CLKODDRMUX_*` shape, which on this
+        die costs no fuse at all, so an output gearbox came out of it with its
+        `FCLK` unselected -- the two-bit gap `P3.T13` measured.
+        """
+        return (super().get_out_iologic_attrs(bel)
+                + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
+                + self.oser16_aux_attrs(bel))
+
+    @staticmethod
+    def oser16_aux_attrs(bel: IologicBelDesc) -> list[AttrVal]:
+        """ The one attribute the `B` half of an `OSER16` adds on this die.
+
+        MEASURED (`P3.T16a`, the vendor's `OSER16` at the pad pair (108, 52)):
+        the aux half carries `OCLKCE=CE` on top of the `DDRENABLE`/`ISI` pair
+        the pre-5A model already emits, and the main half does not.  It is the
+        only attribute of the pair the generic handler misses.
+        """
+        if bel.cell.parms.get('OUTMODE') != 'DDRENABLE16':
+            return []
+        return [AttrVal('OCLKCE', 'CE')]
+
+    #: The `INMODE` parameter `nextpnr` writes for a 16:1 input gearbox, and
+    #: the value id this die spends on it.  MEASURED (`P3.T16a`): `IDES16`
+    #: differs from `IDES4`/`IDES8`/`IDES10` in this one attribute value and
+    #: in nothing else, and the value has no name in any shipped table.
+    _INMODE_ALIASES = {'IDDRX16': 'UNK105'}
+
+    def get_in_iologic_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
+        """ The reset multiplexer of an IDDRC is inverting on this die.
+
+        For a cell with an asynchronous clear the generic handler selects
+        LSRMUX_LSR=SIG and leaves LSRIMUX_0 at the placeholder UNKNOWN.  The
+        vendor selects INV and sets no LSRIMUX_0 at all; INV is one fuse the
+        generic set misses and SIG one it sets in its place, so the two
+        bitstreams differ by two bits in exactly this attribute.
+        """
+        attr_vals = [AttrVal(av.attr, self._INMODE_ALIASES[av.val])
+                     if av.attr == 'INMODE' and av.val in self._INMODE_ALIASES
+                     else av
+                     for av in super().get_in_iologic_attrs(bel)]
+        if bel.cell.typ not in {'IDDR', 'IDDRC'} or bel.cell.typ == 'IDDR':
+            return attr_vals
+        return [AttrVal('LSRMUX_LSR', 'INV') if av.attr == 'LSRMUX_LSR' else av
+                for av in attr_vals if av.attr != 'LSRIMUX_0']
 
     #==============================
     #========== Clocks
@@ -7136,6 +7542,47 @@ class GW5AST_138C(GW5A):
     def get_default_io_type(self) -> str:
         """ Default IO_TYPE """
         return "LVCMOS33"
+
+    #: `SLEWRATE` has no default on this device: the vendor leaves the fuse
+    #: unprogrammed on all 143 used outputs of the 35-design corpus
+    #: (`$OTC/evidence/iob-bank/summary.md`), and `GW5A`'s inherited
+    #: `SLEWRATE=FAST` was therefore a rate the packer invented for every
+    #: output pad in every design.  A design that names `SLEW_RATE` still gets
+    #: what it asks for -- that is what `design_only_io_attrs` means.
+    design_only_io_attrs = ('SLEWRATE',)
+
+    #: Configuration functions whose pad keeps its pull-up when unused, even
+    #: though the pad also carries a parallel-data name that would otherwise
+    #: put it in `_no_pullup_cfgs`.  MEASURED: (R108C101)/`IOBB` is `D08` and
+    #: `SO`, and it is the one unused pad of all 35 designs where the open
+    #: flow programmed a `PULLMODE` fuse the vendor did not -- the vendor
+    #: leaves the serial-output pad at the pull-up every other configuration
+    #: pad of the group gets.  The other 865 site-observations of `NONE` are
+    #: bit-equal and are left exactly as they are.
+    _pullup_cfgs = frozenset({'SO'})
+
+    def get_unused_io_attrvals(self, io_cfg: IoCfg, bank_desc: BankDesc) -> list[AttrVal]:
+        """ The set the vendor programs on a floating pin, and no more.
+
+        MEASURED over 35 vendor/open bitstream pairs, 0 oracle runs
+        (`P3.T26`, `$OTC/evidence/iob-bank/summary.md`, `D108`): on an unused
+        pin the vendor programs `IO_TYPE`, `OPENDRAIN` and `PADDI`, plus a
+        `PULLMODE` of `UP` or `DOWN` on the configuration pads that ask for
+        one -- and **no drive strength at all**.  `GW5A`'s inherited set adds
+        `DRIVE` and `DRIVE_LEVEL`, which cost two fuses on every one of the
+        die's ~316 floating pads in every design: 22 020 bits over the corpus,
+        and the attribute class PR #423 was opened for.  `LOOP-BRIEF` §7
+        forbids shipping it, so this device drops both.
+
+        The `GW5A` base class keeps its own set unchanged -- the GW5A-25A and
+        the GW5AT-60B have no such measurement, and a default is not a thing
+        to change on a device nobody has measured (`S3`).
+        """
+        keep_pullup = bool(self._pullup_cfgs & set(io_cfg.cfgs))
+        attrvals = super().get_unused_io_attrvals(io_cfg, bank_desc)
+        return [AttrVal('PULLMODE', 'UP')
+                if keep_pullup and av.attr == 'PULLMODE' else av
+                for av in attrvals if av.attr not in ('DRIVE', 'DRIVE_LEVEL')]
 
     # debug
     def __repr__(self):

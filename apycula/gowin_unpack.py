@@ -389,12 +389,71 @@ _iologic_mode = {
         'MODDRX21': 'OSER4',  'ODDRX2': 'OSER4',
         'MODDRX4':  'OSER8',  'ODDRX4': 'OSER8',
         'MODDRX5':  'OSER10', 'ODDRX5': 'OSER10',
-        'VIDEORX':  'OVIDEO', 'ODDRX8': 'OSER16',
+        # 'VIDEOTX' and 'VIDEORX' are the same attribute code (50), so a
+        # decoded video gearbox comes back under whichever spelling the
+        # reverse table kept -- 'VIDEOTX'.  Keying on that spelling alone left
+        # every OVIDEO undecoded (MEASURED, P3.T13).  The input branch renames
+        # the result to IVIDEO, so one entry serves both directions.
+        'VIDEOTX':  'OVIDEO', 'VIDEORX': 'OVIDEO', 'ODDRX8': 'OSER16',
         'MIDDRX2':  'IDES4',  'IDDRX2': 'IDES4',
         'MIDDRX4':  'IDES8',  'IDDRX4': 'IDES8',
         'MIDDRX5':  'IDES10', 'IDDRX5': 'IDES10',
         'IDDRX8':   'IDES16',
         }
+
+# Value ids the decode resolves an input gearbox to that the attribute-value
+# table has no primitive name for.  MEASURED on the GW5AST-138C (`P3.T14`):
+# `gowin_pack` writes `INMODE = IDDRX4` (value 11) for an `IDES8`, the vendor
+# writes the same fuses, and both decode back as value 76, which the shipped
+# table leaves unnamed -- so an `IDES8` was recovered from no bitstream at all.
+# Only the input direction is aliased: the same id in `OUTMODE` is not this
+# mode and must keep failing to resolve rather than acquire a wrong name.
+def io16_bels(tiledata, name, mode):
+    """The bels a decoded gearbox belongs to.
+
+    A 16-bit gearbox has a bel of its own where the device gives it one -- the
+    Arora V families, where it occupies a whole pad pair -- *and* it is the
+    mode of the `IOLOGIC` half whose fuse table carries it.  Both are true of
+    the same bits, and a placement can name either, so the decode reports both
+    rather than picking one and leaving the other unrecoverable.  Every other
+    mode, and every device without the bel, yields the `IOLOGIC` name alone.
+    """
+    if mode in {'OSER16', 'IDES16'} and mode in tiledata.bels:
+        return (name, mode)
+    return (name,)
+
+
+_iologic_inmode_alias = {
+        'UNK76': 'IDES8',
+        # The Arora V 16:1 input mode (`P3.T16a`).  The die spends a value id
+        # of its own on it -- not the pre-5A `IDDRX8`, which `OSER16` reuses
+        # in the other direction -- and no shipped table names it.
+        'UNK105': 'IDES16',
+        }
+
+# `OUTMODE` ids whose shipped name is not the mode the GW5A writes there.
+# MEASURED on the GW5AST-138C (`P3.T13`): `gowin_pack.get_out_iologic_attrs`
+# encodes an `OVIDEO` as `OUTMODE = LVDSOUT` (value 74) and the vendor writes
+# the same fuses, so every video serialiser decoded as a mode the mode table
+# has no primitive for and no `OVIDEO` was ever recovered.  Aliasing it on the
+# output path alone keeps id 74 unnamed in `INMODE`, where it is a different
+# mode.
+_iologic_outmode_alias = {
+        'LVDSOUT': 'OVIDEO',
+        }
+
+
+def c_static_dly_of(value_id):
+    """The `IODELAY` static delay step one `C_STATIC_DLY` value id stands for.
+
+    MEASURED on the GW5AST-138C (`P3.T21`, 28 vendor bitstreams): the
+    attribute enumerates the whole 0-255 range, with value id 2 for one step
+    and `1000 + n` for every `n >= 2`.  Step 0 sets no fuse and has no row, so
+    an absent attribute is a delay of zero, not a missing measurement.
+    """
+    if value_id >= 1000:
+        return value_id - 1000
+    return value_id - 1
 
 # BSRAM has 3 cells: BSRAM, BSRAM0 and BSRAM1
 # { (row, col) : idx }
@@ -686,6 +745,36 @@ def hclk_decode_completeness(db, device):
 # with iostd by default, e.g. from the clock fuzzer
 # With normal gowin_unpack io standard is determined first and it is known.
 # (bels, pips, clock_pips)
+def _adc_modes_from_config(db, row, col, tile):
+    """`{"PARM=value"}` for the ADC parameters this cell's bits carry.
+
+    The GW5AST-138C spends no fuse on a parameter left at its default, so an
+    empty result means "the bitstream says nothing about this block", not
+    "decoding failed".  Only parameters an actual sweep attributed are read;
+    the block's other fifteen have no table and the packer refuses to write
+    them.
+    """
+    config = db.extra_func.get((row, col), {}).get('adc', {}).get('config')
+    if not config:
+        return set()
+    modes = set()
+    for parm, values in config.items():
+        values = {value: {tuple(f) for f in fuses}
+                  for value, fuses in values.items()}
+        # One value's fuses can be a subset of another's -- `DIV_CTL` 1 and 2
+        # share a bit -- so the decoded value is the one whose fuse set is
+        # exactly the set of this parameter's bits the tile carries, never
+        # merely a subset of them.
+        present = {bit for fuses in values.values() for bit in fuses
+                   if tile[bit[0]][bit[1]]}
+        if not present:
+            continue
+        exact = [value for value, fuses in values.items() if fuses == present]
+        if len(exact) == 1:
+            modes.add(f'{parm}={exact[0]}')
+    return modes
+
+
 def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
     if not _bank_fuse_tables:
         # create bank fuse table
@@ -717,8 +806,19 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
     bels = {}
     for name, bel in tiledata.bels.items():
         if name.startswith("ADC"):
-            attrvals = parse_attrvals(tile, db.rev_logicinfo('ADC'), db.shortval[tiledata.ttyp]['ADC'], attrids.adc_attrids, "ADC")
-            #print(row, col, name, tiledata.ttyp, attrvals)
+            # A die may carry an ADC bel and no ADC attribute table: the
+            # GW5AST-138C's two blocks are located by their port tables and
+            # its `.fse` declares no `ADC` `logicinfo`/`shortval` pair at all.
+            # What that die does carry is a per-parameter attribution measured
+            # from the vendor's own bitstreams, and a parameter left at its
+            # default measurably costs no fuse -- so an all-default block is
+            # decoded as absent, which is what the bitstream says.
+            modes = _adc_modes_from_config(db, row, col, tile)
+            if modes:
+                bels[name] = modes
+            elif ('ADC' in db.logicinfo
+                    and 'ADC' in db.shortval.get(tiledata.ttyp, {})):
+                attrvals = parse_attrvals(tile, db.rev_logicinfo('ADC'), db.shortval[tiledata.ttyp]['ADC'], attrids.adc_attrids, "ADC")
         if name.startswith("RPLL"):
             idx = _pll_cells.setdefault(get_pll_A(db, row, col, name[4]), len(_pll_cells))
             modes = { f'DEVICE="{_device}"' }
@@ -794,13 +894,27 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
             continue
         if name.startswith("IOLOGIC"):
             idx = name[-1]
-            attrvals = parse_attrvals(tile, db.rev_logicinfo('IOLOGIC'), db.shortval[tiledata.ttyp][f'IOLOGIC{idx}'], attrids.iologic_attrids, "IOLOGIC")
+            # A `B` half whose pad lives in an aux cell keeps its IOLOGIC
+            # fuses there too (`chipdb` `fuse_cell_offset`), so the table and
+            # the bitmap both come from that cell, not from this one.
+            iol_tile, iol_ttyp = tile, tiledata.ttyp
+            iol_off = tiledata.bels[name].fuse_cell_offset
+            if idx == 'B' and iol_off:
+                iol_ttyp = db[row + iol_off[0], col + iol_off[1]].ttyp
+                iol_tile = bm[row + iol_off[0], col + iol_off[1]]
+            attrvals = parse_attrvals(iol_tile, db.rev_logicinfo('IOLOGIC'), db.shortval[iol_ttyp][f'IOLOGIC{idx}'], attrids.iologic_attrids, "IOLOGIC")
             if not attrvals:
                 continue
             #print_sorted_dict(f'{row}, {col}, {name}, {idx}, {tiledata.ttyp} - ', attrvals)
             # additional IOLOGIC components
             # XXX delays and FFs in IO
             # main component
+            # The delay line is a property of the IOLOGIC cell whatever the
+            # gearbox on it is doing, so it is read before the mode branches
+            # and survives the `continue` each of them takes.
+            if 'C_STATIC_DLY' in attrvals.keys():
+                bels.setdefault(name, set()).add(
+                        f"C_STATIC_DLY={c_static_dly_of(attrvals['C_STATIC_DLY'])}")
             if 'OUTMODE' in attrvals.keys():
                 # XXX skip oddr
                 if attrvals['OUTMODE'] in {attrids.iologic_attrvals['MODDRX1'], attrids.iologic_attrvals['ODDRX1']}:
@@ -812,8 +926,12 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 # skip aux cells
                 if attrvals['OUTMODE'] == attrids.iologic_attrvals['DDRENABLE']:
                     continue
-                if attrids.iologic_num2val[attrvals['OUTMODE']] in _iologic_mode.keys():
-                    bels.setdefault(name, set()).add(f"MODE={_iologic_mode[attrids.iologic_num2val[attrvals['OUTMODE']]]}")
+                out_val = attrids.iologic_num2val[attrvals['OUTMODE']]
+                out_mode = (_iologic_mode.get(out_val)
+                            or _iologic_outmode_alias.get(out_val))
+                if out_mode is not None:
+                    for bel_name in io16_bels(tiledata, name, out_mode):
+                        bels.setdefault(bel_name, set()).add(f"MODE={out_mode}")
             elif 'INMODE' in attrvals.keys():
                 if attrvals['INMODE'] in {attrids.iologic_attrvals['MIDDRX1'], attrids.iologic_attrvals['IDDRX1']}:
                     if 'LSRIMUX_0' in attrvals.keys():
@@ -824,11 +942,13 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 # skip aux cells
                 if attrvals['INMODE'] == attrids.iologic_attrvals['DDRENABLE']:
                     continue
-                if attrids.iologic_num2val[attrvals['INMODE']] in _iologic_mode.keys():
-                    in_mode = _iologic_mode[attrids.iologic_num2val[attrvals['INMODE']]]
+                in_val = attrids.iologic_num2val[attrvals['INMODE']]
+                in_mode = _iologic_mode.get(in_val) or _iologic_inmode_alias.get(in_val)
+                if in_mode is not None:
                     if in_mode == 'OVIDEO':
                         in_mode = 'IVIDEO'
-                    bels.setdefault(name, set()).add(f"MODE={in_mode}")
+                    for bel_name in io16_bels(tiledata, name, in_mode):
+                        bels.setdefault(bel_name, set()).add(f"MODE={in_mode}")
             else:
                 continue
             if 'CLKODDRMUX_ECLK' in attrvals.keys():
@@ -1261,9 +1381,47 @@ _iologic_ports = {
                    'Q6': 'Q2', 'Q7': 'Q3', 'Q8': 'Q4', 'Q9': 'Q5', 'Q10': 'F0',
                    'Q11': 'F1', 'Q12': 'F2', 'Q13': 'F3', 'Q14': 'F4', 'Q15': 'F5' },
 }
+
+# The GW5A IOLOGIC carries sixteen fabric outputs `Q0`-`Q15` where the earlier
+# families carry ten, and the input gearboxes do not sit on the ten the older
+# map names.  MEASURED on the GW5AST-138C by tracing each word ball of a
+# vendor bitstream back to the IOLOGIC wire that drives it (`P3.T12`/`P3.T14`,
+# `$OTC/evidence/ides/summary.md`):
+#
+#   IDDR/IDDRC  Q0,Q1  -> Q14,Q15      (wires F7, OF0)
+#   IDES4       Q0-Q3  -> Q8-Q11       (wires F0-F3)
+#   IDES8       Q0-Q7  -> Q8-Q15       (wires F0-F5, F7, OF0)
+#   IDES10      Q0-Q9  -> Q6-Q15
+#
+# `IVIDEO` is deliberately absent: no measured GW5A bitstream places one, and
+# guessing its window would name a wire nothing proved.
+_iologic_ports_gw5 = {
+        'IDDR':   {'D': 'D', 'Q14': 'Q0', 'Q15': 'Q1', 'CLK': 'CLK'},
+        'IDDRC':  {'D': 'D', 'Q14': 'Q0', 'Q15': 'Q1', 'CLK': 'CLK',
+                   'CLEAR': 'CLEAR'},
+        'IDES4':  dict({f'Q{8 + i}': f'Q{i}' for i in range(4)},
+                       D='D', RESET='RESET', CALIB='CALIB', PCLK='PCLK',
+                       FCLK='FCLK'),
+        'IDES8':  dict({f'Q{8 + i}': f'Q{i}' for i in range(8)},
+                       D='D', RESET='RESET', CALIB='CALIB', PCLK='PCLK',
+                       FCLK='FCLK'),
+        'IDES10': dict({f'Q{6 + i}': f'Q{i}' for i in range(10)},
+                       D='D', RESET='RESET', CALIB='CALIB', PCLK='PCLK',
+                       FCLK='FCLK'),
+}
+
+
+def iologic_ports_of(typ):
+    """The bel-pin -> primitive-port map of `typ` on the device being read."""
+    if chipdb.is_GW5_family(_device) and typ in _iologic_ports_gw5:
+        return _iologic_ports_gw5[typ]
+    return _iologic_ports[typ]
+
+
 def iologic_ports_by_type(typ, portmap):
     if typ not in {'IDES16', 'OSER16'}:
-        return { (_iologic_ports[typ][port], wire) for port, wire in portmap.items() if port in _iologic_ports[typ].keys() }
+        ports = iologic_ports_of(typ)
+        return { (ports[port], wire) for port, wire in portmap.items() if port in ports.keys() }
     elif typ in {'OSER16', 'IDES16'}:
         ports = { (port, wire) for port, wire in _iologic_ports[typ].items()}
         ports.add(('RESET', portmap['RESET']))

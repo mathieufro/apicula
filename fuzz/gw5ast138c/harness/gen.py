@@ -185,8 +185,20 @@ def assert_cst_defaults(spec, sweep_value=None):
 
     Returned for symmetry with the Hardware Gate's collector: a clean spec
     yields an empty error list, a dirty one never returns at all.
+
+    **Differential exemption (`P3.T23`).** `spec.diff_pads` names the ports
+    that are one half of a differential pad pair (`TLVDS`/`ELVDS`).  Such a
+    pad takes its electrical standard from the buffer primitive, never from
+    an `IO_TYPE` string, which is how the vendor's own board `.cst` spells
+    one (`tang_mega_138K_pins.cst`: `PULL_MODE`/`DRIVE`, no `IO_TYPE`).  A
+    port named there is exempt from rule (a)'s `IO_TYPE`-presence check and
+    from rule (b) entirely; it still owes a `BANK_VCCIO` entry (rule (a)'s
+    other half) and is still checked by rules (c)-(f) like any other pin --
+    the exemption narrows what "clean" means for a differential pad, it does
+    not turn the checks off.
     """
     for port, pin in spec.pins.items():
+        is_diff_pad = port in getattr(spec, "diff_pads", ())
         # (d) no config-role pin, ever -- checked before anything else so a
         # config pin never even gets a chance to look like a clean I/O.
         role = config_role_of_loc(pin.loc)
@@ -213,20 +225,24 @@ def assert_cst_defaults(spec, sweep_value=None):
                     % (port, pin.loc, pin.io_type, pin.bank,
                        "/".join(str(b) for b in DDR_BANKS))
                 )
-        # (a) every used pin carries IO_TYPE
-        if not pin.io_type:
+        # (a) every used pin carries IO_TYPE -- except one half of a
+        # differential pad, which carries none by vendor convention.
+        if not pin.io_type and not is_diff_pad:
             raise CstDefaultError(
                 "pin %r at %s (bank %d) has no IO_TYPE -- every used pin "
                 "carries one (D20a, spec.md 7.10(5))" % (port, pin.loc, pin.bank)
             )
-        # (a) every bank in use carries BANK_VCCIO
+        # (a) every bank in use carries BANK_VCCIO -- differential pads owe
+        # this too; only the IO_TYPE half of the rule is exempt.
         if pin.bank not in spec.bank_vccio:
             raise CstDefaultError(
                 "pin %r at %s is in bank %d, which has no BANK_VCCIO in the "
                 "shape's bank_vccio table (D20a)" % (port, pin.loc, pin.bank)
             )
-        # (b) non-DDR pins are LVCMOS33 with PULL_STRENGTH=MEDIUM
-        if pin.bank not in DDR_BANKS:
+        # (b) non-DDR pins are LVCMOS33 with PULL_STRENGTH=MEDIUM -- a
+        # differential pad names no IO_TYPE at all, so this rule does not
+        # apply to it.
+        if pin.bank not in DDR_BANKS and not is_diff_pad:
             if pin.io_type.upper() != DEFAULT_IO_TYPE:
                 raise CstDefaultError(
                     "pin %r at %s (bank %d): IO_TYPE=%s, expected %s on a "
@@ -290,7 +306,11 @@ def render_verilog(spec, sweep_value=None):
 #: would `log_error` the whole run on it rather than ignore the line.
 OPEN_FLOW_INS_LOC_FORMS = (
     re.compile(r"^R\d+C\d+\[\d\]\[[AB]\]$"),
-    re.compile(r"^(TOP|RIGHT|BOTTOM|LEFT)SIDE\[[01]\]$"),
+    # `SIDE[0~7]`: SUG1018-1.7E Table 2-2 numbers a side's HCLK lanes across
+    # its blocks, and `nextpnr-himbaechel`'s reader splits the index into a
+    # block ordinal and a lane, so the whole range resolves on a device with
+    # more than one block per side (`cst.cc getConstrainedHCLKBel`, `D107`).
+    re.compile(r"^(TOP|RIGHT|BOTTOM|LEFT)SIDE\[[0-7]\]$"),
     re.compile(r"^PLL_[LRB]\[\d\]$"),
 )
 
@@ -303,15 +323,14 @@ def open_flow_reads_ins_loc(site):
 def render_cst(spec, sweep_value=None, with_ins_loc=True):
     """Render a `.cst`: one `IO_LOC`/`IO_PORT` pair per pin, then `INS_LOC`.
 
-    `with_ins_loc=False` renders the **open-flow** copy (`top-open.cst`).
-    Measured on this device (`nextpnr-himbaechel` `cst.cc:130-140`): the reader
-    accepts only `{TOP,RIGHT,BOTTOM,LEFT}SIDE[0|1]`, so the 138C's own
-    `SIDE[0~7]` spelling (SUG1018-1.7E Table 2-2, row `GW5A(S)(T)-138`) falls
-    through to the placement-macro branch and `log_error`s the whole run with
-    `Unknown placement macro BOTTOMSIDE`.  The vendor needs the line and the
-    open flow cannot read it, so the two flows get two files; the open flow is
-    pinned by the RTL `(* BEL = ... *)` attribute instead, which nextpnr does
-    honour.  Fixing the reader is a nextpnr change and is not this task's.
+    `with_ins_loc=False` renders the **open-flow** copy (`top-open.cst`), which
+    keeps only the `INS_LOC` spellings `nextpnr-himbaechel`'s `.cst` reader can
+    resolve (`OPEN_FLOW_INS_LOC_FORMS`).  The 138C's own `SIDE[0~7]` spelling
+    (SUG1018-1.7E Table 2-2, row `GW5A(S)(T)-138`) is one of them since the
+    reader learned to split the index into an HCLK block ordinal and a lane, so
+    a CLKDIV -- and with it the HCLK lane an IOLOGIC's `FCLK` lands on -- is
+    pinned by the same line in both flows (`D107`).  A form the reader still
+    cannot take is dropped rather than passed, because it aborts the run.
 
     An `ins_loc` **value** may also be a callable `(sweep_value) -> site`, for
     a shape whose swept axis *is* the placement (`P1.T19` sweeps one PLL over
@@ -331,10 +350,23 @@ def render_cst(spec, sweep_value=None, with_ins_loc=True):
                          "evidence: %s"
                          % (spec.pins[port].loc,
                             config_role_of_loc(spec.pins[port].loc), ack))
+    diff_pads = tuple(getattr(spec, "diff_pads", ()))
+    if diff_pads:
+        # Declared in the file so the text-only `.cst` check can grant the
+        # differential exemption without a shape in hand
+        # (`oracle.diff_pads_of`).
+        lines.append("// DIFF_PAD " + " ".join('"%s"' % p for p in diff_pads))
     lines.append("")
     for port in spec.pins:
         pin = spec.pins[port]
-        attrs = ["IO_TYPE=%s" % pin.io_type, "PULL_MODE=%s" % pin.pull_mode]
+        # A differential pad carries no `IO_TYPE` at all -- the buffer
+        # primitive names the standard, which is how the vendor's own board
+        # `.cst` spells a TMDS pair.  Rendering `IO_TYPE=None` would hand
+        # `gw_sh` a literal it does not know.
+        attrs = []
+        if pin.io_type is not None:
+            attrs.append("IO_TYPE=%s" % pin.io_type)
+        attrs.append("PULL_MODE=%s" % pin.pull_mode)
         if pin.pull_strength:
             attrs.append("PULL_STRENGTH=%s" % pin.pull_strength)
         if pin.drive is not None:

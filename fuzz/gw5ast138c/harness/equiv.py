@@ -378,12 +378,50 @@ _BEL_SUFFIX = re.compile(r"^(?P<name>.*?)(?P<idx>\d+)?(?P<side>[A-Z])?$")
 _LETTER_BELS = ("IOB", "IOLOGIC", "ODDR", "BUF")
 
 
+#: `nextpnr`'s IOLOGIC bel names: the tile half, then the direction.  Both
+#: halves of one site are the same apicula bel -- `gowin_unpack` decodes a
+#: tile's IOLOGIC as `IOLOGIC` at `z` 0 (`A`) or 1 (`B`) whichever direction
+#: the gearbox runs in -- so the direction letter carries no site index and
+#: must not be read as one.
+#: The half `nextpnr` puts on an IOLOGIC site when the design has no gearbox
+#: for that direction (`constids.inc` `IOLOGICI_EMPTY`/`IOLOGICO_EMPTY`).
+#: Its configuration is *nothing*, so no bitstream on any device decodes a
+#: cell at its site and asking `E1` or `c1` about it is asking a question the
+#: format cannot answer -- the same reason `IOLOGIC_DUMMY` is exempt, minus
+#: the main cell that stands in for it.
+IOLOGIC_EMPTY_CELL_TYPES = ("IOLOGICI_EMPTY", "IOLOGICO_EMPTY")
+
+#: Cells `bitstream_bel_exported` leaves out: the empty halves above and the
+#: gearbox aux half, none of which the bitstream addresses.
+IOLOGIC_SITELESS_CELL_TYPES = IOLOGIC_EMPTY_CELL_TYPES + ("IOLOGIC_DUMMY",)
+
+#: The GW5AST-138C's two on-die ADCs.  Their placement and routing are
+#: modelled and their one attributed parameter is fuse-backed, but a block
+#: left at every default spends no fuse at all -- so `c1` may require one back
+#: from the bitstream only when the design actually set something.
+ADC_CELL_TYPES = ("ADCLRC", "ADCULC")
+
+_IOLOGIC_BEL = re.compile(r"^IOLOGIC(?P<side>[AB])[IO]$")
+
+#: The bel an `IBUF`/`OBUF`/`TBUF`/`IOBUF` -- and each half of a differential
+#: pair -- is placed on: one package ball, `A` or `B` of its IO tile.
+_IOB_BEL = re.compile(r"^IOB(?P<side>[AB])$")
+
+
 def split_bel_name(name):
     """`'DFF3'` -> `('DFF', 3)`; `'IOBA'` -> `('IOB', 0)`; `'ALU'` -> `('ALU', 0)`.
 
     `bel_z` is the numeric site index inside the tile as apicula names it: a
     trailing digit run, or the `A`/`B` side letter the IO and IOLOGIC bels use.
+
+    `'IOLOGICAO'` -> `('IOLOGIC', 0)`: the generic rule below would take the
+    trailing `O` of the direction for a side letter and answer
+    `('IOLOGICA', 14)`, which matches no decoded cell, so the four IOLOGIC bel
+    names are resolved first.
     """
+    iologic = _IOLOGIC_BEL.match(name)
+    if iologic is not None:
+        return "IOLOGIC", ord(iologic.group("side")) - ord("A")
     m = _BEL_SUFFIX.match(name)
     base = m.group("name")
     idx = m.group("idx")
@@ -1869,6 +1907,33 @@ def _norm_param(value):
     return text
 
 
+def _param_values(value):
+    """Every number one parameter spelling can mean, as a set.
+
+    A parameter that came from a Verilog vector reaches the netlist as the bit
+    string yosys wrote -- `C_STATIC_DLY=1` on a 32-bit port is thirty-one
+    zeroes and a one -- while `gowin_unpack` recovers the attribute's value,
+    `1`.  Comparing those as text makes every enumerated attribute wider than
+    one bit look like a mismatch.  A spelling that is not a number at all
+    (`MODDRX1`, `ENABLE`) yields the empty set and is compared as text.
+    """
+    text = _norm_param(value)
+    values = set()
+    if re.fullmatch(r"[01]+", text):
+        values.add(int(text, 2))
+    if re.fullmatch(r"\d+", text):
+        values.add(int(text, 10))
+    return values
+
+
+def _params_agree(expected, recovered):
+    """Do the netlist's parameter and the decoded attribute mean the same?"""
+    if _norm_param(expected) == _norm_param(recovered):
+        return True
+    wanted, got = _param_values(expected), _param_values(recovered)
+    return bool(wanted and got and wanted & got)
+
+
 def _clkdiv2_recovered_via_chain(site_cells, z):
     """Does this site decode a `CLKDIV` at `DIV_MODE=2` **on lane `z`**? (`D103`)
 
@@ -1891,6 +1956,37 @@ def _clkdiv2_recovered_via_chain(site_cells, z):
         if "DIV_MODE" in have and _norm_param(have["DIV_MODE"]) == "2":
             return True
     return False
+
+
+def _iologic_aux_recovered_via_main(cell, netlist):
+    """Is this `IOLOGIC_DUMMY`'s main gearbox decoded at the same site?
+
+    A gearbox wider than a DDR pair takes both halves of its IOLOGIC tile:
+    `pack_iologic.cc` places the primitive on the A half and an
+    `IOLOGIC_DUMMY` on the B half, whose whole configuration is
+    `OUTMODE`/`INMODE` = `DDRENABLE`.  `gowin_unpack` skips exactly that value
+    by design (`if attrvals['OUTMODE'] == DDRENABLE: continue`) -- an aux cell
+    is not a design cell and must not appear in a decoded netlist -- so no
+    decode can ever name it, on any device.
+
+    What the bitstream does carry is the **main** cell's width, and a wide
+    mode is only legal with the aux half configured; so the aux cell is
+    recovered through the mode of the gearbox it belongs to, at the site its
+    own `MAIN_CELL` attribute names.  `None` means recovered; a string is why
+    it is not.
+    """
+    main = cell["attrs"].get("MAIN_CELL")
+    if not main:
+        return "IOLOGIC_DUMMY with no MAIN_CELL attribute"
+    site = tuple(cell["site"])
+    for other in netlist.cells:
+        if (other.x, other.y) != site:
+            continue
+        if str(other.type).startswith("IOLOGIC"):
+            return None
+    return (f"IOLOGIC_DUMMY of {main}: no IOLOGIC decoded at site "
+            f"{list(site)}, so the wide mode that needs this half is not in "
+            f"the bitstream either")
 
 
 def decode_check_c1(pnr_cells, netlist):
@@ -1963,6 +2059,37 @@ def decode_check_c1(pnr_cells, netlist):
                             "bel": cell["bel"], "site": list(cell["site"]),
                             "why": why_not})
             continue
+        if cell["type"] in ADC_CELL_TYPES and not cell.get("params"):
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"],
+                            "why": "ADC left at every default; this die "
+                                   "measurably spends no fuse on a default "
+                                   "parameter, so no bitstream decodes a "
+                                   "cell at its site"})
+            continue
+        if cell["type"] in IOLOGIC_EMPTY_CELL_TYPES:
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"],
+                            "why": "IOLOGIC empty half; its whole "
+                                   "configuration is 'nothing', so no "
+                                   "bitstream on any device decodes a cell "
+                                   "at its site"})
+            continue
+        if cell["type"] == "IOLOGIC_DUMMY":
+            why_not = _iologic_aux_recovered_via_main(cell, netlist)
+            if why_not is None:
+                skipped.append({"name": cell["name"], "type": cell["type"],
+                                "bel": cell["bel"],
+                                "why": "IOLOGIC aux half; gowin_unpack skips "
+                                       "OUTMODE/INMODE=DDRENABLE by design, "
+                                       "and the wide mode of the main cell at "
+                                       "the same site is what the bitstream "
+                                       "carries in its place"})
+                continue
+            missing.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"], "site": list(cell["site"]),
+                            "why": why_not})
+            continue
         base, z = split_bel_name(cell["bel"])
         if _bitstream_cell_type(base) == "CLKDIV2":
             if _clkdiv2_recovered_via_chain(by_site.get(cell["site"], {}), z):
@@ -1990,7 +2117,7 @@ def decode_check_c1(pnr_cells, netlist):
             continue
         have = dict(canon_attr(f) for f in attrs)
         for name, value in _expected_attrs(cell).items():
-            if name in have and _norm_param(have[name]) != _norm_param(value):
+            if name in have and not _params_agree(value, have[name]):
                 attr_mismatch.append({
                     "name": cell["name"], "attr": name,
                     "expected": value, "recovered": str(have[name])})
@@ -2682,8 +2809,24 @@ def level_e1(exported, realised, scope=None):
 #: and the bel carries no index because a site holds exactly one (`P1.T41`).
 _BITSTREAM_BEL_RE = re.compile(r"^(CLKDIV2|CLKDIV|PLL)(?:_([0-9]+))?$")
 
-#: Cell-type prefixes of the bels this check covers.
-BITSTREAM_ADDRESSED_CELL_TYPES = ("CLKDIV2", "CLKDIV", "PLL")
+#: Cell-type prefixes of the bels this check covers.  `IOLOGIC` joins the
+#: HCLK cells because it has the same property they do: its site is an
+#: address in the bitstream and not a `CLS` coordinate, so `INS_LOC` -- which
+#: only spells `R<r>C<c>[cls][half]` -- cannot constrain it and the `.tr`
+#: half of `E1` has nothing to compare.  The vendor's own decoded placement
+#: is the evidence instead.
+#: `IOB` joins them for the same structural reason and with one extra
+#: property worth stating, because it is what makes the check mean something:
+#: an IOB's site is a package ball, fixed by the **same `IO_LOC` line in both
+#: flows**, so a mismatch here is not a placer disagreement but a broken
+#: constraint path.  On its own "the vendor's bitstream decodes an IOB at the
+#: ball we placed ours on" is weak -- the vendor configures every pad of the
+#: die, so an `IOB` cell decodes almost everywhere.  What carries the weight
+#: is the company it keeps: an IO-only shape declares no `scope`, so its `E0`
+#: compares the **whole die** bit for bit, and a buffer realised on a
+#: different ball than the vendor put it on shows up there as non-zero
+#: `cells`/`attrs`.  This half asserts the placement; that half proves it.
+BITSTREAM_ADDRESSED_CELL_TYPES = ("CLKDIV2", "CLKDIV", "PLL", "IOLOGIC", "IOB")
 
 
 #: The `_<index>` suffix a bel or decoded-cell name carries, and nothing more.
@@ -2701,11 +2844,38 @@ def _bitstream_cell_type(name):
 
 
 def bitstream_bel_exported(pnr_cells):
-    """`{name: {x, y, z, type, bel}}` for the bels nextpnr placed here."""
+    """`{name: {x, y, z, type, bel}}` for the bels nextpnr placed here.
+
+    An `IOLOGIC_DUMMY` is left out.  It is the aux half a gearbox wider than a
+    DDR pair takes beside its main cell, its whole configuration is
+    `OUTMODE`/`INMODE` = `DDRENABLE`, and `gowin_unpack` skips that value by
+    design -- so no bitstream decodes it, on any device, and asking `E1`
+    whether the vendor's decoded cell sits at its site is asking a question
+    the bitstream format cannot answer.  Its *main* cell is exported and is
+    compared at the same site; `decode_check_c1` recovers the aux half the
+    same way (MEASURED, `P3.T13`: `OSER8` and `OSER10` fell back to `E0` on
+    exactly this cell while every set-level count was zero).
+    """
     out = {}
     for cell in pnr_cells:
         bel, site = cell.get("bel"), cell.get("site")
         if bel is None or site is None:
+            continue
+        if cell.get("type") in IOLOGIC_SITELESS_CELL_TYPES:
+            continue
+        iob = _IOB_BEL.match(bel)
+        if iob is not None:
+            out[cell["name"]] = {
+                "x": site[0], "y": site[1],
+                "z": ord(iob.group("side")) - ord("A"),
+                "type": "IOB", "bel": bel}
+            continue
+        iologic = _IOLOGIC_BEL.match(bel)
+        if iologic is not None:
+            out[cell["name"]] = {
+                "x": site[0], "y": site[1],
+                "z": ord(iologic.group("side")) - ord("A"),
+                "type": "IOLOGIC", "bel": bel}
             continue
         m = _BITSTREAM_BEL_RE.match(bel)
         if m is None:
@@ -2717,12 +2887,17 @@ def bitstream_bel_exported(pnr_cells):
 
 
 def bitstream_bel_realised(netlist):
-    """`{(x, y, z): type}` of those cells a decoded bitstream holds."""
+    """`{(x, y, z): {type, ...}}` of those cells a decoded bitstream holds.
+
+    A **set** per site, not one type: an IO tile holds an `IOB` and an
+    `IOLOGIC` at the same `z`, so keying one type per site made whichever
+    decoded last hide the other and reported the survivor as a misplacement.
+    """
     out = {}
     for cell in getattr(netlist, "cells", {}):
         kind = _bitstream_cell_type(cell.type)
         if kind is not None:
-            out[(cell.x, cell.y, cell.z)] = kind
+            out.setdefault((cell.x, cell.y, cell.z), set()).add(kind)
     return out
 
 
@@ -2740,8 +2915,8 @@ def level_e1_bitstream(exported, realised, scope=None):
     for name, want in sorted(exported.items()):
         inside = tiles is None or (want["x"], want["y"]) in tiles
         site = (want["x"], want["y"], want["z"])
-        got = realised.get(site)
-        if got == want["type"]:
+        got = realised.get(site) or set()
+        if want["type"] in got:
             matched.append({"name": name, "in_scope": inside,
                             "site": f"X{want['x']}Y{want['y']}/{want['bel']}"})
             in_scope_seen += bool(inside)
@@ -2749,15 +2924,16 @@ def level_e1_bitstream(exported, realised, scope=None):
             mismatched.append({
                 "name": name, "in_scope": inside,
                 "exported": f"X{want['x']}Y{want['y']}/{want['bel']}",
-                "realised": (f"{got} at the same site" if got
-                             else "no HCLK cell decodes at that site in the "
-                                  "vendor bitstream")})
+                "realised": (f"{'/'.join(sorted(got))} at the same site"
+                             if got else
+                             "no bitstream-addressed cell decodes at "
+                             "that site in the vendor bitstream")})
     notes = ""
     level = "E1"
     if mismatched:
         level = "E0"
         first = mismatched[0]
-        notes = (f"EC9/HCLK: {len(mismatched)} HCLK bel(s) the open flow placed "
+        notes = (f"EC9/HCLK: {len(mismatched)} bitstream-addressed bel(s) the open flow placed "
                  f"are not where the vendor bitstream decodes them; first is "
                  f"{first['name']!r} at {first['exported']} -- {first['realised']}")
     elif not exported:
@@ -2956,6 +3132,13 @@ def load_spec(shape, design_dir):
     """
     from .gen import load_shape
 
+    # A caller that already holds the `ShapeSpec` hands it over directly.  It
+    # used to be reduced to `spec.name` and re-imported, which silently
+    # required every shape's name to equal its module name; `adc` lives in
+    # `adc_osc.py` and could therefore never be compared.
+    if shape is not None and not isinstance(shape, str):
+        return shape
+
     names = []
     if shape:
         names.append(shape)
@@ -3077,8 +3260,7 @@ def compare(design_dir, spec=None, level="E0", **kwargs):
     level a batch asked for.  A `ShapeSpec` is accepted directly because that
     is what the batch has in hand.
     """
-    shape = getattr(spec, "name", spec) if spec is not None else None
-    return compare_design(design_dir, shape=shape, level=level, **kwargs)
+    return compare_design(design_dir, shape=spec, level=level, **kwargs)
 
 
 # --------------------------------------------------------------------------

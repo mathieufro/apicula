@@ -1751,6 +1751,14 @@ iologic_attrids = {
         'IOLOGIC_UNKNOWN114':      114,
         'IOLOGIC_UNKNOWN115':      115,
         'TXCLK_POL':               116,
+        # MEASURED on the GW5AST-138C (`P3.T21`): attribute 118 of the
+        # IOLOGIC shortval table is the IODELAY's static delay step, an
+        # enumerated 0-255 whose value ids are 2 for one step and 1000 + n
+        # for n >= 2; step 0 sets no bit and has no row.  Its fuses are eight
+        # plain binary weights (tile row 21, columns 3-10 on ttyp 247), so
+        # bit 7 -- the step the pre-5A DELAY_DEL0-6 window cannot express --
+        # is fuse-backed on this die after all.
+        'C_STATIC_DLY':            118,
         'HWL':                     117,
         'IOLOGIC_UNKNOWN118':      118,
         'IOLOGIC_UNKNOWN119':      119,
@@ -1855,6 +1863,10 @@ iologic_attrvals = {
         'CE':                  91,
         'HCLK1_':              93,
         'UNK102':             102,
+        # The Arora V 16:1 input gearbox mode.  MEASURED (`P3.T16a`): the
+        # vendor's IDES16 sets INMODE to this value id and nothing else
+        # changes; it has no name in any shipped table, like UNK76 above.
+        'UNK105':             105,
         'TRUE':               107,
         'HCLK2_':             114,
         'HCLK3_':             115,
