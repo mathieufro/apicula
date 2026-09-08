@@ -350,10 +350,23 @@ def render_cst(spec, sweep_value=None, with_ins_loc=True):
                          "evidence: %s"
                          % (spec.pins[port].loc,
                             config_role_of_loc(spec.pins[port].loc), ack))
+    diff_pads = tuple(getattr(spec, "diff_pads", ()))
+    if diff_pads:
+        # Declared in the file so the text-only `.cst` check can grant the
+        # differential exemption without a shape in hand
+        # (`oracle.diff_pads_of`).
+        lines.append("// DIFF_PAD " + " ".join('"%s"' % p for p in diff_pads))
     lines.append("")
     for port in spec.pins:
         pin = spec.pins[port]
-        attrs = ["IO_TYPE=%s" % pin.io_type, "PULL_MODE=%s" % pin.pull_mode]
+        # A differential pad carries no `IO_TYPE` at all -- the buffer
+        # primitive names the standard, which is how the vendor's own board
+        # `.cst` spells a TMDS pair.  Rendering `IO_TYPE=None` would hand
+        # `gw_sh` a literal it does not know.
+        attrs = []
+        if pin.io_type is not None:
+            attrs.append("IO_TYPE=%s" % pin.io_type)
+        attrs.append("PULL_MODE=%s" % pin.pull_mode)
         if pin.pull_strength:
             attrs.append("PULL_STRENGTH=%s" % pin.pull_strength)
         if pin.drive is not None:

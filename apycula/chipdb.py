@@ -4269,7 +4269,12 @@ def fse_create_diff_types(dev, device):
         dev.diff_io_types.remove('TLVDS_TBUF')
         dev.diff_io_types.remove('TLVDS_IOBUF')
         dev.diff_io_types.remove('ELVDS_IOBUF')
-    elif device not in {'GW5A-25A', 'GW2A-18', 'GW2A-18C', 'GW1N-4'}:
+    elif device not in {'GW5A-25A', 'GW5AST-138C', 'GW2A-18', 'GW2A-18C',
+                        'GW1N-4'}:
+        # GW5AST-138C is in the set by measurement, not by analogy with the
+        # 25A: the vendor tool places and routes a TLVDS_IOBUF on the die's
+        # true-LVDS pair and generates a bitstream for it
+        # (evidence/tlvds-iobuf/adjudication.md).
         dev.diff_io_types.remove('TLVDS_IOBUF')
 
     if device in {'GW5A-25A'}:

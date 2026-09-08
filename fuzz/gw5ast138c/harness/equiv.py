@@ -383,7 +383,23 @@ _LETTER_BELS = ("IOB", "IOLOGIC", "ODDR", "BUF")
 #: tile's IOLOGIC as `IOLOGIC` at `z` 0 (`A`) or 1 (`B`) whichever direction
 #: the gearbox runs in -- so the direction letter carries no site index and
 #: must not be read as one.
+#: The half `nextpnr` puts on an IOLOGIC site when the design has no gearbox
+#: for that direction (`constids.inc` `IOLOGICI_EMPTY`/`IOLOGICO_EMPTY`).
+#: Its configuration is *nothing*, so no bitstream on any device decodes a
+#: cell at its site and asking `E1` or `c1` about it is asking a question the
+#: format cannot answer -- the same reason `IOLOGIC_DUMMY` is exempt, minus
+#: the main cell that stands in for it.
+IOLOGIC_EMPTY_CELL_TYPES = ("IOLOGICI_EMPTY", "IOLOGICO_EMPTY")
+
+#: Cells `bitstream_bel_exported` leaves out: the empty halves above and the
+#: gearbox aux half, none of which the bitstream addresses.
+IOLOGIC_SITELESS_CELL_TYPES = IOLOGIC_EMPTY_CELL_TYPES + ("IOLOGIC_DUMMY",)
+
 _IOLOGIC_BEL = re.compile(r"^IOLOGIC(?P<side>[AB])[IO]$")
+
+#: The bel an `IBUF`/`OBUF`/`TBUF`/`IOBUF` -- and each half of a differential
+#: pair -- is placed on: one package ball, `A` or `B` of its IO tile.
+_IOB_BEL = re.compile(r"^IOB(?P<side>[AB])$")
 
 
 def split_bel_name(name):
@@ -2037,6 +2053,14 @@ def decode_check_c1(pnr_cells, netlist):
                             "bel": cell["bel"], "site": list(cell["site"]),
                             "why": why_not})
             continue
+        if cell["type"] in IOLOGIC_EMPTY_CELL_TYPES:
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"],
+                            "why": "IOLOGIC empty half; its whole "
+                                   "configuration is 'nothing', so no "
+                                   "bitstream on any device decodes a cell "
+                                   "at its site"})
+            continue
         if cell["type"] == "IOLOGIC_DUMMY":
             why_not = _iologic_aux_recovered_via_main(cell, netlist)
             if why_not is None:
@@ -2777,7 +2801,18 @@ _BITSTREAM_BEL_RE = re.compile(r"^(CLKDIV2|CLKDIV|PLL)(?:_([0-9]+))?$")
 #: only spells `R<r>C<c>[cls][half]` -- cannot constrain it and the `.tr`
 #: half of `E1` has nothing to compare.  The vendor's own decoded placement
 #: is the evidence instead.
-BITSTREAM_ADDRESSED_CELL_TYPES = ("CLKDIV2", "CLKDIV", "PLL", "IOLOGIC")
+#: `IOB` joins them for the same structural reason and with one extra
+#: property worth stating, because it is what makes the check mean something:
+#: an IOB's site is a package ball, fixed by the **same `IO_LOC` line in both
+#: flows**, so a mismatch here is not a placer disagreement but a broken
+#: constraint path.  On its own "the vendor's bitstream decodes an IOB at the
+#: ball we placed ours on" is weak -- the vendor configures every pad of the
+#: die, so an `IOB` cell decodes almost everywhere.  What carries the weight
+#: is the company it keeps: an IO-only shape declares no `scope`, so its `E0`
+#: compares the **whole die** bit for bit, and a buffer realised on a
+#: different ball than the vendor put it on shows up there as non-zero
+#: `cells`/`attrs`.  This half asserts the placement; that half proves it.
+BITSTREAM_ADDRESSED_CELL_TYPES = ("CLKDIV2", "CLKDIV", "PLL", "IOLOGIC", "IOB")
 
 
 #: The `_<index>` suffix a bel or decoded-cell name carries, and nothing more.
@@ -2812,7 +2847,14 @@ def bitstream_bel_exported(pnr_cells):
         bel, site = cell.get("bel"), cell.get("site")
         if bel is None or site is None:
             continue
-        if cell.get("type") == "IOLOGIC_DUMMY":
+        if cell.get("type") in IOLOGIC_SITELESS_CELL_TYPES:
+            continue
+        iob = _IOB_BEL.match(bel)
+        if iob is not None:
+            out[cell["name"]] = {
+                "x": site[0], "y": site[1],
+                "z": ord(iob.group("side")) - ord("A"),
+                "type": "IOB", "bel": bel}
             continue
         iologic = _IOLOGIC_BEL.match(bel)
         if iologic is not None:
@@ -2831,12 +2873,17 @@ def bitstream_bel_exported(pnr_cells):
 
 
 def bitstream_bel_realised(netlist):
-    """`{(x, y, z): type}` of those cells a decoded bitstream holds."""
+    """`{(x, y, z): {type, ...}}` of those cells a decoded bitstream holds.
+
+    A **set** per site, not one type: an IO tile holds an `IOB` and an
+    `IOLOGIC` at the same `z`, so keying one type per site made whichever
+    decoded last hide the other and reported the survivor as a misplacement.
+    """
     out = {}
     for cell in getattr(netlist, "cells", {}):
         kind = _bitstream_cell_type(cell.type)
         if kind is not None:
-            out[(cell.x, cell.y, cell.z)] = kind
+            out.setdefault((cell.x, cell.y, cell.z), set()).add(kind)
     return out
 
 
@@ -2854,8 +2901,8 @@ def level_e1_bitstream(exported, realised, scope=None):
     for name, want in sorted(exported.items()):
         inside = tiles is None or (want["x"], want["y"]) in tiles
         site = (want["x"], want["y"], want["z"])
-        got = realised.get(site)
-        if got == want["type"]:
+        got = realised.get(site) or set()
+        if want["type"] in got:
             matched.append({"name": name, "in_scope": inside,
                             "site": f"X{want['x']}Y{want['y']}/{want['bel']}"})
             in_scope_seen += bool(inside)
@@ -2863,9 +2910,10 @@ def level_e1_bitstream(exported, realised, scope=None):
             mismatched.append({
                 "name": name, "in_scope": inside,
                 "exported": f"X{want['x']}Y{want['y']}/{want['bel']}",
-                "realised": (f"{got} at the same site" if got
-                             else "no bitstream-addressed cell decodes at "
-                                  "that site in the vendor bitstream")})
+                "realised": (f"{'/'.join(sorted(got))} at the same site"
+                             if got else
+                             "no bitstream-addressed cell decodes at "
+                             "that site in the vendor bitstream")})
     notes = ""
     level = "E1"
     if mismatched:

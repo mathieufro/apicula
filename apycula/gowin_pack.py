@@ -2001,10 +2001,18 @@ class Device:
         fuses += self.get_iob_fuses(bel.x, bel.y, bel.idx_str, av)
         return fuses
 
+    def tlvds_obuf_attrs(self, idx_str: str) -> list[tuple[str, str]]:
+        """ The `TLVDS_OBUF` default set for one half of the pad pair.
+
+        A family whose two halves are configured alike -- every family but
+        the 138C, measured -- answers with the one list for both.
+        """
+        return self.default_tlvds_obuf_attrs
+
     def process_TLVDS_OBUF(self, bank_desc: BankDesc, bel: IoBelDesc) -> list[CellFuseBits]:
         self.check_tlvds_placement(bel)
 
-        av = self.set_io_attrvals(bel, self.default_tlvds_obuf_attrs)
+        av = self.set_io_attrvals(bel, self.tlvds_obuf_attrs(bel.idx_str))
         fuses = []
         io_type = bel.cell.attrs.get('IO_TYPE')
         if io_type:
@@ -7054,6 +7062,26 @@ class GW5AST_138C(GW5A):
                      'default_iobuf_attrs'):
             setattr(self, name, [(attr, val) for attr, val
                                  in getattr(self, name) if attr != 'SLEWRATE'])
+        # The P half of a `TLVDS_OBUF` is the one differential configuration
+        # that differs from the inherited GW5A set.  MEASURED (`P3.T23`, one
+        # vendor/open pair per type on the TMDS pair at `(181,102)`,
+        # `IOB103A`): there the vendor programs `ODMUX_1='1'` and leaves
+        # `PERSISTENT` clear, while the inherited set programs
+        # `ODMUX_1='UNKNOWN'` -- the zero code, which costs no fuse and so
+        # reaches the bitstream as nothing -- and `PERSISTENT='OFF'`.  Those
+        # two attributes are what `gowin_unpack`'s mode rule reads, so the
+        # over-emission turned a pure output into an `IOBUF`: an input path
+        # enabled on a pad the design only drives.  The N half keeps the
+        # inherited set, which the same measurement found exact, and so do
+        # `TLVDS_TBUF` and `TLVDS_IBUF`.
+        self.default_tlvds_obuf_p_attrs = [
+            (attr, '1' if attr == 'ODMUX_1' else val)
+            for attr, val in self.default_tlvds_obuf_attrs
+            if attr != 'PERSISTENT']
+
+    def tlvds_obuf_attrs(self, idx_str: str) -> list[tuple[str, str]]:
+        return (self.default_tlvds_obuf_p_attrs if idx_str == 'A'
+                else self.default_tlvds_obuf_attrs)
 
     def reject_iologic_unsupported(self):
         """ D39 state (1): named refusal for any IOLOGIC cell on GW5AST-138C.

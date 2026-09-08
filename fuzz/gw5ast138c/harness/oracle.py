@@ -431,11 +431,36 @@ def load_pin_banks(gowinhome=None, device=DEVICE, package="PBGA484A"):
     return {e["INDEX"]: e.get("BANK") for e in data["PIN_DATA"]}
 
 
+#: A generated `.cst` declares its differential pad pair on this line, so the
+#: text-only check below can grant rule 1's exemption without a shape in hand
+#: (`gen.render_cst`, `P3.T23`).
+_DIFF_PAD_RE = re.compile(r'^//\s*DIFF_PAD\s+(.*)$', re.M)
+_DIFF_PAD_NAME_RE = re.compile(r'"([^"]+)"')
+
+
+def diff_pads_of(text):
+    """The ports a generated `.cst` declares as halves of a differential pad.
+
+    A differential pad carries no `IO_TYPE`: the buffer primitive names the
+    standard, which is how the vendor's own board constraints spell a TMDS
+    pair (`tang_mega_138K_pins.cst`).  The exemption is narrow -- it lifts
+    rule 1 for the named ports and nothing else -- and it is declared in the
+    file rather than inferred, so a hand-written `.cst` that simply forgot an
+    `IO_TYPE` is still refused.
+    """
+    names = set()
+    for line in _DIFF_PAD_RE.findall(text):
+        names.update(_DIFF_PAD_NAME_RE.findall(line))
+    return names
+
+
 def check_cst_defaults(text, pin_banks):
     """The three unconditional rules `P0.T20` makes generation-time (F21).
 
-    1. every used pin carries `IO_TYPE`;
-    2. every bank named carries a `BANK_VCCIO`;
+    1. every used pin carries `IO_TYPE` -- except a port the file declares as
+       one half of a differential pad (`DIFF_PAD`, see `diff_pads_of`);
+    2. every bank named carries a `BANK_VCCIO` -- differential pads owe this
+       one too;
     3. no `LVCMOS*` on any bank 6 or 7 pin — the PR #423 thermal-hazard
        class (F73). A bank/pull change on this silicon is a live thermal
        hazard, not a cosmetic one.
@@ -444,12 +469,13 @@ def check_cst_defaults(text, pin_banks):
     """
     errors = []
     ports = parse_cst(text)
+    diff_pads = diff_pads_of(text)
     banks_seen = {}
     for port in ports.values():
         if not port.pin:
             errors.append(f'port "{port.port}" has IO_PORT attributes but no IO_LOC')
             continue
-        if "IO_TYPE" not in port.attrs:
+        if "IO_TYPE" not in port.attrs and port.port not in diff_pads:
             errors.append(f'port "{port.port}" (pin {port.pin}) has no IO_TYPE')
         bank = pin_banks.get(port.pin)
         if bank is None:
