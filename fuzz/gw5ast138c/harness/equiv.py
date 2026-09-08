@@ -395,6 +395,12 @@ IOLOGIC_EMPTY_CELL_TYPES = ("IOLOGICI_EMPTY", "IOLOGICO_EMPTY")
 #: gearbox aux half, none of which the bitstream addresses.
 IOLOGIC_SITELESS_CELL_TYPES = IOLOGIC_EMPTY_CELL_TYPES + ("IOLOGIC_DUMMY",)
 
+#: The GW5AST-138C's two on-die ADCs.  Their placement and routing are
+#: modelled and their one attributed parameter is fuse-backed, but a block
+#: left at every default spends no fuse at all -- so `c1` may require one back
+#: from the bitstream only when the design actually set something.
+ADC_CELL_TYPES = ("ADCLRC", "ADCULC")
+
 _IOLOGIC_BEL = re.compile(r"^IOLOGIC(?P<side>[AB])[IO]$")
 
 #: The bel an `IBUF`/`OBUF`/`TBUF`/`IOBUF` -- and each half of a differential
@@ -2053,6 +2059,14 @@ def decode_check_c1(pnr_cells, netlist):
                             "bel": cell["bel"], "site": list(cell["site"]),
                             "why": why_not})
             continue
+        if cell["type"] in ADC_CELL_TYPES and not cell.get("params"):
+            skipped.append({"name": cell["name"], "type": cell["type"],
+                            "bel": cell["bel"],
+                            "why": "ADC left at every default; this die "
+                                   "measurably spends no fuse on a default "
+                                   "parameter, so no bitstream decodes a "
+                                   "cell at its site"})
+            continue
         if cell["type"] in IOLOGIC_EMPTY_CELL_TYPES:
             skipped.append({"name": cell["name"], "type": cell["type"],
                             "bel": cell["bel"],
@@ -3118,6 +3132,13 @@ def load_spec(shape, design_dir):
     """
     from .gen import load_shape
 
+    # A caller that already holds the `ShapeSpec` hands it over directly.  It
+    # used to be reduced to `spec.name` and re-imported, which silently
+    # required every shape's name to equal its module name; `adc` lives in
+    # `adc_osc.py` and could therefore never be compared.
+    if shape is not None and not isinstance(shape, str):
+        return shape
+
     names = []
     if shape:
         names.append(shape)
@@ -3239,8 +3260,7 @@ def compare(design_dir, spec=None, level="E0", **kwargs):
     level a batch asked for.  A `ShapeSpec` is accepted directly because that
     is what the batch has in hand.
     """
-    shape = getattr(spec, "name", spec) if spec is not None else None
-    return compare_design(design_dir, shape=shape, level=level, **kwargs)
+    return compare_design(design_dir, shape=spec, level=level, **kwargs)
 
 
 # --------------------------------------------------------------------------

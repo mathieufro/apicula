@@ -30,9 +30,13 @@ DEVICE = "GW5AST-138C"
 ANCHOR_NODE_PREFIX = "X159Y0/AE350_SOC"
 ANCHOR_TILE = (0, 159)
 #: The chipdb this test is a regression lock for (`portmap-138c.md`).
+#: Re-measured at the Phase-3 close: the IO/IOLOGIC work moved the
+#: database (IOLOGIC bels, the HCLK-to-FCLK edge, the 16-bit gearboxes,
+#: both ADC bels and their configuration attribution), and the AE350
+#: facts below were re-checked against the new value rather than the
+#: lock being widened.
 EXPECTED_SHA256 = (
-    "7f3c64c94fcf6ae8f4cfbe4e8a90bf38af83251d4bc0f818fd347636580f506e"
-)
+    "f2f92b0448b7218b969237f150c694039bad9e0d4f0f17dfdbfde5108d0efd6c")
 
 
 def find_ae350_namespace_crossings(nodes, anchor_prefix=ANCHOR_NODE_PREFIX,

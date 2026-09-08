@@ -45,6 +45,21 @@ ADC_POINTS = {
     "adclrc-vdd09": ("ADCLRC", 2, {}),
     "adclrc-divctl2": ("ADCLRC", 1, {"DIV_CTL": "2'd2"}),
     "adculc-temp": ("ADCULC", 1, {}),
+    # `P3.T39`'s fuse sweep (`D111`, 8 runs): the four points above already
+    # cover `VSENCTL` 1 and 2 and `DIV_CTL` 0 and 2, so completing both axes
+    # costs the six remaining `VSENCTL` values and the two remaining
+    # `DIV_CTL` values -- exactly the eight runs `D111` authorised.  Both
+    # axes must be *complete* to attribute a field: a shortval table maps a
+    # value to a bit set, so a field is only decoded once every value of it
+    # has been seen.
+    "adclrc-vsen0": ("ADCLRC", 0, {}),
+    "adclrc-vsen3": ("ADCLRC", 3, {}),
+    "adclrc-vsen4": ("ADCLRC", 4, {}),
+    "adclrc-vsen5": ("ADCLRC", 5, {}),
+    "adclrc-vsen6": ("ADCLRC", 6, {}),
+    "adclrc-vsen7": ("ADCLRC", 7, {}),
+    "adclrc-divctl1": ("ADCLRC", 1, {"DIV_CTL": "2'd1"}),
+    "adclrc-divctl3": ("ADCLRC", 1, {"DIV_CTL": "2'd3"}),
 }
 
 ADC_BASELINE = "adclrc-temp"
@@ -110,7 +125,7 @@ class AdcShape(IoShape):
     """One on-die ADC per run, measuring an internal source."""
 
     name = "adc"
-    primitive = "ADCLRC / ADCULC"
+    primitive = "ADC"
     sweep_axis = "POINT"
     sweep_values = list(ADC_POINTS)
     baseline_value = ADC_BASELINE
@@ -221,7 +236,7 @@ class OscShape(IoShape):
     """
 
     name = "osc"
-    primitive = "OSCA / OSCB"
+    primitive = "OSC"
     sweep_axis = "FREQ_DIV"
     sweep_values = list(OSC_POINTS)
     baseline_value = OSC_BASELINE

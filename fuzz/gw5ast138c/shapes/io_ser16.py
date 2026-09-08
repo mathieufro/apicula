@@ -107,7 +107,7 @@ class IoSer16Shape(IoShape):
     """One `OSER16` on a bank-5 ball of HCLK block 4."""
 
     name = "io_ser16"
-    primitive = "OSER16"
+    primitive = "OSER16 / IDES16"
     sweep_axis = "POINT"
     sweep_values = list(POINTS)
     baseline_value = BASELINE

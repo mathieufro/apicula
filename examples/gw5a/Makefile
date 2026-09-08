@@ -28,7 +28,15 @@ primer25k: \
 tangmega138k: \
 	big-shift-tangmega138k.fs attosoc-tangmega138k.fs uart-message-tangmega138k.fs \
 	ae350-emb-tcm-tangmega138k.fs dualpin-tangmega138k.fs \
-	iddr-boardclk-tangmega138k.fs
+	iddr-boardclk-tangmega138k.fs \
+	oddr-io-tangmega138k.fs iddr-io-tangmega138k.fs \
+	oser4-io-tangmega138k.fs oser8-io-tangmega138k.fs oser10-io-tangmega138k.fs \
+	ovideo-io-tangmega138k.fs \
+	ides4-io-tangmega138k.fs ides8-io-tangmega138k.fs ides10-io-tangmega138k.fs \
+	oser16-io-tangmega138k.fs ides16-io-tangmega138k.fs \
+	tlvds-ibuf-io-tangmega138k.fs tlvds-obuf-io-tangmega138k.fs \
+	tlvds-tbuf-io-tangmega138k.fs tlvds-iobuf-io-tangmega138k.fs \
+	iodelay-static-io-tangmega138k.fs adclrc-io-tangmega138k.fs
 
 tangconsole138k: \
 	uart-message-tangmega138k.fs
@@ -132,6 +140,117 @@ dualpin-tangmega138k.json: dualpin-tangmega138k-synth.json tangmega138k.cst
 
 dualpin-tangmega138k.fs: dualpin-tangmega138k.json
 	gowin_pack --jtag_as_gpio --sspi_as_gpio --mspi_as_gpio --ready_as_gpio --done_as_gpio -d GW5AST-138C -o $@ $<
+
+
+# The IO/IOLOGIC examples, one per primitive that closed at E1.  Each one is
+# the design its evidence row was measured on -- both the .v and the .cst are
+# generated from the shape file that drove the vendor comparison, so an
+# example cannot drift away from the measurement that justifies it.  Each
+# carries its own .cst because these designs claim balls by primitive, not the
+# board's LED/UART set, and because the gearbox rows pin their CLKDIV lane
+# with an INS_LOC line the shared constraint file has no business holding.
+
+oddr-io-tangmega138k-synth.json: oddr-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+oddr-io-tangmega138k.json: oddr-io-tangmega138k-synth.json oddr-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=oddr-io-tangmega138k.cst
+
+iddr-io-tangmega138k-synth.json: iddr-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+iddr-io-tangmega138k.json: iddr-io-tangmega138k-synth.json iddr-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=iddr-io-tangmega138k.cst
+
+oser4-io-tangmega138k-synth.json: oser4-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+oser4-io-tangmega138k.json: oser4-io-tangmega138k-synth.json oser4-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=oser4-io-tangmega138k.cst
+
+oser8-io-tangmega138k-synth.json: oser8-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+oser8-io-tangmega138k.json: oser8-io-tangmega138k-synth.json oser8-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=oser8-io-tangmega138k.cst
+
+oser10-io-tangmega138k-synth.json: oser10-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+oser10-io-tangmega138k.json: oser10-io-tangmega138k-synth.json oser10-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=oser10-io-tangmega138k.cst
+
+ovideo-io-tangmega138k-synth.json: ovideo-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+ovideo-io-tangmega138k.json: ovideo-io-tangmega138k-synth.json ovideo-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=ovideo-io-tangmega138k.cst
+
+ides4-io-tangmega138k-synth.json: ides4-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+ides4-io-tangmega138k.json: ides4-io-tangmega138k-synth.json ides4-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=ides4-io-tangmega138k.cst
+
+ides8-io-tangmega138k-synth.json: ides8-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+ides8-io-tangmega138k.json: ides8-io-tangmega138k-synth.json ides8-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=ides8-io-tangmega138k.cst
+
+ides10-io-tangmega138k-synth.json: ides10-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+ides10-io-tangmega138k.json: ides10-io-tangmega138k-synth.json ides10-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=ides10-io-tangmega138k.cst
+
+oser16-io-tangmega138k-synth.json: oser16-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+oser16-io-tangmega138k.json: oser16-io-tangmega138k-synth.json oser16-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=oser16-io-tangmega138k.cst
+
+ides16-io-tangmega138k-synth.json: ides16-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+ides16-io-tangmega138k.json: ides16-io-tangmega138k-synth.json ides16-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=ides16-io-tangmega138k.cst
+
+tlvds-ibuf-io-tangmega138k-synth.json: tlvds-ibuf-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+tlvds-ibuf-io-tangmega138k.json: tlvds-ibuf-io-tangmega138k-synth.json tlvds-ibuf-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tlvds-ibuf-io-tangmega138k.cst
+
+tlvds-obuf-io-tangmega138k-synth.json: tlvds-obuf-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+tlvds-obuf-io-tangmega138k.json: tlvds-obuf-io-tangmega138k-synth.json tlvds-obuf-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tlvds-obuf-io-tangmega138k.cst
+
+tlvds-tbuf-io-tangmega138k-synth.json: tlvds-tbuf-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+tlvds-tbuf-io-tangmega138k.json: tlvds-tbuf-io-tangmega138k-synth.json tlvds-tbuf-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tlvds-tbuf-io-tangmega138k.cst
+
+tlvds-iobuf-io-tangmega138k-synth.json: tlvds-iobuf-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+tlvds-iobuf-io-tangmega138k.json: tlvds-iobuf-io-tangmega138k-synth.json tlvds-iobuf-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=tlvds-iobuf-io-tangmega138k.cst
+
+iodelay-static-io-tangmega138k-synth.json: iodelay-static-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+iodelay-static-io-tangmega138k.json: iodelay-static-io-tangmega138k-synth.json iodelay-static-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=iodelay-static-io-tangmega138k.cst
+
+adclrc-io-tangmega138k-synth.json: adclrc-io.v
+	$(YOSYS) -p "read_verilog $^; synth_gowin -json $@ -family gw5a ${YOSYS_FLAGS}"
+
+adclrc-io-tangmega138k.json: adclrc-io-tangmega138k-synth.json adclrc-io-tangmega138k.cst
+	$(NEXTPNR) ${NEXTPNR_FLAGS} ${DEBUG} --json $< --write $@ --device GW5AST-LV138PG484AC1/I0 --vopt cst=adclrc-io-tangmega138k.cst
 
 # ============================================================
 # TangConsole138k

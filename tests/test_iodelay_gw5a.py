@@ -40,7 +40,21 @@ def _handler(cls):
 
 
 def _delays(attr_vals):
+    """The pre-5A delay encoding: seven one-bit `DELAY_DEL*` attributes."""
     return [av for av in attr_vals if av.attr.startswith("DELAY_DEL")]
+
+
+def _gw5a_delay(attr_vals):
+    """The Arora V encoding, MEASURED (`P3.T21`, 28 bitstreams).
+
+    `C_STATIC_DLY` is **one** enumerated IOLOGIC attribute, number 118,
+    carrying the whole 0-255 step -- value id `2` for step 1 and `1000 + n`
+    for `n >= 2` -- and its fuses are eight plain binary weights in row 21,
+    columns 3-10. So the die spends a bit on step 7, and the pre-5A window's
+    seven `DELAY_DEL0`-`DELAY_DEL6` attributes are simply the wrong encoding
+    here, not a missing one.
+    """
+    return [av for av in attr_vals if av.attr == "C_STATIC_DLY"]
 
 
 def test_iodelay_param_name_both_spellings():
@@ -81,7 +95,9 @@ def test_iodelay_138c_handler_invoked():
     packer = _handler(GW5AST_138C)
     attr_vals = Device.common_iologic_handler(packer, _bel({"C_STATIC_DLY": 5}))
     assert len(attr_vals) > 3
-    assert len(_delays(attr_vals)) >= 1
+    assert _gw5a_delay(attr_vals) == [AttrVal("C_STATIC_DLY", 1005)]
+    # ...and never the pre-5A one, which would put the step in the wrong bits.
+    assert _delays(attr_vals) == []
 
 
 def test_iodelay_gw5a_refuses_dynamic_and_adaptive_modes():
@@ -96,7 +112,9 @@ def test_iodelay_gw5a_takes_an_explicit_delay_step():
     """The DDR3 PHY sets the DQ delay from calibration, not from the netlist."""
     packer = _handler(GW5AST_138C)
     attr_vals = packer.handle_iodelay_gw5a(_bel({"C_STATIC_DLY": 0}), c_static_dly=5)
-    assert _delays(attr_vals) == [AttrVal("DELAY_DEL0", "1"), AttrVal("DELAY_DEL2", "1")]
+    assert _gw5a_delay(attr_vals) == [AttrVal("C_STATIC_DLY", 1005)]
+    # The enable set the vendor programs alongside it is `INDEL` alone.
+    assert AttrVal("INDEL", "ENABLE") in attr_vals
 
 
 def test_iodelay_25a_handler_output_unchanged():

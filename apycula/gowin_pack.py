@@ -600,6 +600,16 @@ class ChipDB:
     def get_adc_bus(self, x: int, y: int) -> str:
         return self.db.extra_func[y, x]['adcio']['bus']
 
+    def get_adc_config(self, x: int, y: int) -> dict[str, dict[int, set]]:
+        """`{parameter: {value: bits}}` measured for the ADC at `(x, y)`.
+
+        Empty when the site's configuration table was never swept, which is
+        what makes an unattributed parameter a refusal instead of a silent
+        default.
+        """
+        return self.db.extra_func.get((y, x), {}).get('adc', {}).get(
+            'config', {})
+
     def get_const_fuses(self, x: int, y: int) -> set[Coord]:
         return self.db.const.get(self.get_ttyp(x, y), set())
 
@@ -5345,44 +5355,49 @@ class GW5A(Device):
             return self.common_out_iologic_handler(mod_bel)
         return self.common_in_iologic_handler(mod_bel)
 
-    #: What the vendor measured about each hard block this device model does
-    #: not carry yet, so the refusal can say which fact it is refusing on.
-    _UNMODELLED_BLOCKS = {
-        'ADCLRC': ("its port map is anchored and its bel exists, but the "
-                   ".fse carries no ADC fuse table for this die: the bits the "
-                   "VSENCTL and DIV_CTL diffs move sit in the unattributed "
-                   "unknown_136/unknown_137/unknown_138 shortval tables of "
-                   "tiles (108,167), (108,180) and (108,181)"),
-        'ADCULC': ("its port map is anchored and its bel exists, but the "
-                   ".fse carries no ADC fuse table for this die: the bits the "
-                   "VSENCTL and DIV_CTL diffs move sit in the unattributed "
-                   "unknown_136/unknown_137/unknown_138 shortval tables of "
-                   "the corner it shares with ADCLRC"),
-    }
+    def _adc_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """Configure an ADC from the parameters that were measured.
 
-    def _refuse_adc(self, bel: BelDesc) -> list[CellFuseBits]:
-        """Refuse to *configure* an ADC, saying what is missing.
-
-        The refusal is no longer about the port map: `P3.T28b` anchors both
-        blocks' input and output tables and `chipdb` builds both bels, so
-        `nextpnr` can place and route an ADC on this die. What no measurement
-        covers yet is the block's sixteen parameters -- `VSENCTL`, `DIV_CTL`,
-        `SAMPLE_CNT_SEL` and the rest -- whose fuses have no attributed table.
-        Emitting a guess would produce a wrong bitstream with no error
-        (`D30`), so the packer stops here and names the sweep that would
-        close it (`evidence/adc/summary.md`).
+        The block's ports -- `VSENCTL`, `ADCEN`, `FSCAL_VALUE`,
+        `OFFSET_VALUE` and the rest -- are fabric inputs, not fuses: an
+        eight-point `VSENCTL` sweep moves only pips into the block's own
+        `A`/`B` wires, so routing already carries them and there is nothing
+        here to emit for them.  Of the seventeen *parameters*, one was swept
+        over its complete axis and is emitted from the die's own tables;
+        every other one is refused by name, because a guess at a
+        configuration fuse is a wrong bitstream with no error (`D30`).
         """
         typ = bel.cell.typ
-        raise PackRefused(
-            f"{typ} cannot be configured on {self.device_name}: "
-            f"{self._UNMODELLED_BLOCKS[typ]}. Refusing rather than emitting "
-            "an unverified fuse.")
+        config = self.chipdb.get_adc_config(bel.x, bel.y)
+        bits = set()
+        for parm, raw in sorted(bel.cell.parms.items()):
+            values = config.get(parm)
+            if values is None:
+                raise PackRefused(
+                    f"{typ}.{parm} cannot be set on {self.device_name}: no "
+                    "sweep has attributed its configuration fuses, and only "
+                    f"{sorted(config) or 'no parameter'} of this block is "
+                    "measured. Refusing rather than emitting an unverified "
+                    "fuse.")
+            value = int(str(raw), 2)
+            if value not in values:
+                raise PackRefused(
+                    f"{typ}.{parm} = {value} is outside the measured axis "
+                    f"{sorted(values)} on {self.device_name}. Refusing "
+                    "rather than emitting an unverified fuse.")
+            # A round trip through the chipdb turns each coordinate into a
+            # list; a fuse set is addressed by coordinate, so it is retupled
+            # here rather than everywhere it is compared.
+            bits.update(map(tuple, values[value]))
+        if not bits:
+            return []
+        return [CellFuseBits(bel.x, bel.y, bits)]
 
     def get_ADCLRC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        return self._refuse_adc(bel)
+        return self._adc_fuses(bel)
 
     def get_ADCULC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        return self._refuse_adc(bel)
+        return self._adc_fuses(bel)
 
     def __init__(self, cli_args: CliArgs, pnr: Netlist):
         super().__init__(cli_args, pnr)

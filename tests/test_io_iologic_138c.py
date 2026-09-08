@@ -312,28 +312,24 @@ def test_oddr_iddr_sweep_is_complete_at_e1():
     assert len([r for r in rows if r["level"] == "E1"]) == 6
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="MEASURED, and a different open item from the one the fabric flops "
-           "caused (P3.T12 first sweep, now fixed): all three ODDR points are "
-           "verdict ok with conns=0, and all three IDDR points differ on four "
-           "conns because the two flows take the deserialiser's output out of "
-           "the tile on different fabric wires -- the vendor drives the pad "
-           "from IOLOGIC.Q14 (wire F7) and nextpnr from IOLOGIC.Q8 (wire F0, "
-           "its Q0->Q8 rename in pack_iologic.cc), while BOTH flows occupy "
-           "F0 and F7. One of the two has Q0 and Q1 the wrong way round. "
-           "Settling it needs the vendor's whole wire->Q_i map, which the "
-           "IDES row (P3.T14) decodes for free from bitstreams it is already "
-           "paying for; the fix belongs there, with that evidence. Strict, so "
-           "this fails the day the mapping is corrected.")
 def test_oddr_iddr_rows_e1():
-    """The row is closed at `E1` over the shape's whole sweep."""
+    """The row is closed at `E1` over the shape's whole sweep.
+
+    This carried a strict `xfail` until the item it named was settled: the
+    three `IDDR` points differed on four `conns` because the two flows took
+    the deserialiser's output out of the tile on different fabric wires (the
+    vendor from `IOLOGIC.Q14` = `F7`, `nextpnr` from `IOLOGIC.Q8` = `F0`).
+    `P3.T14`'s bitstreams decoded the vendor's whole wire-to-`Q_i` map, the
+    rename landed, and the `EW10`/`W11` IO-tile wire alias closed the last
+    two. All six points are `ok` at `E1` with `conns` 0.
+    """
     rows = _oddr_iddr_rows()
     if rows is None:
         pytest.skip("evidence/oddr-iddr/runs.jsonl not written yet")
     assert len(rows) == 6
     good = [r for r in rows if r["level"] == "E1" and r["verdict"] == "ok"]
-    assert len(good) >= 5
+    assert len(good) == 6
+    assert all(r["diff_count"]["conns"] == 0 for r in rows)
 
 
 def test_oddr_iddr_decode_check_ok():
@@ -404,17 +400,21 @@ def test_oser_rows_have_no_set_level_difference():
         assert not row["unexplained_bits"], row["run_id"]
 
 
-def test_oser_ovideo_is_open_on_the_decode_check_alone():
-    """MEASURED: an `OVIDEO`'s `OUTMODE` fuses decode back as value id 74
-    (`LVDSOUT`), which cannot be aliased without renaming a genuine
-    differential output on the GW5A-25A -- so `c1` cannot name the cell while
-    `c2` and every set-level count are clean."""
+def test_oser_ovideo_decode_check_is_closed_by_an_output_path_alias():
+    """MEASURED: an `OVIDEO`'s `OUTMODE` fuses decode back as value id 74,
+    `LVDSOUT` -- which is what `gowin_pack` itself writes for a `VIDEOTX`, so
+    `c1` reported the `OVIDEO` missing from a bitstream that carried it. The
+    alias is safe because it is applied on the **output** path only: the same
+    id in `INMODE` is a different mode and must keep failing to resolve, which
+    is why the row could be closed without renaming a genuine differential
+    output on the GW5A-25A."""
     rows = _rows(_OSER)
     if rows is None:
         pytest.skip("evidence/oser/runs.jsonl not written yet")
     row = next(r for r in rows if r["sweep"]["POINT"] == "ovideo-default")
-    assert row["decode_check"]["c1"] == "mismatch"
-    assert row["decode_check"]["c2"] == "ok"
+    assert row["decode_check"] == {"c1": "ok", "c2": "ok"}
+    from apycula import gowin_unpack
+    assert gowin_unpack._iologic_outmode_alias["LVDSOUT"] == "OVIDEO"
 
 
 def test_oser_lane_is_pinned_in_both_flows():
@@ -454,12 +454,12 @@ def test_oser_no_mem_variants_touched():
 def test_ides_rows_e1():
     """The input-deserialiser row reaches `E1` on its whole sweep (`P3.T14`).
 
-    Every point matches the vendor on cells and attributes and passes both
-    decode checks; every point still differs on `conns`, all of it inside the
-    pad tile, which is the `Q0`/`Q1` fabric-wire question the `ODDR`/`IDDR`
-    row left open and this row now measures at three widths.  The assertion
-    is written so that closing that item makes this test fail rather than
-    quietly pass.
+    Every point matches the vendor on cells, attributes **and** connections
+    and passes both decode checks. The `conns` residual this row was opened
+    with -- the `Q0`/`Q1` fabric-wire question the `ODDR`/`IDDR` row left open
+    -- was settled here at three widths (`IDES4` -> `Q8`-`Q11`, `IDES8` ->
+    `Q8`-`Q15`, `IDES10` -> `Q6`-`Q15`) and then taken to zero by the
+    `EW10`/`W11` IO-tile wire alias.
     """
     rows = _rows(_IDES)
     if rows is None:
@@ -468,10 +468,9 @@ def test_ides_rows_e1():
     assert all(r["level"] == "E1" for r in rows)
     for row in rows:
         counts = row["diff_count"]
-        assert (counts["cells"], counts["attrs"]) == (0, 0), row["run_id"]
+        assert (counts["cells"], counts["attrs"], counts["conns"]) == (0, 0, 0), \
+            row["run_id"]
         assert row["decode_check"] == {"c1": "ok", "c2": "ok"}, row["run_id"]
-        assert counts["conns"] > 0, (
-            row["run_id"], "conns closed -- update the row and this test")
 
 
 def test_ides_input_fclk_selection_is_not_fuse_backed():

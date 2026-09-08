@@ -65,7 +65,13 @@ def test_bitstream_cell_type_does_not_eat_the_2_of_clkdiv2():
     assert equiv._bitstream_cell_type("CLKDIV2_1") == "CLKDIV2"
     assert equiv._bitstream_cell_type("CLKDIV2") == "CLKDIV2"
     assert equiv._bitstream_cell_type("CLKDIV_1") == "CLKDIV"
-    assert equiv._bitstream_cell_type("IOB") is None
+    # `IOB` was `None` here until the TLVDS row needed it: an IO-only design
+    # has no `CLS` cell for `INS_LOC` to pin, and an IOB's site is a ball
+    # fixed by the same `IO_LOC` line in both flows, so `IOB` joined
+    # `CLKDIV`/`PLL`/`IOLOGIC` as a bitstream-addressed bel. What this test
+    # is about is the index strip, and that is unaffected.
+    assert equiv._bitstream_cell_type("IOB") == "IOB"
+    assert equiv._bitstream_cell_type("IOB_1") == "IOB"
 
 
 def _pnr_cells_cross_lane(tmp_path):

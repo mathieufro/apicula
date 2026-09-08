@@ -216,14 +216,24 @@ def test_gen_ins_loc_may_be_a_callable(tmp_path):
         "div0": "BOTTOMSIDE[4]"}
 
 
-def test_gen_open_cst_has_no_ins_loc(tmp_path):
-    """nextpnr's reader cannot parse `SIDE[0~7]`, so it gets its own `.cst`."""
+def test_gen_open_cst_carries_the_same_ins_loc_as_the_vendor(tmp_path):
+    """The open `.cst` pins the same lane the vendor's does.
+
+    It used to carry no `INS_LOC` at all, because `nextpnr`'s reader could not
+    parse a `SIDE[0~7]` index and the open flow was left to place the divider
+    itself. `D107` made the lane a matched term of `E1`, so the reader learned
+    to split that index into an HCLK block ordinal and a lane, and the two
+    flows are now constrained identically -- which is what lets the `oser` and
+    `ides` rows decode `FCLKSEL1=HCLK2`/`FCLKSEL2=HCLK2_` on both sides. A
+    lane pinned in one flow and free in the other is the shape of a silent
+    pass, which is why this is asserted rather than left to the row.
+    """
     spec = gen.load_shape("clocking_clkdiv")
     gen.run(spec, tmp_path / "d", "4")
     vendor = (tmp_path / "d" / "top.cst").read_text()
     open_cst = (tmp_path / "d" / "top-open.cst").read_text()
     assert "INS_LOC" in vendor and "BOTTOMSIDE[4]" in vendor
-    assert "INS_LOC" not in open_cst
+    assert 'INS_LOC "div0" BOTTOMSIDE[4];' in open_cst
     for line in vendor.splitlines():
         if line.startswith(("IO_LOC", "IO_PORT")):
             assert line in open_cst

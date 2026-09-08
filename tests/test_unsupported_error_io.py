@@ -38,8 +38,24 @@ def test_gw5a_iologic_half_of_a_gearbox_has_a_fuse_handler():
 def test_io16_bels_need_both_iologic_halves():
     """The bel exists exactly where the pad pair does (`fse_iologic`)."""
     src = inspect.getsource(chipdb.fse_iologic)
-    assert ("if is_GW5_family(device) and {'IOLOGICA', 'IOLOGICB'} <= bels.keys():"
+    assert ("if has_gw5_io16(device) and {'IOLOGICA', 'IOLOGICB'} <= bels.keys():"
             in src)
+
+
+def test_io16_extent_is_claimed_for_the_measured_die_only():
+    """The gearbox extent is structural, and structure differs per die.
+
+    It was measured on the GW5AST-138C, one vendor run per primitive. Widening
+    it to the family put 115 `OSER16` and 115 `IDES16` bels on the GW5A-25A
+    that no run ever asked the vendor about, and changed that device's chipdb
+    -- which `S3` forbids and which nothing caught until the phase-close
+    regression ran.
+    """
+    assert chipdb.has_gw5_io16("GW5AST-138C")
+    assert not chipdb.has_gw5_io16("GW5A-25A")
+    assert not chipdb.has_gw5_io16("GW5AT-60B")
+    # ...and the family predicate still means the family, for everything else.
+    assert chipdb.is_GW5_family("GW5A-25A")
 
 
 def test_io16_aux_is_the_same_cell_not_the_next_one():
@@ -49,9 +65,15 @@ def test_io16_aux_is_the_same_cell_not_the_next_one():
 
 
 def test_iologicb_fuses_follow_its_pad_into_the_aux_cell():
-    """A `B` half's IOLOGIC fuses live where its `IOBB` fuses live."""
-    src = inspect.getsource(chipdb)
-    assert "main_cell.bels['IOLOGICB'].fuse_cell_offset = off" in src
+    """A `B` half's IOLOGIC fuses live where its `IOBB` fuses live.
+
+    On the die where that was measured, and only there: the displacement moves
+    where a shipped device writes real fuses, so extending it to a die whose
+    bitstreams were never asked would be a guess with a bitstream behind it.
+    """
+    src = inspect.getsource(chipdb.gw5_displace_iologicb)
+    assert "iologic.fuse_cell_offset = pad.fuse_cell_offset" in src
+    assert "has_gw5_io16(device)" in src
     place = inspect.getsource(gowin_pack.Device.iologic_fuse_bits)
     assert "get_iologic_fuse_cell" in place
 

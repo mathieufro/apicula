@@ -377,6 +377,20 @@ except ImportError:
 def is_GW5_family(device):
     return device in {'GW5A-25A', 'GW5AT-60B', 'GW5AST-138C'}
 
+
+#: The Arora V dice whose 16-bit gearbox has actually been asked of the vendor.
+#: The geometry below is measured on the `GW5AST-138C` alone -- one vendor run
+#: per primitive -- and the family shares neither its `IOLOGIC` extent nor its
+#: pad pairing by construction, so widening this set is a new measurement and
+#: not a generalisation.  Keeping it narrow is also what keeps the other two
+#: dice's chipdbs byte-identical (`S3`).
+_GW5_IO16_DEVICES = {'GW5AST-138C'}
+
+
+def has_gw5_io16(device):
+    """Whether this die's 16-bit gearbox extent has been measured."""
+    return device in _GW5_IO16_DEVICES
+
 def set_corners_io(db, device):
     if device in {'GW5A-25A'}:
         db.corner_tiles_io[0, 0]                     = 'T'
@@ -2715,6 +2729,41 @@ def fse_create_adc(dev, device, fse, dat):
             dev.nodes.setdefault(f'X{col}Y{row}/ADC{nam}{wire}', (wire_type, {(row, col, f'ADC{nam}{wire}')}))[1].add((wrow, wcol, wire))
 
 
+#: `DIV_CTL` value -> the attribute-value code the die's own configuration
+#: tables carry for it, measured over the **complete** four-value axis
+#: (`evidence/adc/summary.md`, eight vendor runs).  A shortval entry is
+#: `code -> bits`, so a code is identified by the bits it moves and a
+#: parameter is only decoded once every one of its values has been built;
+#: three of the four values move bits and `DIV_CTL=0` measurably moves none.
+_ADC_DIV_CTL_CODES = {0: None, 1: 57, 2: 58, 3: 59}
+
+#: The lower-right block's two configuration tables.  The vendor writes both
+#: on every `ADCLRC` run, so both are emitted; they are unnamed in the `.fse`
+#: and are addressed by the index the parser gave them.
+_ADC_LRC_CONFIG_TABLES = ('unknown_137', 'unknown_138')
+
+
+def _adc_config_fuses(dev, row, col, tables=_ADC_LRC_CONFIG_TABLES):
+    """`{parameter: {value: {bits}}}` for one ADC site, or `{}` if unmeasured.
+
+    Only `DIV_CTL` is attributed: it is the one parameter of the block's
+    seventeen whose axis was swept.  The rest are deliberately absent so the
+    packer refuses them by name rather than emitting a guess (`D30`).
+    """
+    ttyp = dev.grid[row][col]
+    present = dev.shortval.get(ttyp, {})
+    if any(name not in present for name in tables):
+        return {}
+    div_ctl = {}
+    for value, code in _ADC_DIV_CTL_CODES.items():
+        bits = set()
+        for name in tables:
+            if code is not None:
+                bits.update(map(tuple, present[name].get((code, 0), ())))
+        div_ctl[value] = bits
+    return {'DIV_CTL': div_ctl}
+
+
 def _fse_create_adc_5a138(dev, dat):
     """The 138C's `ADCLRC` and `ADCULC`, from the located port tables.
 
@@ -2754,6 +2803,13 @@ def _fse_create_adc_5a138(dev, dat):
         for port, entry in block['outputs'].items():
             _adc_add_port(dev, name, row, col, portmap, port, entry,
                           'ADC_O', taps)
+        # Only the lower-right block's configuration tables were swept; the
+        # upper-left corner carries no table with those codes, so `ADCULC`
+        # gets no attribution and its parameters stay refused.
+        if name == 'ADCLRC':
+            config = _adc_config_fuses(dev, row, col)
+            if config:
+                adc['config'] = config
 
 
 
@@ -3385,7 +3441,7 @@ def fse_iologic(device, fse, ttyp):
     # `A` alone -- where GW1N/GW1NS spread it over two consecutive cells.  The
     # legal extent is therefore structural rather than fuzzed: every pad pair
     # that has both halves has the resource.
-    if is_GW5_family(device) and {'IOLOGICA', 'IOLOGICB'} <= bels.keys():
+    if has_gw5_io16(device) and {'IOLOGICA', 'IOLOGICB'} <= bels.keys():
         bels['OSER16'] = Bel()
         bels['IDES16'] = Bel()
     return bels
@@ -5928,6 +5984,32 @@ _gw5_oser16_ports = ('PCLK', 'FCLK', 'RESET') + tuple(f'D{i}' for i in range(16)
 _gw5_ides16_ports = ('PCLK', 'FCLK', 'RESET', 'CALIB') + tuple(f'Q{i}' for i in range(16))
 
 
+def gw5_displace_iologicb(dev, device):
+    """Send a `B` half's IOLOGIC fuses where its pad's already go.
+
+    MEASURED on the `GW5AST-138C`: the vendor's `OSER16` on the pad pair at
+    (108, 52) writes its `A` half into (108, 52)'s `IOLOGICA` table and its
+    `B` half into (108, 53)'s `IOLOGICB` table, while (108, 52)'s own
+    `IOLOGICB` table stays clear.  Without this a `B`-half gearbox is written
+    into the wrong tile with nothing to say so, which is what made that die's
+    whole `B` column unusable.
+
+    The other Arora V dice are deliberately untouched.  The same displacement
+    is plausible there -- the *pad's* offset is already family-wide -- but
+    plausible is not measured, and moving where a shipped device writes its
+    IOLOGIC fuses on the strength of a different die's bitstream is the
+    unverified change `D30` forbids.  One `OSER16` run per die settles it.
+    """
+    if not has_gw5_io16(device):
+        return
+    for row in range(dev.rows):
+        for col in range(dev.cols):
+            bels = dev[row, col].bels
+            pad, iologic = bels.get('IOBB'), bels.get('IOLOGICB')
+            if pad is not None and iologic is not None:
+                iologic.fuse_cell_offset = pad.fuse_cell_offset
+
+
 def gw5_io16_portmap(name, bel, tile):
     """Fill an Arora V `OSER16`/`IDES16` portmap from the pair's `A` half."""
     src = tile.bels['IOLOGICA'].portmap
@@ -6055,15 +6137,9 @@ def fill_GW5A_io_bels(dev):
         main_cell.bels['IOBB'].is_diff_p = False
         main_cell.bels['IOBB'].is_true_lvds = main_cell.bels['IOBA'].is_true_lvds
         main_cell.bels['IOBB'].fuse_cell_offset = off
-        # The `B` half's IOLOGIC fuses follow its pad's, into the same aux
-        # cell -- MEASURED (`P3.T16a`): the vendor's `OSER16` on the pad pair
-        # at (108, 52) writes its `A` half into (108, 52)'s `IOLOGICA` table
-        # and its `B` half into (108, 53)'s `IOLOGICB` table, and (108, 52)'s
-        # own `IOLOGICB` table stays clear.  Without this the packer would
-        # write a `B`-half gearbox into the wrong tile, which is why the die's
-        # `B` halves were unusable before this task.
-        if 'IOLOGICB' in main_cell.bels:
-            main_cell.bels['IOLOGICB'].fuse_cell_offset = off
+        # The `B` half's IOLOGIC fuses follow its pad's into the same aux
+        # cell, but only on the die that was measured -- `gw5_displace_iologicb`
+        # below, called from the device-aware pass.
         bels_to_remove.append(rc.bels)
 
     # top
@@ -7466,10 +7542,12 @@ def dat_portmap(dat, dev, device):
                         bel.portmap[port] = port
                         #dev.aliases[row, col, port] = alias
 
+    gw5_displace_iologicb(dev, device)
+
     # An Arora V 16-bit gearbox borrows the wires of the `IOLOGICA` in its own
     # cell, so its portmap can only be filled once every `IOLOGIC` portmap in
     # the grid is built -- a second pass, not another branch of the first.
-    if is_GW5_family(device):
+    if has_gw5_io16(device):
         for row in range(dev.rows):
             for col in range(dev.cols):
                 tile = dev[row, col]

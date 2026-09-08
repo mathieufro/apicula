@@ -92,7 +92,7 @@ class IoDes16BallsShape(IoShape):
     """One `IDES16` on a bank-5 ball of HCLK block 4, balls only."""
 
     name = "io_des16_balls"
-    primitive = "IDES16"
+    primitive = "OSER16 / IDES16"
     sweep_axis = "POINT"
     sweep_values = list(POINTS)
     baseline_value = BASELINE

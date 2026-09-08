@@ -745,6 +745,36 @@ def hclk_decode_completeness(db, device):
 # with iostd by default, e.g. from the clock fuzzer
 # With normal gowin_unpack io standard is determined first and it is known.
 # (bels, pips, clock_pips)
+def _adc_modes_from_config(db, row, col, tile):
+    """`{"PARM=value"}` for the ADC parameters this cell's bits carry.
+
+    The GW5AST-138C spends no fuse on a parameter left at its default, so an
+    empty result means "the bitstream says nothing about this block", not
+    "decoding failed".  Only parameters an actual sweep attributed are read;
+    the block's other fifteen have no table and the packer refuses to write
+    them.
+    """
+    config = db.extra_func.get((row, col), {}).get('adc', {}).get('config')
+    if not config:
+        return set()
+    modes = set()
+    for parm, values in config.items():
+        values = {value: {tuple(f) for f in fuses}
+                  for value, fuses in values.items()}
+        # One value's fuses can be a subset of another's -- `DIV_CTL` 1 and 2
+        # share a bit -- so the decoded value is the one whose fuse set is
+        # exactly the set of this parameter's bits the tile carries, never
+        # merely a subset of them.
+        present = {bit for fuses in values.values() for bit in fuses
+                   if tile[bit[0]][bit[1]]}
+        if not present:
+            continue
+        exact = [value for value, fuses in values.items() if fuses == present]
+        if len(exact) == 1:
+            modes.add(f'{parm}={exact[0]}')
+    return modes
+
+
 def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
     if not _bank_fuse_tables:
         # create bank fuse table
@@ -776,8 +806,19 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
     bels = {}
     for name, bel in tiledata.bels.items():
         if name.startswith("ADC"):
-            attrvals = parse_attrvals(tile, db.rev_logicinfo('ADC'), db.shortval[tiledata.ttyp]['ADC'], attrids.adc_attrids, "ADC")
-            #print(row, col, name, tiledata.ttyp, attrvals)
+            # A die may carry an ADC bel and no ADC attribute table: the
+            # GW5AST-138C's two blocks are located by their port tables and
+            # its `.fse` declares no `ADC` `logicinfo`/`shortval` pair at all.
+            # What that die does carry is a per-parameter attribution measured
+            # from the vendor's own bitstreams, and a parameter left at its
+            # default measurably costs no fuse -- so an all-default block is
+            # decoded as absent, which is what the bitstream says.
+            modes = _adc_modes_from_config(db, row, col, tile)
+            if modes:
+                bels[name] = modes
+            elif ('ADC' in db.logicinfo
+                    and 'ADC' in db.shortval.get(tiledata.ttyp, {})):
+                attrvals = parse_attrvals(tile, db.rev_logicinfo('ADC'), db.shortval[tiledata.ttyp]['ADC'], attrids.adc_attrids, "ADC")
         if name.startswith("RPLL"):
             idx = _pll_cells.setdefault(get_pll_A(db, row, col, name[4]), len(_pll_cells))
             modes = { f'DEVICE="{_device}"' }
