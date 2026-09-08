@@ -3269,6 +3269,18 @@ def fse_iologic(device, fse, ttyp):
     if device in {'GW1N-9', 'GW1N-9C'} and ttyp in {52, 66, 63, 91, 92}:
             bels['OSER16'] = Bel()
             bels['IDES16'] = Bel()
+    # The Arora V families keep both 16-bit gearboxes -- MEASURED on the
+    # GW5AST-138C, one vendor run per primitive, `gw_sh` exit 0 and the PnR
+    # resource report naming what it built (`--OSER16 1`, `--IDES16 1`).  They
+    # do not, however, use the pre-5A geometry: a GW5A `IOLOGIC` already has
+    # sixteen `D` and sixteen `Q` fabric wires, so a 16-bit gearbox fits inside
+    # ONE pad pair -- `OSER16` in the pair's `A` and `B` halves, `IDES16` in
+    # `A` alone -- where GW1N/GW1NS spread it over two consecutive cells.  The
+    # legal extent is therefore structural rather than fuzzed: every pad pair
+    # that has both halves has the resource.
+    if is_GW5_family(device) and {'IOLOGICA', 'IOLOGICB'} <= bels.keys():
+        bels['OSER16'] = Bel()
+        bels['IDES16'] = Bel()
     return bels
 
 # create clock aliases
@@ -4378,6 +4390,12 @@ def fse_create_io16(dev, device):
     # emitting an unverified fuse (`GW5A._refuse_io16`, `D30`).
 
     df = dev.extra_func
+    if is_GW5_family(device):
+        # The Arora V marker is written by `dat_portmap`, which is the first
+        # point at which a cell's gearbox is known to be real: the pad-pair
+        # move that follows this function strips the bels of every aux cell,
+        # so a marker written here would outlive the bel it names.
+        return
     if device in {'GW1N-9', 'GW1N-9C'}:
         for i in chain(range(1, 8, 2), range(10, 17, 2), range(20, 35, 2), range(38, 45, 2)):
             df.setdefault((0, i), {})['io16'] = {'role': 'MAIN', 'pair': (0, 1)}
@@ -5790,6 +5808,32 @@ _iologic_outputs = [(0, 'Q'),  (1, 'Q0'), (2, 'Q1'), (3, 'Q2'), (4, 'Q3'), (5, '
                     (6, 'Q5'), (7, 'Q6'), (8, 'Q7'), (9, 'Q8'), (10, 'Q9'), (11, 'Q10'),
                     (12, 'Q11'), (13, 'Q12'), (14, 'Q13'), (15, 'Q14'), (16, 'Q15'),
                     (17, 'DO'), (18, 'DF'), (19, 'LAG'), (20, 'LEAD'), (21, 'DAO')]
+#: The ports an Arora V 16-bit gearbox takes from the pad pair's `A` half.
+#: A GW5A `IOLOGIC` carries `D0`-`D15` and `Q0`-`Q15` already (`P3.T22`), so
+#: the gearbox bel is a *selection* from the `IOLOGICA` portmap rather than a
+#: table of its own -- there is no second cell whose wires it would have to
+#: name.
+#: `OSER16.Q` and `IDES16.D` are absent on purpose: they are the pad
+#: connection, which the packer wires internally and disconnects, and on this
+#: die they alias the same IOLOGIC wire as `D0`/`F6` -- giving the bel two pins
+#: on one wire for a port no design ever routes.
+_gw5_oser16_ports = ('PCLK', 'FCLK', 'RESET') + tuple(f'D{i}' for i in range(16))
+_gw5_ides16_ports = ('PCLK', 'FCLK', 'RESET', 'CALIB') + tuple(f'Q{i}' for i in range(16))
+
+
+def gw5_io16_portmap(name, bel, tile):
+    """Fill an Arora V `OSER16`/`IDES16` portmap from the pair's `A` half."""
+    src = tile.bels['IOLOGICA'].portmap
+    if not src:
+        raise Exception(
+            f"{name}: the IOLOGICA portmap of the same cell must be built "
+            f"first -- the 16-bit gearbox has no wires of its own")
+    wanted = _gw5_oser16_ports if name == 'OSER16' else _gw5_ides16_ports
+    for port in wanted:
+        if port in src:
+            bel.portmap[port] = src[port]
+
+
 _oser16_inputs =  [(19, 'PCLK'), (20, 'FCLK'), (25, 'RESET')]
 _oser16_fixed_inputs = {'D0': 'A0', 'D1': 'A1', 'D2': 'A2', 'D3': 'A3', 'D4': 'C1',
                         'D5': 'C0', 'D6': 'D1', 'D7': 'D0', 'D8': 'C3', 'D9': 'C2',
@@ -5904,6 +5948,15 @@ def fill_GW5A_io_bels(dev):
         main_cell.bels['IOBB'].is_diff_p = False
         main_cell.bels['IOBB'].is_true_lvds = main_cell.bels['IOBA'].is_true_lvds
         main_cell.bels['IOBB'].fuse_cell_offset = off
+        # The `B` half's IOLOGIC fuses follow its pad's, into the same aux
+        # cell -- MEASURED (`P3.T16a`): the vendor's `OSER16` on the pad pair
+        # at (108, 52) writes its `A` half into (108, 52)'s `IOLOGICA` table
+        # and its `B` half into (108, 53)'s `IOLOGICB` table, and (108, 52)'s
+        # own `IOLOGICB` table stays clear.  Without this the packer would
+        # write a `B`-half gearbox into the wrong tile, which is why the die's
+        # `B` halves were unusable before this task.
+        if 'IOLOGICB' in main_cell.bels:
+            main_cell.bels['IOLOGICB'].fuse_cell_offset = off
         bels_to_remove.append(rc.bels)
 
     # top
@@ -6141,7 +6194,9 @@ def dat_portmap(dat, dev, device):
                                         add_node(dev, node_name, "IO_I", row + r_off, col + c_off, node_wire)
                                     bel.portmap[f'D{int(nam[-1]) + 8}'] = wire
 
-                elif name.startswith("OSER16"):
+                # The Arora V geometry is different and its portmap is built in a
+                # second pass below, once every IOLOGIC portmap exists.
+                elif name.startswith("OSER16") and not is_GW5_family(device):
                     for idx, nam in _oser16_inputs:
                         w_idx = dat.portmap[f'IologicAIn'][idx]
                         if w_idx >= 0:
@@ -6154,7 +6209,9 @@ def dat_portmap(dat, dev, device):
                         if w_idx >= 0:
                             bel.portmap[nam] = wnames.wirenames[w_idx]
                     bel.portmap.update(_oser16_fixed_inputs)
-                elif name.startswith("IDES16"):
+                # The Arora V geometry is different and its portmap is built in a
+                # second pass below, once every IOLOGIC portmap exists.
+                elif name.startswith("IDES16") and not is_GW5_family(device):
                     for idx, nam in _ides16_inputs:
                         w_idx = dat.portmap[f'IologicAIn'][idx]
                         if w_idx >= 0:
@@ -7301,6 +7358,32 @@ def dat_portmap(dat, dev, device):
                     for port, alias in aliases.items():
                         bel.portmap[port] = port
                         #dev.aliases[row, col, port] = alias
+
+    # An Arora V 16-bit gearbox borrows the wires of the `IOLOGICA` in its own
+    # cell, so its portmap can only be filled once every `IOLOGIC` portmap in
+    # the grid is built -- a second pass, not another branch of the first.
+    if is_GW5_family(device):
+        for row in range(dev.rows):
+            for col in range(dev.cols):
+                tile = dev[row, col]
+                if 'OSER16' not in tile.bels:
+                    continue
+                # A cell can carry both IOLOGIC fuse tables and still have no
+                # pad pair to serialise onto -- its IOLOGIC portmap is then
+                # empty, because `dat_portmap` builds one only where `IOBB`
+                # is.  Such a cell has no gearbox, so it loses the bels and
+                # the `io16` marker rather than getting a portmap of nothing.
+                if not tile.bels['IOLOGICA'].portmap:
+                    del tile.bels['OSER16'], tile.bels['IDES16']
+                    continue
+                for name in ('OSER16', 'IDES16'):
+                    gw5_io16_portmap(name, tile.bels[name], tile)
+                # `pair` is (0, 0) and that is the fact, not a placeholder:
+                # the aux half is the SAME cell's `IOLOGICB`, so there is no
+                # neighbouring cell to offset to.  `aux` names it so a packer
+                # can tell this geometry from the pre-5A one.
+                dev.extra_func.setdefault((row, col), {})['io16'] = {
+                    'role': 'MAIN', 'pair': (0, 0), 'aux': 'IOLOGICB'}
 
 def tile_bitmap_holes(dev, bitmap, calc_size_func, empty = False):
     """ The GW5AT-60B grid description includes rows with cells of varying

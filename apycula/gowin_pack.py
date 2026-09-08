@@ -660,6 +660,20 @@ class ChipDB:
             val = attrids.iologic_attrvals[val]
         add_attr_val(self.db, 'IOLOGIC', av, attrids.iologic_attrids[attrval.attr], val)
 
+    def get_iologic_fuse_cell(self, x: int, y: int, idx_str: str) -> Coord:
+        """ The cell one IOLOGIC half's fuses are written into.
+
+        On the Arora V families a pad pair's `B` half lives in the next cell
+        even though `nextpnr` sees one, and its IOLOGIC fuses follow its pad's
+        (`chipdb` `fuse_cell_offset`).  Everywhere else this is the cell
+        itself.
+        """
+        bel = self.get_tiledata(x, y).bels.get(f'IOLOGIC{idx_str}')
+        off = bel.fuse_cell_offset if bel is not None else None
+        if idx_str != 'B' or not off:
+            return (x, y)
+        return (x + off[1], y + off[0])
+
     def get_iologic_fuses(self, x: int, y: int, av: set[tuple[int, int]], idx_str: str) -> set[Coord]:
         return get_shortval_fuses(self.db, self.get_ttyp(x, y), av, f'IOLOGIC{idx_str}')
 
@@ -2314,6 +2328,12 @@ class Device:
             attr_vals.append(AttrVal('CLKIDDRMUX_ECLK', 'ECLK0'))
         return attr_vals
 
+    def iologic_fuse_bits(self, bel: IologicBelDesc, av: set[tuple[int, int]]) -> list[CellFuseBits]:
+        """ The fuses of one IOLOGIC half, in the cell that holds them. """
+        x, y = self.chipdb.get_iologic_fuse_cell(bel.x, bel.y, bel.idx_str)
+        bits = self.chipdb.get_iologic_fuses(x, y, av, bel.idx_str)
+        return [CellFuseBits(x, y, bits)] if bits else []
+
     def set_iologic_attrvals(self, bel: IologicBelDesc, attr_vals: list[AttrVal]) -> set[int]:
         av = set()
         for attr_val in attr_vals:
@@ -2330,11 +2350,7 @@ class Device:
         attr_vals += self.get_out_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def common_in_iologic_handler(self, bel: IologicBelDesc) -> list[CellFuseBits]:
         iol_bel = self.make_IologicBelDesc(bel)
@@ -2343,11 +2359,7 @@ class Device:
         attr_vals += self.get_in_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
 
     def get_ODDR_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
@@ -2356,11 +2368,7 @@ class Device:
         attr_vals += self.get_out_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_ODDRC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         return self.get_ODDR_fuses(bel)
@@ -2383,11 +2391,7 @@ class Device:
         attr_vals += self.get_in_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IDDRC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         return self.get_IDDR_fuses(bel)
@@ -2414,33 +2418,21 @@ class Device:
             attr_vals += self.get_in_iologic_attrs(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IOLOGICI_EMPTY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         iol_bel = self.make_IologicBelDesc(bel)
         attr_vals = self.common_iologic_handler(iol_bel)
 
         av = self.set_iologic_attrvals(iol_bel, attr_vals)
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IOLOGICO_EMPTY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         iol_bel = self.make_IologicBelDesc(bel)
         attr_vals = self.common_iologic_handler(iol_bel)
 
-
-        fuses = []
-        bits = self.chipdb.get_iologic_fuses(iol_bel.x, iol_bel.y, av, iol_bel.idx_str)
-        if bits:
-            fuses.append(CellFuseBits(iol_bel.x, iol_bel.y, bits))
-        return fuses
+        av = self.set_iologic_attrvals(iol_bel, attr_vals)
+        return self.iologic_fuse_bits(iol_bel, av)
 
     def get_IOLOGIC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
         self.error_not_supported_cell_type(bel)
@@ -5340,37 +5332,18 @@ DYN_SELECT_ATTRS = (
 
 class GW5A(Device):
     """ GW5A series """
-    #: The 16-bit gearboxes, named in the refusal rather than left to the
-    #: generic "Not supported cell type" (`V16`).
-    _IO16_MEASURED = {
-        'OSER16': 'two IOLOGIC cells (the A+B pad pair)',
-        'IDES16': 'one IOLOGIC cell',
-    }
+    def get_IOLOGIC_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ The `IOLOGIC` half a 16-bit gearbox is decomposed into.
 
-    def _refuse_io16(self, bel: BelDesc) -> list[CellFuseBits]:
-        """Refuse a 16-bit gearbox by name, and say why it is a gap not a limit.
-
-        `P3.T16` put one `OSER16` and one `IDES16` design through `gw_sh` on
-        the GW5AST-138C: both built with zero errors, and the vendor's PnR
-        resource report names the primitive it realised. So the silicon has
-        both, and a refusal saying the *device* does not support them would be
-        false. What is missing is here: the chipdb creates no `OSER16`/`IDES16`
-        bel for a GW5A device and there is no measured fuse set for either, so
-        emitting a plausible one would produce a wrong bitstream with no error
-        (`D30`).
+        `nextpnr` presents `OSER16`/`IDES16` as ordinary `IOLOGIC` cells so
+        the fuse path is the gearbox path already measured for `OSER4`-`10`
+        and `IDES4`-`10`; the direction is read off the parameter the packer
+        wrote, exactly as the GW1N devices do it.
         """
-        typ = bel.cell.typ
-        raise PackRefused(
-            f"{typ} is not implemented on {self.device_name}: the vendor "
-            f"builds it on this device, using {self._IO16_MEASURED[typ]} "
-            "(P3.T16), but apicula has no bel and no measured fuse set for "
-            "it. Refusing rather than emitting an unverified fuse.")
-
-    def get_OSER16_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        return self._refuse_io16(bel)
-
-    def get_IDES16_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
-        return self._refuse_io16(bel)
+        mod_bel = self.make_IologicBelDesc(bel)
+        if 'OUTMODE' in bel.cell.parms:
+            return self.common_out_iologic_handler(mod_bel)
+        return self.common_in_iologic_handler(mod_bel)
 
     #: What the vendor measured about each hard block this device model does
     #: not carry yet, so the refusal can say which fact it is refusing on.
@@ -7307,7 +7280,27 @@ class GW5AST_138C(GW5A):
         `FCLK` unselected -- the two-bit gap `P3.T13` measured.
         """
         return (super().get_out_iologic_attrs(bel)
-                + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2'))
+                + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
+                + self.oser16_aux_attrs(bel))
+
+    @staticmethod
+    def oser16_aux_attrs(bel: IologicBelDesc) -> list[AttrVal]:
+        """ The one attribute the `B` half of an `OSER16` adds on this die.
+
+        MEASURED (`P3.T16a`, the vendor's `OSER16` at the pad pair (108, 52)):
+        the aux half carries `OCLKCE=CE` on top of the `DDRENABLE`/`ISI` pair
+        the pre-5A model already emits, and the main half does not.  It is the
+        only attribute of the pair the generic handler misses.
+        """
+        if bel.cell.parms.get('OUTMODE') != 'DDRENABLE16':
+            return []
+        return [AttrVal('OCLKCE', 'CE')]
+
+    #: The `INMODE` parameter `nextpnr` writes for a 16:1 input gearbox, and
+    #: the value id this die spends on it.  MEASURED (`P3.T16a`): `IDES16`
+    #: differs from `IDES4`/`IDES8`/`IDES10` in this one attribute value and
+    #: in nothing else, and the value has no name in any shipped table.
+    _INMODE_ALIASES = {'IDDRX16': 'UNK105'}
 
     def get_in_iologic_attrs(self, bel: IologicBelDesc) -> list[AttrVal]:
         """ The reset multiplexer of an IDDRC is inverting on this die.
@@ -7318,7 +7311,10 @@ class GW5AST_138C(GW5A):
         generic set misses and SIG one it sets in its place, so the two
         bitstreams differ by two bits in exactly this attribute.
         """
-        attr_vals = super().get_in_iologic_attrs(bel)
+        attr_vals = [AttrVal(av.attr, self._INMODE_ALIASES[av.val])
+                     if av.attr == 'INMODE' and av.val in self._INMODE_ALIASES
+                     else av
+                     for av in super().get_in_iologic_attrs(bel)]
         if bel.cell.typ not in {'IDDR', 'IDDRC'} or bel.cell.typ == 'IDDR':
             return attr_vals
         return [AttrVal('LSRMUX_LSR', 'INV') if av.attr == 'LSRMUX_LSR' else av

@@ -408,8 +408,27 @@ _iologic_mode = {
 # table leaves unnamed -- so an `IDES8` was recovered from no bitstream at all.
 # Only the input direction is aliased: the same id in `OUTMODE` is not this
 # mode and must keep failing to resolve rather than acquire a wrong name.
+def io16_bels(tiledata, name, mode):
+    """The bels a decoded gearbox belongs to.
+
+    A 16-bit gearbox has a bel of its own where the device gives it one -- the
+    Arora V families, where it occupies a whole pad pair -- *and* it is the
+    mode of the `IOLOGIC` half whose fuse table carries it.  Both are true of
+    the same bits, and a placement can name either, so the decode reports both
+    rather than picking one and leaving the other unrecoverable.  Every other
+    mode, and every device without the bel, yields the `IOLOGIC` name alone.
+    """
+    if mode in {'OSER16', 'IDES16'} and mode in tiledata.bels:
+        return (name, mode)
+    return (name,)
+
+
 _iologic_inmode_alias = {
         'UNK76': 'IDES8',
+        # The Arora V 16:1 input mode (`P3.T16a`).  The die spends a value id
+        # of its own on it -- not the pre-5A `IDDRX8`, which `OSER16` reuses
+        # in the other direction -- and no shipped table names it.
+        'UNK105': 'IDES16',
         }
 
 # `OUTMODE` ids whose shipped name is not the mode the GW5A writes there.
@@ -834,7 +853,15 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
             continue
         if name.startswith("IOLOGIC"):
             idx = name[-1]
-            attrvals = parse_attrvals(tile, db.rev_logicinfo('IOLOGIC'), db.shortval[tiledata.ttyp][f'IOLOGIC{idx}'], attrids.iologic_attrids, "IOLOGIC")
+            # A `B` half whose pad lives in an aux cell keeps its IOLOGIC
+            # fuses there too (`chipdb` `fuse_cell_offset`), so the table and
+            # the bitmap both come from that cell, not from this one.
+            iol_tile, iol_ttyp = tile, tiledata.ttyp
+            iol_off = tiledata.bels[name].fuse_cell_offset
+            if idx == 'B' and iol_off:
+                iol_ttyp = db[row + iol_off[0], col + iol_off[1]].ttyp
+                iol_tile = bm[row + iol_off[0], col + iol_off[1]]
+            attrvals = parse_attrvals(iol_tile, db.rev_logicinfo('IOLOGIC'), db.shortval[iol_ttyp][f'IOLOGIC{idx}'], attrids.iologic_attrids, "IOLOGIC")
             if not attrvals:
                 continue
             #print_sorted_dict(f'{row}, {col}, {name}, {idx}, {tiledata.ttyp} - ', attrvals)
@@ -862,7 +889,8 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 out_mode = (_iologic_mode.get(out_val)
                             or _iologic_outmode_alias.get(out_val))
                 if out_mode is not None:
-                    bels.setdefault(name, set()).add(f"MODE={out_mode}")
+                    for bel_name in io16_bels(tiledata, name, out_mode):
+                        bels.setdefault(bel_name, set()).add(f"MODE={out_mode}")
             elif 'INMODE' in attrvals.keys():
                 if attrvals['INMODE'] in {attrids.iologic_attrvals['MIDDRX1'], attrids.iologic_attrvals['IDDRX1']}:
                     if 'LSRIMUX_0' in attrvals.keys():
@@ -878,7 +906,8 @@ def parse_tile_(db, row, col, tile, bm=None, default=True, noiostd = True):
                 if in_mode is not None:
                     if in_mode == 'OVIDEO':
                         in_mode = 'IVIDEO'
-                    bels.setdefault(name, set()).add(f"MODE={in_mode}")
+                    for bel_name in io16_bels(tiledata, name, in_mode):
+                        bels.setdefault(bel_name, set()).add(f"MODE={in_mode}")
             else:
                 continue
             if 'CLKODDRMUX_ECLK' in attrvals.keys():

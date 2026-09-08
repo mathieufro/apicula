@@ -1863,6 +1863,10 @@ iologic_attrvals = {
         'CE':                  91,
         'HCLK1_':              93,
         'UNK102':             102,
+        # The Arora V 16:1 input gearbox mode.  MEASURED (`P3.T16a`): the
+        # vendor's IDES16 sets INMODE to this value id and nothing else
+        # changes; it has no name in any shipped table, like UNK76 above.
+        'UNK105':             105,
         'TRUE':               107,
         'HCLK2_':             114,
         'HCLK3_':             115,
