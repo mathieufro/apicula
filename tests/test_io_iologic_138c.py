@@ -686,3 +686,56 @@ def test_gw5ast138c_out_iologic_selects_nothing_without_an_hclk():
     bel = _iologic_bel("OSER4", {"OUTMODE": "ODDRX2"})
     emitted = {av.attr for av in device.get_out_iologic_attrs(bel)}
     assert not emitted & {"WRFCLKSEL", "FCLKSEL1", "FCLKSEL2"}
+
+
+def _dummy_bel(outmode):
+    """The `IOLOGIC_DUMMY` cell `nextpnr` places on the aux half of a gearbox."""
+    class _Cell:
+        pass
+
+    class _Bel:
+        pass
+
+    cell = _Cell()
+    cell.typ = "IOLOGIC_DUMMY"
+    cell.parms = {"OUTMODE": outmode}
+    cell.attrs = {}
+    bel = _Bel()
+    bel.cell = cell
+    return bel
+
+
+def test_narrow_output_gearbox_aux_half_costs_no_fuse_on_138c():
+    """`OSER8`/`OSER10`/`OVIDEO` leave the aux cell clear, as the vendor does.
+
+    MEASURED (`P3.F3`): the vendor's `OSER8` at the pad pair (108, 52) writes
+    nothing into the aux cell's `IOLOGICB`, while the pre-5A model wrote five
+    fuses there.
+    """
+    from apycula.gowin_pack import GW5AST_138C
+
+    device = object.__new__(GW5AST_138C)
+    assert device.get_IOLOGIC_DUMMY_fuses(_dummy_bel("DDRENABLE")) == []
+
+
+def test_io16_aux_half_still_configures_on_138c():
+    """The 16:1 gearbox is the exception: its aux half is really configured.
+
+    MEASURED (`P3.T16a`): the vendor's `OSER16` sets six bits in the aux
+    cell, so `DDRENABLE16` must keep reaching the base handler.
+    """
+    from apycula.gowin_pack import GW5A, GW5AST_138C
+
+    sentinel = object()
+    device = object.__new__(GW5AST_138C)
+    own = "get_IOLOGIC_DUMMY_fuses" in vars(GW5A)
+    original = vars(GW5A).get("get_IOLOGIC_DUMMY_fuses")
+    GW5A.get_IOLOGIC_DUMMY_fuses = lambda self, bel: sentinel
+    try:
+        reached = device.get_IOLOGIC_DUMMY_fuses(_dummy_bel("DDRENABLE16"))
+    finally:
+        if own:
+            GW5A.get_IOLOGIC_DUMMY_fuses = original
+        else:
+            del GW5A.get_IOLOGIC_DUMMY_fuses
+    assert reached is sentinel

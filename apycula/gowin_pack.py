@@ -7338,6 +7338,26 @@ class GW5AST_138C(GW5A):
                 + self.fclk_select_attrs(bel, 'FCLKSEL1', 'FCLKSEL2')
                 + self.oser16_aux_attrs(bel))
 
+    def get_IOLOGIC_DUMMY_fuses(self, bel: BelDesc) -> list[CellFuseBits]:
+        """ The aux half of a narrow output gearbox costs this die no fuse.
+
+        MEASURED (`P3.F3`, the vendor's `OSER8`, `OSER10` and `OVIDEO` at the
+        pad pair (108, 52)): the vendor leaves the aux cell's `IOLOGICB`
+        completely clear, while the pre-5A model writes `OUTMODE=DDRENABLE`,
+        `ISI`, `CLKOMUX` and the `FCLK` selection into it -- five fuses the
+        shipped device does not spend.  The over-emission was invisible until
+        `IOLOGICB` inherited `IOBB`'s `fuse_cell_offset`, because until then
+        those attributes landed in the pad cell's own three-coordinate stub,
+        which can hold almost none of them.
+
+        The 16:1 gearbox is the exception and keeps its attributes: there the
+        vendor really does configure the aux half (`OSER16`, six bits,
+        `P3.T16a`), and it arrives here as `DDRENABLE16`.
+        """
+        if bel.cell.parms.get('OUTMODE') == 'DDRENABLE':
+            return []
+        return super().get_IOLOGIC_DUMMY_fuses(bel)
+
     @staticmethod
     def oser16_aux_attrs(bel: IologicBelDesc) -> list[AttrVal]:
         """ The one attribute the `B` half of an `OSER16` adds on this die.
