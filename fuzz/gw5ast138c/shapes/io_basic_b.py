@@ -91,7 +91,10 @@ class IoBasicBShape(IoShape):
     """`ODDRC` in the `B` half of a pad pair, clocked from the board clock."""
 
     name = "io_basic_b"
-    primitive = "ODDRC (B half)"
+    #: The table row this shape's evidence joins to.  The point is an
+    #: `ODDRC` on the `B` half; the row it belongs to is the `ODDR / IDDR`
+    #: one, and the ball and half are carried in `sweep`, not in the id.
+    primitive = "ODDR / IDDR"
     sweep_axis = "POINT"
     sweep_values = list(POINTS)
     baseline_value = BASELINE

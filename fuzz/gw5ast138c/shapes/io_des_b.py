@@ -27,7 +27,9 @@ class IoDesBShape(IoDesShape):
     """`io_des`'s `IDES4` point, moved to the `B` half of a pad pair."""
 
     name = "io_des_b"
-    primitive = "IDES4 (B half)"
+    #: The table row this shape's evidence joins to (`IDES4` on the `B`
+    #: half); the half is carried in `sweep`, not in the row id.
+    primitive = "IDES4 / IDES8 / IDES10"
     sweep_values = [BASELINE]
     baseline_value = BASELINE
     ports = dict(

@@ -31,7 +31,9 @@ class IoSerBShape(IoSerShape):
     """`io_ser`'s `OSER4` point, moved to the `B` half of a pad pair."""
 
     name = "io_ser_b"
-    primitive = "OSER4 (B half)"
+    #: The table row this shape's evidence joins to (`OSER4` on the `B`
+    #: half); the half is carried in `sweep`, not in the row id.
+    primitive = "OSER4 / OSER8 / OSER10 / OVIDEO"
     sweep_values = [BASELINE]
     baseline_value = BASELINE
     ports = {
